@@ -1,0 +1,27 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1787935492718,
+      "tag": "0000_skinny_photon",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1787935800000,
+      "tag": "0001_ean_supplier_constraints",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1787936100000,
+      "tag": "0002_product_images",
+      "breakpoints": true
+    }
+  ]
+}

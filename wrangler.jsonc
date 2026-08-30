@@ -1,0 +1,61 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "mdtech-loja",
+
+  // Main entry point — custom worker that wraps OpenNext and adds scheduled handler
+  // The custom-worker.ts is compiled alongside .open-next/worker.js
+  "main": "custom-worker.ts",
+
+  // Required for Node.js API compatibility (pg, crypto, buffer, etc.)
+  "compatibility_flags": ["nodejs_compat"],
+
+  // Use a recent compatibility date for best process.env support
+  "compatibility_date": "2025-04-01",
+
+  // Static assets binding
+  "assets": {
+    "directory": ".open-next/assets",
+    "binding": "ASSETS"
+  },
+
+  // Hyperdrive binding for Neon PostgreSQL
+  // Replace <YOUR_HYPERDRIVE_ID> with the actual ID after running:
+  //   npx wrangler hyperdrive create mdtech-neon-db --connection-string="postgres://USER:PASS@HOST/DB"
+  "hyperdrive": [
+    {
+      "binding": "HYPERDRIVE",
+      "id": "<YOUR_HYPERDRIVE_ID>",
+      // For local development, connect directly to your local or Neon PostgreSQL
+      "localConnectionString": "postgresql://postgres:postgres@127.0.0.1:5432/app_db"
+    }
+  ],
+
+  // Environment variables (non-secret)
+  "vars": {
+    "NODE_ENV": "production"
+  },
+
+  // R2 bucket for product images
+  // Create with: npx wrangler r2 bucket create mdtech-product-images
+  "r2_buckets": [
+    {
+      "binding": "PRODUCT_IMAGES",
+      "bucket_name": "mdtech-product-images"
+    }
+  ],
+
+  // Observability
+  "observability": {
+    "enabled": true
+  },
+
+  // Cron Trigger — expire pending order reservations every 10 minutes
+  "triggers": {
+    "crons": ["*/10 * * * *"]
+  }
+
+  // SECRETS (set via `wrangler secret put`):
+  // - JWT_SECRET
+  // - CRON_SECRET (optional, defaults to JWT_SECRET)
+  // These are NOT placed in this file for security.
+}
