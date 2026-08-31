@@ -3,12 +3,23 @@ import { db } from "@/db";
 import { users } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import { hashPassword, createToken } from "@/lib/auth";
+import { checkRateLimit, clientIp, rateLimitResponse } from "@/lib/rate-limit";
+import { csrfGuard } from "@/lib/csrf";
 
 export async function POST(req: NextRequest) {
+  // P1 guards: same-origin (CSRF) + rate limit per IP + password policy
+  const csrf = csrfGuard(req);
+  if (csrf) return csrf;
+  const ipLimit = await checkRateLimit(`register:ip:${clientIp(req)}`, { limit: 5, windowSeconds: 60 * 60 });
+  if (!ipLimit.allowed) return rateLimitResponse(ipLimit.retryAfterSeconds);
+
   try {
     const { email, password, name, phone, nif } = await req.json();
     if (!email || !password || !name) {
       return NextResponse.json({ error: "Campos obrigatórios em falta" }, { status: 400 });
+    }
+    if (typeof password !== "string" || password.length < 8 || password.length > 128) {
+      return NextResponse.json({ error: "A password deve ter entre 8 e 128 caracteres" }, { status: 400 });
     }
     const [existing] = await db.select().from(users).where(eq(users.email, email)).limit(1);
     if (existing) {
