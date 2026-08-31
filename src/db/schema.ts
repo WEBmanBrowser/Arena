@@ -517,3 +517,152 @@ export const RMA_STATUSES = [
   "refund", "completed", "cancelled",
 ] as const;
 export type RmaStatus = (typeof RMA_STATUSES)[number];
+
+// ─────────────────────────────────────────────────────────
+// B.3.1 — INTEGRATION FOUNDATIONS
+//
+// Durable persistence required by future external providers
+// (Eupago payments, MRW/CTT shipping, XD Software invoicing).
+//
+// NOT persisted here, by design:
+//  • provider registry/allowlist + capabilities → TypeScript
+//    (src/lib/providers/registry.ts) — no runtime/admin-managed provider
+//    configuration exists, so a DB table would only mirror code.
+//  • normalized provider errors → TypeScript ProviderError
+//    (src/lib/providers/errors.ts) + existing audit_logs/application logging.
+//  • provider credentials/secrets → environment / Cloudflare secrets. NEVER DB.
+// ─────────────────────────────────────────────────────────
+
+// ─── B.3.1: PROVIDER WEBHOOK EVENTS (idempotency ledger) ──
+// Stores only identifiers, a payload hash and processing metadata.
+// Raw provider payloads, headers, credentials and card data are NEVER stored.
+export const providerWebhookEvents = pgTable("provider_webhook_events", {
+  id: serial("id").primaryKey(),
+  provider: varchar("provider", { length: 50 }).notNull(),
+  /** Stable provider event id when available; NULL forces payload-hash dedup. */
+  providerEventId: varchar("provider_event_id", { length: 255 }),
+  /** sha256 hex of the raw body — the body itself is never persisted. */
+  payloadHash: varchar("payload_hash", { length: 64 }).notNull(),
+  eventType: varchar("event_type", { length: 100 }),
+  status: varchar("status", { length: 50 }).notNull().default("pending"),
+  attempts: integer("attempts").notNull().default(0),
+  /** Minimal sanitized metadata (no payloads, no secrets). */
+  metadata: jsonb("metadata").$type<Record<string, string | number | boolean>>(),
+  /** Sanitized error message for controlled retry/diagnostics. */
+  lastError: text("last_error"),
+  receivedAt: timestamp("received_at").notNull().defaultNow(),
+  processedAt: timestamp("processed_at"),
+  failedAt: timestamp("failed_at"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+}, (t) => [
+  index("pwe_provider_idx").on(t.provider),
+  index("pwe_status_idx").on(t.status),
+  // Primary dedup: stable provider event id, scoped per provider.
+  // Partial index because PostgreSQL treats NULLs as distinct.
+  uniqueIndex("pwe_provider_event_unique").on(t.provider, t.providerEventId)
+    .where(sql`provider_event_id IS NOT NULL`),
+  // Fallback dedup when the provider gives no stable event id.
+  uniqueIndex("pwe_provider_payload_hash_unique").on(t.provider, t.payloadHash)
+    .where(sql`provider_event_id IS NULL`),
+]);
+
+// ─── B.3.1: PAYMENT ATTEMPTS (multi-attempt history) ──────
+// One order may have MANY external payment attempts. Rows are append-only:
+// a new attempt NEVER overwrites a previous one.
+// Payment status is NOT order status — the Phase A centralized order
+// lifecycle remains the single authority over orders.status.
+export const paymentAttempts = pgTable("payment_attempts", {
+  id: serial("id").primaryKey(),
+  orderId: integer("order_id").notNull().references(() => orders.id),
+  provider: varchar("provider", { length: 50 }).notNull(),
+  /** multibanco | mbway | card | … (provider payment method) */
+  method: varchar("method", { length: 50 }).notNull(),
+  status: varchar("status", { length: 50 }).notNull().default("pending"),
+  providerReference: varchar("provider_reference", { length: 255 }),
+  /** Canonical integer cents — no floating point at the provider boundary. */
+  amountCents: integer("amount_cents").notNull(),
+  currency: varchar("currency", { length: 3 }).notNull().default("EUR"),
+  /** Sanitized failure reason (never raw provider payloads). */
+  failureReason: varchar("failure_reason", { length: 255 }),
+  expiresAt: timestamp("expires_at"),
+  completedAt: timestamp("completed_at"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+}, (t) => [
+  index("pa_order_idx").on(t.orderId),
+  index("pa_status_idx").on(t.status),
+  uniqueIndex("pa_provider_reference_unique").on(t.provider, t.providerReference)
+    .where(sql`provider_reference IS NOT NULL`),
+]);
+
+// ─── B.3.1: SHIPMENTS (external carrier synchronization) ──
+// Store pickup is INTERNAL and never represented here.
+export const shipments = pgTable("shipments", {
+  id: serial("id").primaryKey(),
+  orderId: integer("order_id").notNull().references(() => orders.id),
+  /** Allowlisted external carrier: mrw | ctt */
+  provider: varchar("provider", { length: 50 }).notNull(),
+  service: varchar("service", { length: 100 }),
+  providerShipmentId: varchar("provider_shipment_id", { length: 255 }),
+  trackingNumber: varchar("tracking_number", { length: 255 }),
+  status: varchar("status", { length: 50 }).notNull().default("pending"),
+  /** Reference/key to the label artifact — never the label bytes. */
+  labelReference: varchar("label_reference", { length: 500 }),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+}, (t) => [
+  index("shipments_order_idx").on(t.orderId),
+  index("shipments_status_idx").on(t.status),
+  uniqueIndex("shipments_provider_shipment_unique").on(t.provider, t.providerShipmentId)
+    .where(sql`provider_shipment_id IS NOT NULL`),
+]);
+
+// ─── B.3.1: INVOICE DOCUMENTS (fiscal provider reference) ─
+// The shop does NOT issue certified Portuguese fiscal documents itself.
+// XD Software remains the fiscal provider; this table only stores
+// synchronization/reference metadata for issued documents.
+export const invoiceDocuments = pgTable("invoice_documents", {
+  id: serial("id").primaryKey(),
+  orderId: integer("order_id").notNull().references(() => orders.id),
+  /** Allowlisted invoice provider: xd */
+  provider: varchar("provider", { length: 50 }).notNull(),
+  /** invoice | credit_note */
+  documentType: varchar("document_type", { length: 50 }).notNull(),
+  providerDocumentId: varchar("provider_document_id", { length: 255 }),
+  documentNumber: varchar("document_number", { length: 100 }),
+  series: varchar("series", { length: 50 }),
+  status: varchar("status", { length: 50 }).notNull().default("pending"),
+  issuedAt: timestamp("issued_at"),
+  /** Provider-side reference (e.g. document URL/key) — never credentials. */
+  documentReference: varchar("document_reference", { length: 500 }),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+}, (t) => [
+  index("invoice_documents_order_idx").on(t.orderId),
+  index("invoice_documents_status_idx").on(t.status),
+  uniqueIndex("invoice_documents_provider_document_unique").on(t.provider, t.providerDocumentId)
+    .where(sql`provider_document_id IS NOT NULL`),
+]);
+
+// ─── B.3.1: NORMALIZED PROVIDER-SIDE STATES ───────────────
+// These are PROVIDER states. They are deliberately separate from
+// ORDER_STATUSES / ORDER_TRANSITIONS (Phase A), which stay authoritative.
+
+export const WEBHOOK_EVENT_STATUSES = ["pending", "processing", "processed", "failed", "ignored"] as const;
+export type WebhookEventStatus = (typeof WEBHOOK_EVENT_STATUSES)[number];
+
+export const PAYMENT_ATTEMPT_STATUSES = ["pending", "paid", "failed", "expired", "cancelled", "refunded"] as const;
+export type PaymentAttemptStatus = (typeof PAYMENT_ATTEMPT_STATUSES)[number];
+
+export const PAYMENT_ATTEMPT_METHODS = ["multibanco", "mbway", "card"] as const;
+export type PaymentAttemptMethod = (typeof PAYMENT_ATTEMPT_METHODS)[number];
+
+export const SHIPMENT_STATUSES = ["pending", "created", "label_ready", "in_transit", "delivered", "exception", "cancelled"] as const;
+export type ShipmentStatus = (typeof SHIPMENT_STATUSES)[number];
+
+export const INVOICE_DOCUMENT_TYPES = ["invoice", "credit_note"] as const;
+export type InvoiceDocumentType = (typeof INVOICE_DOCUMENT_TYPES)[number];
+
+export const INVOICE_DOCUMENT_STATUSES = ["pending", "issued", "failed", "cancelled"] as const;
+export type InvoiceDocumentStatus = (typeof INVOICE_DOCUMENT_STATUSES)[number];
