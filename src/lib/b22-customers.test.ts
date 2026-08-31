@@ -386,24 +386,24 @@ describe("B.2.2 — Customer Notes CRUD + Audit", () => {
 
   it("manager can update note", async () => {
     const { id } = await createCustomerNote(customer1Id, "Original", managerId);
-    await updateCustomerNote(id, "Atualizada", managerId);
+    await updateCustomerNote(customer1Id, id, "Atualizada", managerId);
     const detail = await getAdminCustomerDetail(customer1Id);
     expect(detail.notes[0].note).toBe("Atualizada");
   });
 
   it("update nonexistent note throws NOTE_NOT_FOUND", async () => {
-    await expect(updateCustomerNote(999999, "x", managerId)).rejects.toThrow("NOTE_NOT_FOUND");
+    await expect(updateCustomerNote(customer1Id, 999999, "x", managerId)).rejects.toThrow("NOTE_NOT_FOUND");
   });
 
   it("delete removes note", async () => {
     const { id } = await createCustomerNote(customer1Id, "Para apagar", managerId);
-    await deleteCustomerNote(id, managerId);
+    await deleteCustomerNote(customer1Id, id, managerId);
     const detail = await getAdminCustomerDetail(customer1Id);
     expect(detail.notes.length).toBe(0);
   });
 
   it("delete nonexistent note throws NOTE_NOT_FOUND", async () => {
-    await expect(deleteCustomerNote(999999, managerId)).rejects.toThrow("NOTE_NOT_FOUND");
+    await expect(deleteCustomerNote(customer1Id, 999999, managerId)).rejects.toThrow("NOTE_NOT_FOUND");
   });
 
   it("note_created audit logged correctly", async () => {
@@ -417,7 +417,7 @@ describe("B.2.2 — Customer Notes CRUD + Audit", () => {
 
   it("note_updated audit logged", async () => {
     const { id } = await createCustomerNote(customer1Id, "x", managerId);
-    await updateCustomerNote(id, "y", managerId);
+    await updateCustomerNote(customer1Id, id, "y", managerId);
     const audit = await db.select().from(auditLogs).where(eq(auditLogs.action, "customer.note_updated"));
     expect(audit.length).toBeGreaterThanOrEqual(1);
     await db.delete(auditLogs);
@@ -425,7 +425,7 @@ describe("B.2.2 — Customer Notes CRUD + Audit", () => {
 
   it("note_deleted audit logged", async () => {
     const { id } = await createCustomerNote(customer1Id, "x", managerId);
-    await deleteCustomerNote(id, managerId);
+    await deleteCustomerNote(customer1Id, id, managerId);
     const audit = await db.select().from(auditLogs).where(eq(auditLogs.action, "customer.note_deleted"));
     expect(audit.length).toBeGreaterThanOrEqual(1);
     await db.delete(auditLogs);
