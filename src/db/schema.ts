@@ -32,8 +32,14 @@ export const addresses = pgTable("addresses", {
   country: varchar("country", { length: 100 }).notNull().default("Portugal"),
   phone: varchar("phone", { length: 50 }),
   isDefault: boolean("is_default").notNull().default(false),
+  isDefaultBilling: boolean("is_default_billing").notNull().default(false),
+  isDefaultShipping: boolean("is_default_shipping").notNull().default(false),
   createdAt: timestamp("created_at").notNull().defaultNow(),
-});
+}, (t) => [
+  // Partial unique indexes: max 1 default billing and max 1 default shipping per user
+  uniqueIndex("addresses_default_billing_unique").on(t.userId).where(sql`is_default_billing = true`),
+  uniqueIndex("addresses_default_shipping_unique").on(t.userId).where(sql`is_default_shipping = true`),
+]);
 
 // ─── CATEGORIES ───────────────────────────────────────────
 export const categories = pgTable("categories", {
@@ -445,6 +451,19 @@ export type PaymentStatus = (typeof PAYMENT_STATUSES)[number];
 
 export const DELIVERY_TYPES = ["shipping", "pickup"] as const;
 export type DeliveryType = (typeof DELIVERY_TYPES)[number];
+
+// ─── B.2.2: CUSTOMER NOTES (staff internal notes, never customer-visible) ──
+export const customerNotes = pgTable("customer_notes", {
+  id: serial("id").primaryKey(),
+  userId: integer("user_id").notNull().references(() => users.id),
+  authorUserId: integer("author_user_id").notNull().references(() => users.id),
+  note: text("note").notNull(),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at"),
+}, (t) => [
+  index("customer_notes_user_idx").on(t.userId),
+  index("customer_notes_author_idx").on(t.authorUserId),
+]);
 
 // ─── P1: RATE LIMITING (fixed window, Postgres-backed) ───
 // Works on Cloudflare Workers (no memory between requests).
