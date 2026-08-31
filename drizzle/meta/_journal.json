@@ -29,6 +29,13 @@
       "when": 1788173580101,
       "tag": "0003_rate_limit_and_password_reset",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1788183079862,
+      "tag": "0004_b22_customer_notes_and_default_addresses",
+      "breakpoints": true
     }
   ]
 }
