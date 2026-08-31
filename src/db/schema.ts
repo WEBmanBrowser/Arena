@@ -446,6 +446,28 @@ export type PaymentStatus = (typeof PAYMENT_STATUSES)[number];
 export const DELIVERY_TYPES = ["shipping", "pickup"] as const;
 export type DeliveryType = (typeof DELIVERY_TYPES)[number];
 
+// ─── P1: RATE LIMITING (fixed window, Postgres-backed) ───
+// Works on Cloudflare Workers (no memory between requests).
+export const rateLimits = pgTable("rate_limits", {
+  id: serial("id").primaryKey(),
+  /** Composite key, e.g. "login:ip:1.2.3.4" or "forgot:email:x@y.z" */
+  key: varchar("key", { length: 255 }).notNull().unique(),
+  count: integer("count").notNull().default(0),
+  windowStart: timestamp("window_start").notNull().defaultNow(),
+  expiresAt: timestamp("expires_at").notNull(),
+}, (t) => [index("rate_limits_expires_idx").on(t.expiresAt)]);
+
+// ─── P1: PASSWORD RESET TOKENS (sha256-hashed, single-use) ──
+export const passwordResetTokens = pgTable("password_reset_tokens", {
+  id: serial("id").primaryKey(),
+  userId: integer("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  /** sha256 hex of the raw token — raw token is NEVER stored */
+  tokenHash: varchar("token_hash", { length: 64 }).notNull().unique(),
+  expiresAt: timestamp("expires_at").notNull(),
+  usedAt: timestamp("used_at"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+}, (t) => [index("password_reset_tokens_user_idx").on(t.userId)]);
+
 // ─── VALID ORDER STATUSES ─────────────────────────────────
 export const ORDER_STATUSES = [
   "pending_payment", "paid", "processing", "ready_for_pickup",

@@ -3,8 +3,16 @@ import { db } from "@/db";
 import { users } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import { verifyPassword, createToken } from "@/lib/auth";
+import { checkRateLimit, clientIp, rateLimitResponse } from "@/lib/rate-limit";
+import { csrfGuard } from "@/lib/csrf";
 
 export async function POST(req: NextRequest) {
+  // P1 guards: same-origin (CSRF) + rate limit per IP
+  const csrf = csrfGuard(req);
+  if (csrf) return csrf;
+  const ipLimit = await checkRateLimit(`login:ip:${clientIp(req)}`, { limit: 10, windowSeconds: 5 * 60 });
+  if (!ipLimit.allowed) return rateLimitResponse(ipLimit.retryAfterSeconds);
+
   try {
     const { email, password } = await req.json();
     if (!email || !password) {
