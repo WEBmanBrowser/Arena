@@ -36,6 +36,13 @@
       "when": 1788183079862,
       "tag": "0004_b22_customer_notes_and_default_addresses",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1788215528188,
+      "tag": "0005_integration_foundations",
+      "breakpoints": true
     }
   ]
 }
