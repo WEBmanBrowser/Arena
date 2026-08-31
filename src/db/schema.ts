@@ -437,6 +437,15 @@ export const shippingMethods = pgTable("shipping_methods", {
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
 
+// ─── PAYMENT / DELIVERY ENUM VALUES (B.2.1) ──────────────
+// The columns are varchar for historical reasons; these constants are the
+// single source of truth for valid values (used by validation, admin UI, tests).
+export const PAYMENT_STATUSES = ["pending", "paid", "cancelled", "expired", "refunded"] as const;
+export type PaymentStatus = (typeof PAYMENT_STATUSES)[number];
+
+export const DELIVERY_TYPES = ["shipping", "pickup"] as const;
+export type DeliveryType = (typeof DELIVERY_TYPES)[number];
+
 // ─── VALID ORDER STATUSES ─────────────────────────────────
 export const ORDER_STATUSES = [
   "pending_payment", "paid", "processing", "ready_for_pickup",
