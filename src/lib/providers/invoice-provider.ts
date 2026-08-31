@@ -20,7 +20,7 @@ import {
   type InvoiceDocumentStatus,
   type InvoiceDocumentType,
 } from "@/db/schema";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { ProviderError } from "./errors";
 import { assertCapability, getInvoiceProvider, type InvoiceProviderId } from "./registry";
 
@@ -155,57 +155,40 @@ export async function markInvoiceDocumentIssued(
   documentId: number,
   input: MarkInvoiceIssuedInput
 ): Promise<InvoiceDocumentRecord> {
-  const existing = await requireInvoiceDocument(documentId);
-  if (existing.status === "issued") {
-    throw new ProviderError("OPERATION_NOT_SUPPORTED", {
-      provider: existing.provider,
-      internalDetail: "issued fiscal document is immutable",
-    });
-  }
-  if (existing.status === "cancelled") {
-    throw new ProviderError("OPERATION_NOT_SUPPORTED", {
-      provider: existing.provider,
-      internalDetail: "cancelled document cannot be issued",
-    });
-  }
-
+  // CONCURRENCY: the `status = 'pending'` guard lives in the UPDATE predicate.
+  // No preceding SELECT is consulted, so a concurrent fail/cancel can never
+  // win on the basis of a stale read. `coalesce` keeps optional fields at
+  // their stored value when the caller does not supply them.
   const [row] = await db
     .update(invoiceDocuments)
     .set({
       status: "issued",
       providerDocumentId: input.providerDocumentId,
       documentNumber: input.documentNumber,
-      series: input.series ?? existing.series,
+      series: input.series !== undefined ? input.series : sql`${invoiceDocuments.series}`,
       issuedAt: input.issuedAt ?? new Date(),
-      documentReference: input.documentReference ?? existing.documentReference,
+      documentReference:
+        input.documentReference !== undefined ? input.documentReference : sql`${invoiceDocuments.documentReference}`,
       updatedAt: new Date(),
     })
     .where(and(eq(invoiceDocuments.id, documentId), eq(invoiceDocuments.status, "pending")))
     .returning();
 
-  if (!row) {
-    throw new ProviderError("OPERATION_NOT_SUPPORTED", {
-      provider: existing.provider,
-      internalDetail: "document no longer pending",
-    });
-  }
-  return row;
+  if (row) return row;
+
+  // Zero rows updated — distinguish "not found" from "transition rejected".
+  const existing = await requireInvoiceDocument(documentId);
+  throw new ProviderError("OPERATION_NOT_SUPPORTED", {
+    provider: existing.provider,
+    internalDetail:
+      existing.status === "issued"
+        ? "issued fiscal document is immutable"
+        : `document is ${existing.status}, no longer pending`,
+  });
 }
 
 export async function markInvoiceDocumentFailed(documentId: number): Promise<InvoiceDocumentRecord> {
-  const existing = await requireInvoiceDocument(documentId);
-  if (existing.status === "issued") {
-    throw new ProviderError("OPERATION_NOT_SUPPORTED", {
-      provider: existing.provider,
-      internalDetail: "issued fiscal document cannot be marked failed",
-    });
-  }
-  const [row] = await db
-    .update(invoiceDocuments)
-    .set({ status: "failed", updatedAt: new Date() })
-    .where(eq(invoiceDocuments.id, documentId))
-    .returning();
-  return row;
+  return transitionPendingDocument(documentId, "failed", "issued fiscal document cannot be marked failed");
 }
 
 /**
@@ -214,19 +197,48 @@ export async function markInvoiceDocumentFailed(documentId: number): Promise<Inv
  * with a credit note at the provider, not cancelled locally.
  */
 export async function cancelInvoiceDocument(documentId: number): Promise<InvoiceDocumentRecord> {
-  const existing = await requireInvoiceDocument(documentId);
-  if (existing.status === "issued") {
-    throw new ProviderError("OPERATION_NOT_SUPPORTED", {
-      provider: existing.provider,
-      internalDetail: "issued document requires a credit note, not cancellation",
-    });
-  }
+  return transitionPendingDocument(
+    documentId,
+    "cancelled",
+    "issued document requires a credit note, not cancellation"
+  );
+}
+
+/**
+ * Atomic `pending → <target>` transition.
+ *
+ * CONCURRENCY: the `status = 'pending'` predicate lives in the UPDATE itself,
+ * so an issue that commits concurrently can never be overwritten by a
+ * simultaneous failed/cancelled call. A preceding SELECT is NOT a safety
+ * boundary — it can be stale by the time the write executes, which would
+ * destroy an already-issued fiscal reference.
+ *
+ * Allowed transitions (provider-document state only, unrelated to the
+ * centralized order lifecycle):
+ *   pending → issued | failed | cancelled
+ *   issued  → (terminal: nothing)
+ *   failed / cancelled → (terminal: nothing)
+ */
+async function transitionPendingDocument(
+  documentId: number,
+  target: Extract<InvoiceDocumentStatus, "failed" | "cancelled">,
+  issuedRejectionDetail: string
+): Promise<InvoiceDocumentRecord> {
   const [row] = await db
     .update(invoiceDocuments)
-    .set({ status: "cancelled", updatedAt: new Date() })
-    .where(eq(invoiceDocuments.id, documentId))
+    .set({ status: target, updatedAt: new Date() })
+    .where(and(eq(invoiceDocuments.id, documentId), eq(invoiceDocuments.status, "pending")))
     .returning();
-  return row;
+
+  if (row) return row;
+
+  // Zero rows updated — distinguish "not found" from "transition rejected".
+  const existing = await requireInvoiceDocument(documentId);
+  if (existing.status === target) return existing; // idempotent replay
+  throw new ProviderError("OPERATION_NOT_SUPPORTED", {
+    provider: existing.provider,
+    internalDetail: existing.status === "issued" ? issuedRejectionDetail : `document is ${existing.status}`,
+  });
 }
 
 export async function getInvoiceDocument(documentId: number): Promise<InvoiceDocumentRecord | null> {

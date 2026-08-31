@@ -12,7 +12,7 @@
 
 import { db } from "@/db";
 import { shipments, SHIPMENT_STATUSES, type ShipmentStatus } from "@/db/schema";
-import { and, eq } from "drizzle-orm";
+import { and, eq, notInArray } from "drizzle-orm";
 import { ProviderError } from "./errors";
 import { assertCapability, getShippingProvider, type ShippingProviderId } from "./registry";
 
@@ -167,16 +167,30 @@ export interface UpdateShipmentInput {
 }
 
 /**
+ * Terminal carrier states. Once a shipment is delivered or cancelled the
+ * carrier outcome is settled and must not be rewritten by a late/duplicate
+ * callback. (This is a SHIPMENT provider-state rule — it is not, and must not
+ * become, a second order state machine.)
+ */
+export const TERMINAL_SHIPMENT_STATUSES = ["delivered", "cancelled"] as const;
+
+export function isTerminalShipmentStatus(status: string): boolean {
+  return (TERMINAL_SHIPMENT_STATUSES as readonly string[]).includes(status);
+}
+
+/**
  * Update carrier-side shipment data.
+ *
+ * CONCURRENCY: the "not already terminal" predicate is part of the UPDATE, so
+ * concurrent `delivered` / `cancelled` callbacks cannot both win by racing on a
+ * stale read.
+ *
  * Never touches orders.status — order transitions (e.g. → "shipped") remain
  * the responsibility of the centralized Phase A lifecycle.
  */
 export async function updateShipment(shipmentId: number, input: UpdateShipmentInput): Promise<ShipmentRecord> {
-  const existing = await getShipment(shipmentId);
-  if (!existing) throw new ProviderError("SHIPMENT_NOT_FOUND", { internalDetail: `shipment ${shipmentId}` });
   if (input.status && !isShipmentStatus(input.status)) {
     throw new ProviderError("INVALID_PROVIDER_RESPONSE", {
-      provider: existing.provider,
       internalDetail: "unknown shipment status",
     });
   }
@@ -184,15 +198,30 @@ export async function updateShipment(shipmentId: number, input: UpdateShipmentIn
   const [row] = await db
     .update(shipments)
     .set({
-      status: input.status ?? existing.status,
-      providerShipmentId: input.providerShipmentId ?? existing.providerShipmentId,
-      trackingNumber: input.trackingNumber ?? existing.trackingNumber,
-      labelReference: input.labelReference ?? existing.labelReference,
+      ...(input.status !== undefined ? { status: input.status } : {}),
+      ...(input.providerShipmentId !== undefined ? { providerShipmentId: input.providerShipmentId } : {}),
+      ...(input.trackingNumber !== undefined ? { trackingNumber: input.trackingNumber } : {}),
+      ...(input.labelReference !== undefined ? { labelReference: input.labelReference } : {}),
       updatedAt: new Date(),
     })
-    .where(eq(shipments.id, shipmentId))
+    .where(
+      and(
+        eq(shipments.id, shipmentId),
+        notInArray(shipments.status, [...TERMINAL_SHIPMENT_STATUSES])
+      )
+    )
     .returning();
-  return row;
+
+  if (row) return row;
+
+  // Zero rows updated — distinguish "not found" from "transition rejected".
+  const existing = await getShipment(shipmentId);
+  if (!existing) throw new ProviderError("SHIPMENT_NOT_FOUND", { internalDetail: `shipment ${shipmentId}` });
+  if (input.status !== undefined && existing.status === input.status) return existing; // idempotent replay
+  throw new ProviderError("OPERATION_NOT_SUPPORTED", {
+    provider: existing.provider,
+    internalDetail: `shipment already terminal: ${existing.status}`,
+  });
 }
 
 export async function getShipment(shipmentId: number): Promise<ShipmentRecord | null> {

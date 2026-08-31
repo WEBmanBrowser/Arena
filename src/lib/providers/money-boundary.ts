@@ -18,10 +18,18 @@ export type ProviderCurrency = typeof PROVIDER_CURRENCY;
 
 /**
  * Upper bound for a single provider amount, in cents.
- * 999_999_999_999 cents keeps every intermediate value inside
- * Number.MAX_SAFE_INTEGER while staying far above any realistic order total.
+ *
+ * Aligned with the DATABASE domain: `payment_attempts.amount_cents` is a
+ * PostgreSQL `integer` (int4), so 2_147_483_647 cents (≈ 21.474.836,47 EUR) is
+ * the largest value that can actually be persisted. Keeping the application
+ * boundary at the same limit means oversized amounts are rejected by
+ * normalized validation instead of surfacing as a raw PostgreSQL numeric
+ * overflow (SQLSTATE 22003) from deep inside the driver.
+ *
+ * This ceiling is orders of magnitude above any realistic order total for this
+ * shop, so widening the column to bigint is not justified in B.3.1.
  */
-export const MAX_PROVIDER_AMOUNT_CENTS = 999_999_999_99; // 999.999.999,99 EUR
+export const MAX_PROVIDER_AMOUNT_CENTS = 2_147_483_647; // int4 max — see payment_attempts.amount_cents
 
 /** Strictly: optional sign, 1..12 integer digits, optional 1..2 decimals. */
 const DECIMAL_RE = /^(-)?(\d{1,12})(?:\.(\d{1,2}))?$/;

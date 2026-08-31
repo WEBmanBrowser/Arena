@@ -22,14 +22,19 @@ import {
   type PaymentAttemptStatus,
   type PaymentAttemptMethod,
 } from "@/db/schema";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, notInArray, sql } from "drizzle-orm";
 import { ProviderError, sanitizeErrorMessage } from "./errors";
 import { getPaymentProvider, type PaymentProviderId } from "./registry";
 import { MAX_PROVIDER_AMOUNT_CENTS, PROVIDER_CURRENCY, assertSupportedCurrency } from "./money-boundary";
 
 export type PaymentAttemptRecord = typeof paymentAttempts.$inferSelect;
 
-/** Terminal states — a completed attempt is never reopened. */
+/**
+ * Terminal states — a settled attempt is never reopened.
+ * `pending` is the only non-terminal state in B.3.1: every other normalized
+ * state represents a definitive provider outcome for THAT attempt. A retry is
+ * expressed by appending a NEW attempt row, never by reopening an old one.
+ */
 const TERMINAL_STATUSES: ReadonlySet<PaymentAttemptStatus> = new Set<PaymentAttemptStatus>([
   "paid", "failed", "expired", "cancelled", "refunded",
 ]);
@@ -163,8 +168,17 @@ export interface UpdatePaymentAttemptStatusInput {
 
 /**
  * Update the status of ONE attempt (never of the order).
- * Terminal attempts are immutable, so a late duplicate provider callback
- * cannot resurrect or rewrite settled history.
+ *
+ * CONCURRENCY: the terminal-state invariant is enforced by the UPDATE
+ * predicate itself, not by an earlier SELECT. A prior read cannot be used as
+ * the safety boundary — two provider callbacks (e.g. an MB WAY expiry and a
+ * card confirmation) may be processed simultaneously by different workers, and
+ * a check-then-act guard would let both writes through, silently overwriting a
+ * settled `paid` attempt.
+ *
+ * The predicate is a compare-and-swap over the non-terminal set: a row is
+ * updated only while it is still `pending`. Re-applying the SAME status is
+ * tolerated (idempotent duplicate callback) without changing `completed_at`.
  */
 export async function updatePaymentAttemptStatus(
   attemptId: number,
@@ -174,28 +188,40 @@ export async function updatePaymentAttemptStatus(
     throw new ProviderError("INVALID_PROVIDER_RESPONSE", { internalDetail: "unknown payment status" });
   }
 
-  const existing = await getPaymentAttempt(attemptId);
-  if (!existing) throw new ProviderError("PAYMENT_NOT_FOUND", { internalDetail: `attempt ${attemptId}` });
-  if (TERMINAL_STATUSES.has(existing.status as PaymentAttemptStatus) && existing.status !== input.status) {
-    throw new ProviderError("OPERATION_NOT_SUPPORTED", {
-      provider: existing.provider,
-      internalDetail: `attempt already terminal: ${existing.status}`,
-    });
-  }
-
   const now = new Date();
+  const isTerminal = TERMINAL_STATUSES.has(input.status);
+
+  // Atomic conditional update: only a still-open (non-terminal) attempt moves.
   const [row] = await db
     .update(paymentAttempts)
     .set({
       status: input.status,
-      providerReference: input.providerReference ?? existing.providerReference,
-      failureReason: input.failureReason !== undefined ? sanitizeErrorMessage(input.failureReason, 255) : existing.failureReason,
-      completedAt: TERMINAL_STATUSES.has(input.status) ? (existing.completedAt ?? now) : existing.completedAt,
+      ...(input.providerReference !== undefined ? { providerReference: input.providerReference } : {}),
+      ...(input.failureReason !== undefined
+        ? { failureReason: sanitizeErrorMessage(input.failureReason, 255) }
+        : {}),
+      ...(isTerminal ? { completedAt: sql`coalesce(${paymentAttempts.completedAt}, ${now})` } : {}),
       updatedAt: now,
     })
-    .where(eq(paymentAttempts.id, attemptId))
+    .where(
+      and(
+        eq(paymentAttempts.id, attemptId),
+        notInArray(paymentAttempts.status, [...TERMINAL_STATUSES])
+      )
+    )
     .returning();
-  return row;
+
+  if (row) return row;
+
+  // Zero rows updated — distinguish "not found" from "transition rejected".
+  const existing = await getPaymentAttempt(attemptId);
+  if (!existing) throw new ProviderError("PAYMENT_NOT_FOUND", { internalDetail: `attempt ${attemptId}` });
+  // Idempotent replay of the winning terminal transition is not an error.
+  if (existing.status === input.status) return existing;
+  throw new ProviderError("OPERATION_NOT_SUPPORTED", {
+    provider: existing.provider,
+    internalDetail: `attempt already terminal: ${existing.status}`,
+  });
 }
 
 export async function getPaymentAttempt(attemptId: number): Promise<PaymentAttemptRecord | null> {

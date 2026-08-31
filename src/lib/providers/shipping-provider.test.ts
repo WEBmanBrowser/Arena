@@ -1,6 +1,6 @@
 // B.3.1 — Shipping provider foundation tests (real PostgreSQL, real production service)
 
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterAll } from "vitest";
 import { db } from "@/db";
 import { orders, shipments } from "@/db/schema";
 import { eq } from "drizzle-orm";
@@ -176,4 +176,10 @@ describe("B.3.1 — shipping: store pickup stays internal", () => {
     expect(reloaded.status).toBe("ready_for_pickup");
     expect(await listShipmentsForOrder(order.id)).toHaveLength(0);
   });
+});
+
+// Leave no order-referencing provider rows behind: other suites truncate
+// `orders`, which fails while child rows still reference it.
+afterAll(async () => {
+  await db.delete(shipments);
 });

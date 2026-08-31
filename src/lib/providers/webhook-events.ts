@@ -153,6 +153,26 @@ export interface RegisterWebhookEventResult {
  *
  * Uses INSERT ... ON CONFLICT DO NOTHING against the DB unique indexes, so
  * concurrent duplicate deliveries can never both create a row.
+ *
+ * IDENTITY MODEL — deliberately two-tier, and per provider:
+ *
+ *   1. When the provider supplies a stable `providerEventId`, THAT is the
+ *      authoritative identity: `(provider, provider_event_id)`. Two deliveries
+ *      with the same id collapse even if their bodies differ (retry with an
+ *      updated payload), and two deliveries with different ids stay distinct
+ *      even if their bodies are byte-identical (two genuine events).
+ *
+ *   2. `payloadHash` is a FALLBACK identity used ONLY when no stable event id
+ *      is supplied: `(provider, payload_hash) WHERE provider_event_id IS NULL`.
+ *
+ * ASSUMPTION: a given provider is consistent — it either always supplies a
+ * stable event id or never does. Under mixed usage the same logical event
+ * delivered once WITH an id and once WITHOUT one produces two rows, because
+ * the two indexes cover disjoint sets of rows. This is intentional: a global
+ * unique index on `(provider, payload_hash)` would be dangerous, as it would
+ * permanently reject legitimate distinct events that happen to carry identical
+ * bodies (e.g. two identical "pending" pings, or repeated fixed-format
+ * notifications). See webhook-events.test.ts, "identity model" tests.
  */
 export async function registerWebhookEvent(
   input: RegisterWebhookEventInput

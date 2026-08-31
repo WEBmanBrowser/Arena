@@ -6,7 +6,7 @@
 //   3. eupago / card  / paid
 // All three must remain persisted — history is never overwritten.
 
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterAll } from "vitest";
 import { db } from "@/db";
 import { orders, orderItems, payments, paymentAttempts, products } from "@/db/schema";
 import { eq } from "drizzle-orm";
@@ -22,7 +22,11 @@ import {
   isPaymentAttemptStatus,
   isPaymentAttemptMethod,
 } from "@/lib/providers/payment-attempts";
-import { parseDecimalToCents, formatCentsToDecimal } from "@/lib/providers/money-boundary";
+import {
+  parseDecimalToCents,
+  formatCentsToDecimal,
+  MAX_PROVIDER_AMOUNT_CENTS,
+} from "@/lib/providers/money-boundary";
 import { ProviderError } from "@/lib/providers/errors";
 
 async function createTestOrder(total = "123.45") {
@@ -270,4 +274,44 @@ describe("B.3.1 — bank transfer regression (existing flow untouched)", () => {
     expect(item.orderId).toBe(order.id);
     await db.delete(orderItems).where(eq(orderItems.id, item.id));
   });
+});
+
+describe("B.3.1 — payment attempts: amount_cents int4 domain (LOW-1)", () => {
+  it("persists exactly the maximum storable amount", async () => {
+    const order = await createTestOrder("21474836.47");
+    const attempt = await createPaymentAttempt({
+      orderId: order.id, provider: "eupago", method: "card",
+      amountCents: MAX_PROVIDER_AMOUNT_CENTS,
+    });
+    const stored = await getPaymentAttempt(attempt.id);
+    expect(stored!.amountCents).toBe(MAX_PROVIDER_AMOUNT_CENTS);
+    expect(formatCentsToDecimal(stored!.amountCents)).toBe("21474836.47");
+  });
+
+  it("rejects maximum + 1 in application validation, never as a raw PostgreSQL 22003", async () => {
+    const order = await createTestOrder();
+    for (const oversized of [MAX_PROVIDER_AMOUNT_CENTS + 1, 3_000_000_000, 99_999_999_999]) {
+      let caught: unknown;
+      try {
+        await createPaymentAttempt({
+          orderId: order.id, provider: "eupago", method: "card", amountCents: oversized,
+        });
+      } catch (e) {
+        caught = e;
+      }
+      expect(caught).toBeInstanceOf(ProviderError);
+      expect((caught as ProviderError).code).toBe("INVALID_PROVIDER_RESPONSE");
+      const serialized = JSON.stringify((caught as ProviderError).toCustomerSafeJSON());
+      expect(serialized).not.toContain("22003");
+      expect(serialized).not.toContain("numeric field overflow");
+    }
+    // Nothing was written by the rejected calls.
+    expect(await listPaymentAttempts(order.id)).toHaveLength(0);
+  });
+});
+
+// Leave no order-referencing provider rows behind: other suites truncate
+// `orders`, which fails while child rows still reference it.
+afterAll(async () => {
+  await db.delete(paymentAttempts);
 });

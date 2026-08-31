@@ -109,3 +109,44 @@ describe("B.3.1 — money boundary: currency", () => {
     expect(() => assertSupportedCurrency("eur")).toThrow(ProviderError);
   });
 });
+
+describe("B.3.1 — money boundary: int4 database domain (LOW-1)", () => {
+  it("caps the application maximum at the payment_attempts.amount_cents int4 limit", () => {
+    // amount_cents is a PostgreSQL integer column; anything above int4 max
+    // cannot be stored and previously escaped as a raw 22003 driver error.
+    expect(MAX_PROVIDER_AMOUNT_CENTS).toBe(2_147_483_647);
+    expect(MAX_PROVIDER_AMOUNT_CENTS).toBeLessThanOrEqual(2 ** 31 - 1);
+    expect(Number.isSafeInteger(MAX_PROVIDER_AMOUNT_CENTS)).toBe(true);
+  });
+
+  it("accepts exactly the maximum and rejects maximum + 1", () => {
+    const maxDecimal = formatCentsToDecimal(MAX_PROVIDER_AMOUNT_CENTS);
+    expect(maxDecimal).toBe("21474836.47");
+    expect(parseDecimalToCents(maxDecimal)).toBe(MAX_PROVIDER_AMOUNT_CENTS);
+
+    expect(() => parseDecimalToCents("21474836.48")).toThrow(ProviderError);
+    expect(() => formatCentsToDecimal(MAX_PROVIDER_AMOUNT_CENTS + 1)).toThrow(ProviderError);
+  });
+
+  it("rejects the previously-allowed 999.999.999,99 range with normalized errors", () => {
+    // Old ceiling: 99_999_999_999 cents — storable only in bigint.
+    for (const oversized of ["999999999.99", "30000000.00", "99999999.99"]) {
+      try {
+        parseDecimalToCents(oversized);
+        throw new Error(`expected ${oversized} to be rejected`);
+      } catch (e) {
+        expect(e).toBeInstanceOf(ProviderError);
+        expect((e as ProviderError).code).toBe("INVALID_PROVIDER_RESPONSE");
+        // No raw PostgreSQL error class leaks to the caller.
+        expect(JSON.stringify((e as ProviderError).toCustomerSafeJSON())).not.toContain("22003");
+      }
+    }
+  });
+
+  it("boundary arithmetic stays exact integer arithmetic", () => {
+    expect(parseDecimalToCents("21474836.46")).toBe(MAX_PROVIDER_AMOUNT_CENTS - 1);
+    expect(formatCentsToDecimal(MAX_PROVIDER_AMOUNT_CENTS - 1)).toBe("21474836.46");
+    expect(isCanonicalDecimalAmount("21474836.47")).toBe(true);
+    expect(isCanonicalDecimalAmount("21474836.48")).toBe(false);
+  });
+});

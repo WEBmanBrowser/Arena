@@ -289,3 +289,67 @@ describe("B.3.1 — webhook events: security foundation", () => {
     expect(eupagoRows).toHaveLength(1);
   });
 });
+
+describe("B.3.1 — webhook events: identity model (LOW-2)", () => {
+  // Documented provider contract (see registerWebhookEvent doc comment):
+  //   providerEventId, when supplied, is the AUTHORITATIVE identity.
+  //   payloadHash is a FALLBACK identity used only for id-less providers.
+  const BODY_A = JSON.stringify({ event: "payment.paid", reference: "IDENT-A" });
+
+  it("makes providerEventId authoritative: same id + different bodies collapse to one event", async () => {
+    const first = await registerWebhookEvent({ provider: "eupago", providerEventId: "evt_auth", rawBody: BODY_A });
+    const retry = await registerWebhookEvent({
+      provider: "eupago",
+      providerEventId: "evt_auth",
+      rawBody: JSON.stringify({ event: "payment.paid", reference: "IDENT-A", retry: 2 }),
+    });
+
+    expect(first.duplicate).toBe(false);
+    expect(retry.duplicate).toBe(true);
+    expect(retry.event.id).toBe(first.event.id);
+    // The stored hash remains the FIRST delivery's hash — identity is the id,
+    // not the body.
+    expect(retry.event.payloadHash).toBe(await computePayloadHash(BODY_A));
+  });
+
+  it("keeps distinct ids distinct even when the bodies are byte-identical", async () => {
+    const a = await registerWebhookEvent({ provider: "eupago", providerEventId: "evt_x1", rawBody: BODY_A });
+    const b = await registerWebhookEvent({ provider: "eupago", providerEventId: "evt_x2", rawBody: BODY_A });
+    expect(a.duplicate).toBe(false);
+    expect(b.duplicate).toBe(false);
+    expect(b.event.id).not.toBe(a.event.id);
+    expect(b.event.payloadHash).toBe(a.event.payloadHash);
+  });
+
+  it("uses payloadHash as fallback identity only when no event id is supplied", async () => {
+    const first = await registerWebhookEvent({ provider: "ctt", rawBody: BODY_A });
+    const repeat = await registerWebhookEvent({ provider: "ctt", rawBody: BODY_A });
+    expect(first.duplicate).toBe(false);
+    expect(repeat.duplicate).toBe(true);
+    expect(repeat.event.id).toBe(first.event.id);
+    expect(repeat.event.providerEventId).toBeNull();
+  });
+
+  it("documents the mixed-mode assumption: id-bearing and id-less deliveries are separate identities", async () => {
+    // ASSUMPTION UNDER TEST (not a defect): a provider is expected to be
+    // consistent about supplying event ids. If the SAME logical event arrives
+    // once with an id and once without, two rows exist, because the two unique
+    // indexes cover disjoint row sets. A global (provider, payload_hash)
+    // unique index is deliberately NOT used: it would permanently reject
+    // legitimate distinct events that share an identical body.
+    const withId = await registerWebhookEvent({ provider: "mrw", providerEventId: "evt_mixed", rawBody: BODY_A });
+    const withoutId = await registerWebhookEvent({ provider: "mrw", rawBody: BODY_A });
+
+    expect(withId.duplicate).toBe(false);
+    expect(withoutId.duplicate).toBe(false);
+    expect(withoutId.event.id).not.toBe(withId.event.id);
+    expect(withoutId.event.payloadHash).toBe(withId.event.payloadHash);
+
+    // Each identity remains independently idempotent.
+    expect((await registerWebhookEvent({ provider: "mrw", providerEventId: "evt_mixed", rawBody: BODY_A })).duplicate).toBe(true);
+    expect((await registerWebhookEvent({ provider: "mrw", rawBody: BODY_A })).duplicate).toBe(true);
+
+    const rows = await db.select().from(providerWebhookEvents).where(eq(providerWebhookEvents.provider, "mrw"));
+    expect(rows).toHaveLength(2);
+  });
+});

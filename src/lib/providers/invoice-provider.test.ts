@@ -1,6 +1,6 @@
 // B.3.1 — Invoice provider foundation tests (real PostgreSQL, real production service)
 
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterAll } from "vitest";
 import { db } from "@/db";
 import { invoiceDocuments, orders } from "@/db/schema";
 import { eq } from "drizzle-orm";
@@ -198,4 +198,10 @@ describe("B.3.1 — invoicing: issued-document safety", () => {
     const [reloaded] = await db.select().from(orders).where(eq(orders.id, order.id));
     expect(reloaded.status).toBe("paid");
   });
+});
+
+// Leave no order-referencing provider rows behind: other suites truncate
+// `orders`, which fails while child rows still reference it.
+afterAll(async () => {
+  await db.delete(invoiceDocuments);
 });
