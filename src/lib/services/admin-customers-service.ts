@@ -39,7 +39,6 @@ export type AdminCustomerSort = (typeof ADMIN_CUSTOMER_SORTS)[number];
 
 export type CustomerStatusFilter = "all" | "active" | "disabled" | "with_orders" | "without_orders";
 export const CUSTOMER_STATUS_FILTERS: readonly CustomerStatusFilter[] = ["all", "active", "disabled", "with_orders", "without_orders"];
-
 export const CUSTOMER_DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
 
 /** Statuses that represent effective revenue (see file header). */
@@ -84,14 +83,12 @@ export type AdminCustomerListRow = {
 
 export type AdminCustomerListPagination = { page: number; pageSize: number; total: number; totalPages: number };
 export type AdminCustomerListResult = { customers: AdminCustomerListRow[]; pagination: AdminCustomerListPagination };
-
 export type CustomerStatistics = {
   totalOrders: number;
   totalSpentCents: number;
   averageOrderValueCents: number;
   lastOrderDate: Date | null;
 };
-
 export type AdminCustomerAddressRow = typeof addresses.$inferSelect;
 export type AdminCustomerOrderRow = {
   id: number; orderNumber: string; createdAt: Date; total: string;
@@ -387,34 +384,36 @@ export async function createCustomerNote(customerId: number, note: string, autho
   return { id: inserted.id };
 }
 
-export async function updateCustomerNote(noteId: number, note: string, actorId: number): Promise<void> {
+export async function updateCustomerNote(customerId: number, noteId: number, note: string, actorId: number): Promise<void> {
   if (!note.trim()) throw new CustomerValidationError("NOTE_EMPTY");
   if (note.trim().length > 5000) throw new CustomerValidationError("NOTE_TOO_LONG");
 
-  const [existing] = await db.select().from(customerNotes).where(eq(customerNotes.id, noteId)).limit(1);
+  const [existing] = await db.select().from(customerNotes).where(and(eq(customerNotes.id, noteId), eq(customerNotes.userId, customerId))).limit(1);
   if (!existing) throw new Error("NOTE_NOT_FOUND");
 
-  await db.update(customerNotes).set({ note: note.trim(), updatedAt: new Date() }).where(eq(customerNotes.id, noteId));
+  await db.update(customerNotes).set({ note: note.trim(), updatedAt: new Date() }).where(and(eq(customerNotes.id, noteId), eq(customerNotes.userId, customerId)));
+  // Ownership check passed — preserve audit with customerId
   await createAuditLog({
     userId: actorId,
     action: "customer.note_updated",
     entity: "customer_note",
     entityId: noteId,
-    details: { customerId: existing.userId },
+    details: { customerId },
   });
 }
 
-export async function deleteCustomerNote(noteId: number, actorId: number): Promise<void> {
-  const [existing] = await db.select().from(customerNotes).where(eq(customerNotes.id, noteId)).limit(1);
+export async function deleteCustomerNote(customerId: number, noteId: number, actorId: number): Promise<void> {
+  const [existing] = await db.select().from(customerNotes).where(and(eq(customerNotes.id, noteId), eq(customerNotes.userId, customerId))).limit(1);
   if (!existing) throw new Error("NOTE_NOT_FOUND");
 
-  await db.delete(customerNotes).where(eq(customerNotes.id, noteId));
+  await db.delete(customerNotes).where(and(eq(customerNotes.id, noteId), eq(customerNotes.userId, customerId)));
+  // No audit event on ownership failure — only delete audit if ownership was valid
   await createAuditLog({
     userId: actorId,
     action: "customer.note_deleted",
     entity: "customer_note",
     entityId: noteId,
-    details: { customerId: existing.userId },
+    details: { customerId },
   });
 }
 
