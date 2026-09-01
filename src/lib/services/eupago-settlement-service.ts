@@ -281,45 +281,60 @@ async function settleRefundEvent(event: NormalizedEupagoEvent): Promise<ProcessW
     .limit(1);
   if (alreadySettled) return { outcome: "duplicate" };
 
-  // Find the armed/submitted refund attempt this movement settles.
-  const candidates = await db
-    .select()
-    .from(refundAttempts)
-    .where(
-      and(
-        eq(refundAttempts.orderId, paymentAttempt.orderId),
-        eq(refundAttempts.provider, EUPAGO_PROVIDER_ID),
-        eq(refundAttempts.providerOriginalTransactionId, originalTrid)
+  const settled = await db.transaction(async (tx) => {
+    // Serialize refund movement correlation per original payment. Without this
+    // lock, two distinct equal movements can both choose the same oldest
+    // candidate; the conditional-update loser would then be misclassified as
+    // a duplicate instead of advancing to the next legitimate attempt.
+    await tx
+      .select({ id: paymentAttempts.id })
+      .from(paymentAttempts)
+      .where(eq(paymentAttempts.id, paymentAttempt.id))
+      .for("update");
+
+    // Re-read candidates only after acquiring the payment lock, so every
+    // distinct movement observes settlements committed by its predecessor.
+    const candidates = await tx
+      .select()
+      .from(refundAttempts)
+      .where(
+        and(
+          eq(refundAttempts.orderId, paymentAttempt.orderId),
+          eq(refundAttempts.provider, EUPAGO_PROVIDER_ID),
+          eq(refundAttempts.providerOriginalTransactionId, originalTrid)
+        )
       )
-    )
-    .orderBy(refundAttempts.id);
+      .orderBy(refundAttempts.id);
 
-  const target = candidates.find(
-    (r) =>
-      (r.status === "pending" || r.status === "processing") &&
-      r.amountCents === event.amountCents &&
-      r.currency === event.currency
-  );
-  if (!target) return { outcome: "mismatch", code: "REFUND_ATTEMPT_NOT_FOUND" };
+    const target = candidates.find(
+      (r) =>
+        (r.status === "pending" || r.status === "processing") &&
+        r.amountCents === event.amountCents &&
+        r.currency === event.currency
+    );
+    if (!target) return null;
 
-  // Conditional update = idempotent under concurrent deliveries. The B.3.5
-  // balance trigger re-verifies the over-refund invariant on this UPDATE.
-  const [settled] = await db
-    .update(refundAttempts)
-    .set({
-      status: "succeeded",
-      providerRefundId: event.trid,
-      completedAt: new Date(),
-      recoveryState: null,
-      operatorActionCode: null,
-      errorCode: null,
-      errorMessage: null,
-      updatedAt: new Date(),
-    })
-    .where(and(eq(refundAttempts.id, target.id), eq(refundAttempts.status, target.status)))
-    .returning();
+    // The B.3.5 balance trigger re-verifies the over-refund invariant on this
+    // UPDATE. The condition also protects against unrelated state transitions.
+    const [updated] = await tx
+      .update(refundAttempts)
+      .set({
+        status: "succeeded",
+        providerRefundId: event.trid,
+        completedAt: new Date(),
+        recoveryState: null,
+        operatorActionCode: null,
+        errorCode: null,
+        errorMessage: null,
+        updatedAt: new Date(),
+      })
+      .where(and(eq(refundAttempts.id, target.id), eq(refundAttempts.status, target.status)))
+      .returning();
 
-  if (!settled) return { outcome: "duplicate" };
+    return updated ?? null;
+  });
+
+  if (!settled) return { outcome: "mismatch", code: "REFUND_ATTEMPT_NOT_FOUND" };
 
   await createAuditLog({
     userId: null,
