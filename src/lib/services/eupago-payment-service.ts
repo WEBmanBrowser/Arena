@@ -119,29 +119,58 @@ export async function armPaymentAttempt(input: {
       internalDetail: "unsupported currency",
     });
   }
+  const amountCents = assertAmount(input.amountCents);
 
-  const [order] = await db.select({ id: orders.id }).from(orders).where(eq(orders.id, input.orderId)).limit(1);
-  if (!order) {
-    throw new ProviderError("PAYMENT_NOT_FOUND", {
-      provider: descriptor.id,
-      internalDetail: "order not found",
-    });
-  }
+  return db.transaction(async (tx) => {
+    const [order] = await tx.select({ id: orders.id }).from(orders).where(eq(orders.id, input.orderId)).limit(1);
+    if (!order) {
+      throw new ProviderError("PAYMENT_NOT_FOUND", {
+        provider: descriptor.id,
+        internalDetail: "order not found",
+      });
+    }
 
-  const [row] = await db
-    .insert(paymentAttempts)
-    .values({
-      orderId: input.orderId,
-      provider: descriptor.id,
-      method: input.method,
-      status: "pending",
-      amountCents: assertAmount(input.amountCents),
-      currency,
-      providerIdentifier: generateStableIdentifier(input.orderId),
-      recoveryState: "armed",
-    })
-    .returning();
-  return row;
+    // Serialize creation for the same logical provider request. Without this,
+    // two concurrent checkout submissions for the same order/method/amount can
+    // append two local attempts and issue two Eupago creates with two distinct
+    // identifiers. The advisory lock is transaction-scoped and PostgreSQL-side,
+    // so it protects all workers sharing the database.
+    await tx.execute(
+      sql`select pg_advisory_xact_lock(hashtextextended(${`${descriptor.id}:${input.orderId}:${input.method}:${amountCents}:${currency}`}, 0))`
+    );
+
+    const [existing] = await tx
+      .select()
+      .from(paymentAttempts)
+      .where(
+        and(
+          eq(paymentAttempts.orderId, input.orderId),
+          eq(paymentAttempts.provider, descriptor.id),
+          eq(paymentAttempts.method, input.method),
+          eq(paymentAttempts.amountCents, amountCents),
+          eq(paymentAttempts.currency, currency),
+          eq(paymentAttempts.status, "pending"),
+          sql`${paymentAttempts.recoveryState} IS NOT NULL`
+        )
+      )
+      .limit(1);
+    if (existing) return existing;
+
+    const [row] = await tx
+      .insert(paymentAttempts)
+      .values({
+        orderId: input.orderId,
+        provider: descriptor.id,
+        method: input.method,
+        status: "pending",
+        amountCents,
+        currency,
+        providerIdentifier: generateStableIdentifier(input.orderId),
+        recoveryState: "armed",
+      })
+      .returning();
+    return row;
+  });
 }
 
 /**
@@ -195,7 +224,13 @@ export async function createEupagoPayment(
 
   const claimed = await claimProviderCall(attempt.id);
   if (!claimed) {
-    // Someone else already issued (or is issuing) the single permitted call.
+    // Someone else already issued (or is issuing) the single permitted call for
+    // this logical provider request. If it has already persisted provider data,
+    // return that same pending intent; otherwise require reconciliation/waiting,
+    // but never create a second local attempt or provider request.
+    if (attempt.providerReference) {
+      return { outcome: "created", attempt, redirectUrl: null };
+    }
     return {
       outcome: "reconciliation_required",
       attempt,

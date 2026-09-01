@@ -304,6 +304,10 @@ export function isEupagoHostedUrl(value: string): boolean {
     return false;
   }
   if (url.protocol !== "https:") return false;
+  // Hosted checkout URLs must not contain userinfo or an unexpected port. Both
+  // are classic URL-confusion surfaces and are unnecessary for Eupago-hosted
+  // payment pages.
+  if (url.username || url.password || url.port) return false;
   return url.hostname === "eupago.pt" || url.hostname.endsWith(".eupago.pt");
 }
 

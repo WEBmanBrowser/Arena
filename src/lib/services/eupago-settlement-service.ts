@@ -127,11 +127,20 @@ async function settlePaymentEvent(event: NormalizedEupagoEvent): Promise<Process
   const attempt = await correlateAttempt(event);
   if (!attempt) return { outcome: "mismatch", code: "ATTEMPT_NOT_FOUND" };
 
-  // Strict correlation before ANY financial effect.
-  if (event.method && attempt.method !== event.method) {
+  // Strict correlation before ANY financial effect. When the provider supplies
+  // both local correlation fields, they must both point to the SAME attempt;
+  // never fall back from a mismatched identifier to a reference (or vice versa).
+  if (event.identifier && attempt.providerIdentifier !== event.identifier) {
+    return { outcome: "mismatch", code: "IDENTIFIER_MISMATCH" };
+  }
+  if (event.reference && attempt.providerReference !== event.reference) {
+    return { outcome: "mismatch", code: "REFERENCE_MISMATCH" };
+  }
+  if (!event.method) return { outcome: "mismatch", code: "METHOD_MISSING" };
+  if (attempt.method !== event.method) {
     return { outcome: "mismatch", code: "METHOD_MISMATCH" };
   }
-  if (event.currency !== attempt.currency) {
+  if (!event.currency || event.currency !== attempt.currency) {
     return { outcome: "mismatch", code: "CURRENCY_MISMATCH" };
   }
 

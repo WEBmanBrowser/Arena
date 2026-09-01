@@ -342,6 +342,11 @@ describe("B.3.2 — Credit Card creation (hosted, PCI-safe)", () => {
   it("rejects a redirect URL that is not Eupago-hosted", async () => {
     for (const evil of [
       "https://evil.test/pay",
+      "https://evil.example/?x=clientes.eupago.pt",
+      "https://clientes.eupago.pt.evil.example/",
+      "https://clientes.eupago.pt@evil.example/pay",
+      "https://evil.example@clientes.eupago.pt/pay",
+      "https://clientes.eupago.pt:444/pay",
       "http://sandbox.eupago.pt/pay",
       "https://sandbox.eupago.pt.evil.test/pay",
       "not-a-url",

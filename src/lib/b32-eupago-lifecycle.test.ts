@@ -311,6 +311,21 @@ describe("B.3.2 — payment creation persistence and idempotency", () => {
     expect(result.attempt.recoveryState).toBe("requested");
   });
 
+  it("serializes concurrent creates for the same logical order payment", async () => {
+    const { order } = await createPendingOrder();
+    const { fetchImpl, count } = countingFetch(multibancoOk());
+
+    const results = await Promise.all([
+      createEupagoPayment({ orderId: order.id, method: "multibanco", amountCents: 5000, config: CONFIG, fetchImpl }),
+      createEupagoPayment({ orderId: order.id, method: "multibanco", amountCents: 5000, config: CONFIG, fetchImpl }),
+    ]);
+
+    expect(count()).toBe(1);
+    const attempts = await db.select().from(paymentAttempts).where(eq(paymentAttempts.orderId, order.id));
+    expect(attempts).toHaveLength(1);
+    expect(new Set(results.map((r) => r.attempt.id))).toEqual(new Set([attempts[0].id]));
+  });
+
   it("does NOT create a second provider request after an ambiguous timeout", async () => {
     const { order } = await createPendingOrder();
     const { fetchImpl, count } = timeoutFetch();
@@ -617,8 +632,12 @@ describe("B.3.2 — webhook settlement", () => {
     const cases: Array<[string, Record<string, unknown>, string]> = [
       ["wrong amount", { amount: "49.99" }, "AMOUNT_MISMATCH"],
       ["wrong currency", { currency: "USD" }, "CURRENCY_MISMATCH"],
+      ["missing currency", { currency: undefined }, "CURRENCY_MISMATCH"],
       ["wrong method", { method: "multibanco" }, "METHOD_MISMATCH"],
+      ["missing method", { method: undefined }, "METHOD_MISSING"],
       ["unknown identifier", { identifier: "MDT-999-deadbeefdeadbeef01" }, "ATTEMPT_NOT_FOUND"],
+      ["wrong identifier with correct reference", { identifier: "MDT-999-deadbeefdeadbeef01", reference: created.attempt.providerReference }, "IDENTIFIER_MISMATCH"],
+      ["wrong reference with correct identifier", { reference: "REF-BELONGS-ELSEWHERE" }, "REFERENCE_MISMATCH"],
     ];
 
     for (const [, override, expectedCode] of cases) {

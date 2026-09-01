@@ -35,7 +35,7 @@ export interface NormalizedEupagoEvent {
   readonly method: string | null;
   /** Integer cents — never floating point. */
   readonly amountCents: number | null;
-  readonly currency: string;
+  readonly currency: string | null;
 }
 
 export type NormalizeResult =
@@ -106,8 +106,8 @@ export function normalizeEupagoEvent(payload: Record<string, unknown>): Normaliz
   if (kind === "refund" && !originalTrid) return { ok: false, code: "MISSING_ORIGINAL_TRID" };
   if (kind === "refund" && originalTrid === trid) return { ok: false, code: "REFUND_TRID_NOT_DISTINCT" };
 
-  const currency = str(raw.currency, 3) ?? "EUR";
-  if (!/^[A-Z]{3}$/.test(currency)) return { ok: false, code: "INVALID_CURRENCY" };
+  const currency = str(raw.currency, 3);
+  if (currency !== null && !/^[A-Z]{3}$/.test(currency)) return { ok: false, code: "INVALID_CURRENCY" };
 
   return {
     ok: true,
