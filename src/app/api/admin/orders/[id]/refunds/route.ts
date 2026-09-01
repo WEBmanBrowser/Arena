@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getCurrentUser, isManager } from "@/lib/auth";
+import { csrfGuard } from "@/lib/csrf";
 import { RefundError, getOrderRefundState, requestRefund } from "@/lib/refunds";
 
 /**
@@ -34,6 +35,10 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
 }
 
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  // CSRF — state-changing admin action requires same-origin (project standard).
+  const csrf = csrfGuard(req);
+  if (csrf) return csrf;
+
   const user = await getCurrentUser();
   if (!user) return NextResponse.json({ error: "Sessão requerida" }, { status: 401 });
   if (!isManager(user.role)) return NextResponse.json({ error: "Operação requer nível manager ou admin" }, { status: 403 });

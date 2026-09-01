@@ -77,7 +77,21 @@ async function createPaidOrder(opts: { total?: string; userId?: number | null; s
 }
 
 function postReq(url: string, body: unknown) {
-  return new NextRequest(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  // Same-origin Origin header, exactly as a browser sends for same-site fetch.
+  return new NextRequest(url, {
+    method: "POST",
+    headers: { "content-type": "application/json", origin: new URL(url).origin },
+    body: JSON.stringify(body),
+  });
+}
+
+/** Cross-site POST (attacker page) — must be rejected by the CSRF guard. */
+function crossOriginPostReq(url: string, body: unknown) {
+  return new NextRequest(url, {
+    method: "POST",
+    headers: { "content-type": "application/json", origin: "https://evil.example" },
+    body: JSON.stringify(body),
+  });
 }
 
 function getReq(url: string) {
@@ -382,5 +396,106 @@ describe("B.3.5 bank transfer regression", () => {
     expect(refundRes.status).toBe(201);
     const [after] = await db.select().from(orders).where(eq(orders.id, order.id)).limit(1);
     expect(after.status).toBe("paid"); // lifecycle untouched
+  });
+});
+
+// ─── Review hotfix regressions ────────────────────────────
+
+describe("B.3.5 review hotfix — CSRF on state-changing endpoints", () => {
+  it("cross-origin admin refund request is rejected before any financial effect", async () => {
+    const admin = await createRealUser("admin");
+    const order = await createPaidOrder({ userId: admin.id });
+    mockUser(admin);
+
+    const res = await adminRefundsPOST(
+      crossOriginPostReq(`http://localhost/api/admin/orders/${order.id}/refunds`, {
+        amountCents: 2500,
+        idempotencyKey: "b35r-csrf-1-12345678",
+      }),
+      { params: Promise.resolve({ id: String(order.id) }) }
+    );
+
+    expect(res.status).toBe(403);
+    // and NO refund row was created
+    const rows = await db.select().from(refundAttempts).where(eq(refundAttempts.orderId, order.id));
+    expect(rows.length).toBe(0);
+  });
+
+  it("cross-origin refund lifecycle action is rejected and leaves status untouched", async () => {
+    const admin = await createRealUser("admin");
+    const order = await createPaidOrder({ userId: admin.id });
+    mockUser(admin);
+
+    const created = await adminRefundsPOST(
+      postReq(`http://localhost/api/admin/orders/${order.id}/refunds`, {
+        amountCents: 1000,
+        idempotencyKey: "b35r-csrf-2-12345678",
+      }),
+      { params: Promise.resolve({ id: String(order.id) }) }
+    );
+    expect(created.status).toBe(201);
+    const refund = (await created.json()).refund;
+
+    const res = await refundActionPOST(
+      crossOriginPostReq(`http://localhost/api/admin/refunds/${refund.id}`, {
+        action: "complete",
+        externalReference: "TRF-CSRF",
+        completedAt: new Date().toISOString(),
+      }),
+      { params: Promise.resolve({ id: String(refund.id) }) }
+    );
+
+    expect(res.status).toBe(403);
+    const [row] = await db.select().from(refundAttempts).where(eq(refundAttempts.id, refund.id)).limit(1);
+    expect(row.status).toBe("pending"); // no state change
+  });
+
+  it("same-origin admin refund request still succeeds", async () => {
+    const admin = await createRealUser("admin");
+    const order = await createPaidOrder({ userId: admin.id });
+    mockUser(admin);
+
+    const res = await adminRefundsPOST(
+      postReq(`http://localhost/api/admin/orders/${order.id}/refunds`, {
+        amountCents: 1500,
+        idempotencyKey: "b35r-csrf-3-12345678",
+      }),
+      { params: Promise.resolve({ id: String(order.id) }) }
+    );
+    expect(res.status).toBe(201);
+  });
+});
+
+describe("B.3.5 review hotfix — cron fails closed without CRON_SECRET", () => {
+  it("does not fall back to JWT_SECRET", async () => {
+    const prevCron = process.env.CRON_SECRET;
+    const prevJwt = process.env.JWT_SECRET;
+    delete process.env.CRON_SECRET;
+    process.env.JWT_SECRET = "jwt-secret-must-not-authorize-cron-0123456789";
+    try {
+      const res = await refundMaintenancePOST(
+        new NextRequest("http://localhost/api/cron/refund-maintenance", {
+          method: "POST",
+          headers: { "x-cron-secret": "jwt-secret-must-not-authorize-cron-0123456789" },
+        })
+      );
+      expect(res.status).toBe(401);
+    } finally {
+      if (prevCron === undefined) delete process.env.CRON_SECRET; else process.env.CRON_SECRET = prevCron;
+      if (prevJwt === undefined) delete process.env.JWT_SECRET; else process.env.JWT_SECRET = prevJwt;
+    }
+  });
+
+  it("rejects when CRON_SECRET is absent even with no header", async () => {
+    const prevCron = process.env.CRON_SECRET;
+    delete process.env.CRON_SECRET;
+    try {
+      const res = await refundMaintenancePOST(
+        new NextRequest("http://localhost/api/cron/refund-maintenance", { method: "POST" })
+      );
+      expect(res.status).toBe(401);
+    } finally {
+      if (prevCron === undefined) delete process.env.CRON_SECRET; else process.env.CRON_SECRET = prevCron;
+    }
   });
 });

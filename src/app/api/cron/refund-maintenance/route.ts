@@ -11,9 +11,12 @@ import { findStaleRefundAttempts } from "@/lib/refunds";
  * frozen). Follows the existing cron endpoint pattern (CRON_SECRET header).
  */
 export async function POST(req: NextRequest) {
+  // Fail closed: ONLY CRON_SECRET authorizes this maintenance endpoint.
+  // No JWT_SECRET fallback — reusing the session-signing secret as a cron
+  // credential would widen the blast radius of either secret.
   const secret = req.headers.get("x-cron-secret") || req.headers.get("authorization")?.replace("Bearer ", "");
-  const expected = process.env.CRON_SECRET || process.env.JWT_SECRET;
-  if (!expected || secret !== expected) {
+  const expected = process.env.CRON_SECRET;
+  if (!expected || !secret || secret !== expected) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
