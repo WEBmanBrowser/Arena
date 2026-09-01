@@ -695,3 +695,89 @@ export type InvoiceDocumentType = (typeof INVOICE_DOCUMENT_TYPES)[number];
 
 export const INVOICE_DOCUMENT_STATUSES = ["pending", "issued", "failed", "cancelled"] as const;
 export type InvoiceDocumentStatus = (typeof INVOICE_DOCUMENT_STATUSES)[number];
+
+// ─── B.3.5: REFUND ATTEMPTS (provider-agnostic) ──────────
+// Append-oriented internal refund ledger. Financial refund truth is DERIVED
+// from these rows — successful payments are never rewritten. A DB trigger
+// (see drizzle/0007) enforces the over-refund invariant at the PostgreSQL
+// level: committed refunds (pending + processing + succeeded) may never
+// exceed the authoritative paid amount of the referenced payment.
+export const REFUND_STATUSES = ["pending", "processing", "succeeded", "failed", "cancelled"] as const;
+export type RefundStatus = (typeof REFUND_STATUSES)[number];
+
+/** Statuses that commit (reserve) refundable balance. */
+export const REFUND_COMMITTED_STATUSES = ["pending", "processing", "succeeded"] as const;
+
+export const refundAttempts = pgTable("refund_attempts", {
+  id: serial("id").primaryKey(),
+  orderId: integer("order_id").notNull().references(() => orders.id),
+  paymentId: integer("payment_id").notNull().references(() => payments.id),
+  /** manual | allowlisted payment provider id (execution stays fail-closed). */
+  provider: varchar("provider", { length: 30 }).notNull(),
+  /** Stable server-validated operation identity — idempotency guard. */
+  idempotencyKey: varchar("idempotency_key", { length: 128 }).notNull(),
+  /** External financial reference (bank transfer ref / future provider refund id). */
+  providerRefundId: varchar("provider_refund_id", { length: 255 }),
+  /** Canonical integer cents — no floating-point money at the refund boundary. */
+  amountCents: integer("amount_cents").notNull(),
+  currency: varchar("currency", { length: 3 }).notNull().default("EUR"),
+  status: varchar("status", { length: 20 }).notNull().default("pending"),
+  /** Internal operational reason (never exposed to customers). */
+  reason: varchar("reason", { length: 500 }),
+  /** Sanitized failure metadata (codes + customer-safe messages only). */
+  errorCode: varchar("error_code", { length: 60 }),
+  errorMessage: varchar("error_message", { length: 500 }),
+  requestedBy: integer("requested_by").notNull().references(() => users.id),
+  completedAt: timestamp("completed_at"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+}, (t) => [
+  index("refund_attempts_order_idx").on(t.orderId),
+  index("refund_attempts_payment_idx").on(t.paymentId),
+  index("refund_attempts_status_idx").on(t.status),
+  uniqueIndex("refund_attempts_idempotency_key_unique").on(t.idempotencyKey),
+  check("refund_attempts_amount_positive", sql`${t.amountCents} > 0`),
+  check("refund_attempts_currency_format", sql`${t.currency} ~ '^[A-Z]{3}$'`),
+]);
+
+// ─── B.3.5: RECONCILIATION OBSERVATIONS ──────────────────
+// Minimal provider-agnostic model: one row per NORMALIZED external
+// observation (never raw payloads). Anomalies are computed at ingest against
+// internal authoritative state and must be resolved explicitly + audited.
+export const RECONCILIATION_ANOMALY_CODES = [
+  "PAID_AMOUNT_MISMATCH",
+  "REFUND_AMOUNT_MISMATCH",
+  "CURRENCY_MISMATCH",
+] as const;
+export type ReconciliationAnomalyCode = (typeof RECONCILIATION_ANOMALY_CODES)[number];
+
+export const reconciliationObservations = pgTable("reconciliation_observations", {
+  id: serial("id").primaryKey(),
+  orderId: integer("order_id").notNull().references(() => orders.id),
+  /** Source of the normalized observation (provider id or 'manual'). */
+  provider: varchar("provider", { length: 30 }).notNull(),
+  /** Normalized external financial identity — deduplicated. */
+  providerReference: varchar("provider_reference", { length: 255 }),
+  observedPaidCents: integer("observed_paid_cents").notNull(),
+  observedRefundedCents: integer("observed_refunded_cents").notNull(),
+  currency: varchar("currency", { length: 3 }).notNull().default("EUR"),
+  observedAt: timestamp("observed_at").notNull(),
+  /** Internal authoritative snapshot at ingest time (for audit traceability). */
+  expectedPaidCents: integer("expected_paid_cents").notNull(),
+  internalRefundedCents: integer("internal_refunded_cents").notNull(),
+  /** NULL = exact match (no anomaly). */
+  anomalyCode: varchar("anomaly_code", { length: 40 }),
+  status: varchar("status", { length: 20 }).notNull().default("open"),
+  recordedBy: integer("recorded_by").notNull().references(() => users.id),
+  resolvedBy: integer("resolved_by"),
+  resolvedAt: timestamp("resolved_at"),
+  resolutionNote: varchar("resolution_note", { length: 500 }),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+}, (t) => [
+  index("reconciliation_observations_order_idx").on(t.orderId),
+  index("reconciliation_observations_status_idx").on(t.status),
+  uniqueIndex("reconciliation_observations_reference_unique").on(t.provider, t.providerReference)
+    .where(sql`provider_reference IS NOT NULL`),
+  check("reconciliation_observed_non_negative", sql`${t.observedPaidCents} >= 0 AND ${t.observedRefundedCents} >= 0`),
+  check("reconciliation_currency_format", sql`${t.currency} ~ '^[A-Z]{3}$'`),
+]);

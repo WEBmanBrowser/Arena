@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { db } from "@/db";
-import { products, orders, orderItems, stockMovements, coupons, payments, auditLogs, emailNotifications, orderStatusHistory } from "@/db/schema";
+import { products, orders, orderItems, stockMovements, coupons, payments, auditLogs, emailNotifications, orderStatusHistory, invoiceDocuments, shipments, rmaRequests, reconciliationObservations, refundAttempts } from "@/db/schema";
 import { eq, sql } from "drizzle-orm";
 import { confirmOrderPayment, cancelOrder, releaseExpiredReservations } from "./orders";
 
@@ -12,6 +12,13 @@ async function resetTestData() {
   await db.delete(stockMovements);
   await db.delete(orderStatusHistory);
   await db.delete(orderItems);
+  // Tables referencing payments/orders must be cleared before the broad wipe
+  // (B.3.1 invoice documents / shipments / RMA + B.3.5 refunds / reconciliation).
+  await db.delete(reconciliationObservations);
+  await db.delete(refundAttempts);
+  await db.delete(invoiceDocuments);
+  await db.delete(shipments);
+  await db.delete(rmaRequests);
   await db.delete(payments);
   await db.delete(orders);
   await db.update(products).set({ stock: 5, reservedStock: 0, soldCount: 0 }).where(eq(products.id, 1));

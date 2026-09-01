@@ -11,6 +11,8 @@ import { invoiceDocuments, orderItems, orders, orderStatusHistory, payments, use
 import { and, asc, desc, eq, gte, ilike, lte, or, sql } from "drizzle-orm";
 import { createAuditLog } from "@/lib/audit";
 import { transitionOrderStatus } from "@/lib/orders";
+import type { OrderRefundState } from "@/lib/refunds";
+import { getOrderRefundState } from "@/lib/refunds";
 
 export const ADMIN_ORDER_PAGE_SIZE_DEFAULT = 25;
 export const ADMIN_ORDER_PAGE_SIZE_MAX = 100;
@@ -85,6 +87,8 @@ export type AdminOrderDetail = {
   payments: AdminOrderPaymentRow[];
   invoiceDocuments: AdminOrderInvoiceDocumentRow[];
   statusHistory: AdminOrderStatusHistoryRow[];
+  /** B.3.5 — derived financial refund state (never mutates order state). */
+  refundState: OrderRefundState;
 };
 
 // ─── Params ──────────────────────────────────────────────
@@ -263,6 +267,7 @@ export async function getAdminOrderDetail(orderId: number): Promise<AdminOrderDe
     payments: paymentRows,
     invoiceDocuments: invoiceRows,
     statusHistory: history,
+    refundState: await getOrderRefundState(orderId),
   };
 }
 
