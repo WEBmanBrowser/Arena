@@ -107,13 +107,15 @@ export async function POST(req: NextRequest) {
       const shippingCents = shippingQuote.shippingCents;
       const totalCents = afterDiscountCents + shippingCents;
 
-      // Calculate total VAT from per-line after-discount values
+      // Calculate total VAT from per-line after-discount values plus VAT embedded in gross shipping.
       let totalVatCents = 0;
       for (let i = 0; i < orderLines.length; i++) {
         const effectiveGross = orderLines[i].lineTotalCents - lineDiscounts[i];
         const { vatCents } = calcVatFromGross(effectiveGross, orderLines[i].vatRate);
         totalVatCents += vatCents;
       }
+      const { vatCents: shippingVatCents } = calcVatFromGross(shippingCents, 23);
+      totalVatCents += shippingVatCents;
 
       const orderNumber = generateOrderNumber();
       const reservationMs = getReservationMinutes() * 60 * 1000;

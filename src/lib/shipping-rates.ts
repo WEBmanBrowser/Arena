@@ -81,6 +81,7 @@ export async function updateShippingClass(input: {
   isActive: boolean;
   notes?: string | null;
 }): Promise<ShippingClassRecord> {
+  if (!input.displayName.trim()) throw new Error("INVALID_DISPLAY_NAME");
   if (!Number.isInteger(input.rateCents) || input.rateCents < 0) throw new Error("INVALID_RATE");
   if (!Number.isInteger(input.priority) || input.priority < 0) throw new Error("INVALID_PRIORITY");
   const [row] = await db.update(shippingClasses).set({

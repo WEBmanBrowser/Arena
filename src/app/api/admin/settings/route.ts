@@ -30,23 +30,32 @@ export async function PUT(req: NextRequest) {
 
   if (body?.shippingConfig) {
     const cfg = body.shippingConfig;
-    if (Array.isArray(cfg.classes)) {
-      for (const cls of cfg.classes) {
-        await updateShippingClass({
-          id: Number(cls.id),
-          displayName: String(cls.displayName || "").slice(0, 100),
-          rateCents: Number(cls.rateCents),
-          priority: Number(cls.priority),
-          isActive: Boolean(cls.isActive),
-          notes: cls.notes == null ? null : String(cls.notes).slice(0, 1000),
-        });
+    const normalizedClasses = Array.isArray(cfg.classes) ? cfg.classes.map((cls: Record<string, unknown>) => ({
+      id: Number(cls.id),
+      displayName: String(cls.displayName || "").slice(0, 100),
+      rateCents: Number(cls.rateCents),
+      priority: Number(cls.priority),
+      isActive: Boolean(cls.isActive),
+      notes: cls.notes == null ? null : String(cls.notes).slice(0, 1000),
+    })) : [];
+    const existingIds = new Set((await listShippingClasses(true)).map((cls) => cls.id));
+    for (const cls of normalizedClasses) {
+      if (!Number.isInteger(cls.id) || !existingIds.has(cls.id) || !cls.displayName.trim() || !Number.isInteger(cls.rateCents) || cls.rateCents < 0 || !Number.isInteger(cls.priority) || cls.priority < 0) {
+        return NextResponse.json({ error: "INVALID_SHIPPING_CONFIG" }, { status: 400 });
       }
     }
-    if (cfg.freeShipping) {
-      await updateFreeShippingSettings({
-        enabled: Boolean(cfg.freeShipping.enabled),
-        thresholdCents: Number(cfg.freeShipping.thresholdCents),
-      });
+    const normalizedFreeShipping = cfg.freeShipping ? {
+      enabled: Boolean(cfg.freeShipping.enabled),
+      thresholdCents: Number(cfg.freeShipping.thresholdCents),
+    } : null;
+    if (normalizedFreeShipping && (!Number.isInteger(normalizedFreeShipping.thresholdCents) || normalizedFreeShipping.thresholdCents < 0)) {
+      return NextResponse.json({ error: "INVALID_SHIPPING_CONFIG" }, { status: 400 });
+    }
+    for (const cls of normalizedClasses) {
+      await updateShippingClass(cls);
+    }
+    if (normalizedFreeShipping) {
+      await updateFreeShippingSettings(normalizedFreeShipping);
     }
     await createAuditLog({
       userId: user.id,

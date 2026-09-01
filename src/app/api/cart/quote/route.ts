@@ -133,9 +133,11 @@ export async function POST(req: NextRequest) {
     const shippingCents = shippingQuote.shippingCents;
     const totalCents = afterDiscountCents + shippingCents;
 
-    // Recalculate VAT on discounted amount (proportional)
+    // Recalculate VAT on discounted merchandise, then add VAT embedded in gross shipping.
     const discountRatio = subtotalCents > 0 ? afterDiscountCents / subtotalCents : 1;
-    const adjustedVatCents = Math.round(totalVatCents * discountRatio);
+    const merchandiseVatCents = Math.round(totalVatCents * discountRatio);
+    const { vatCents: shippingVatCents } = calcVatFromGross(shippingCents, 23);
+    const adjustedVatCents = merchandiseVatCents + shippingVatCents;
 
     const allInStock = quoteLines.every(l => l.inStock);
     const anyPriceChanged = quoteLines.some(l => l.priceChanged);
