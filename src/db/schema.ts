@@ -1,6 +1,6 @@
 import {
   pgTable, serial, varchar, text, integer, boolean, timestamp, decimal,
-  jsonb, index, uniqueIndex
+  jsonb, index, uniqueIndex, check
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 
@@ -70,6 +70,24 @@ export const brands = pgTable("brands", {
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
 
+// ─── SHIPPING CLASSES (local customer pricing, not carrier cost) ──
+export const shippingClasses = pgTable("shipping_classes", {
+  id: serial("id").primaryKey(),
+  key: varchar("key", { length: 50 }).notNull().unique(),
+  displayName: varchar("display_name", { length: 100 }).notNull(),
+  rateCents: integer("rate_cents").notNull(),
+  priority: integer("priority").notNull(),
+  isActive: boolean("is_active").notNull().default(true),
+  notes: text("notes"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+}, (t) => [
+  index("shipping_classes_active_idx").on(t.isActive),
+  check("shipping_classes_key_format", sql`${t.key} ~ '^[a-z0-9][a-z0-9_-]{0,49}$'`),
+  check("shipping_classes_rate_non_negative", sql`${t.rateCents} >= 0`),
+  check("shipping_classes_priority_non_negative", sql`${t.priority} >= 0`),
+]);
+
 // ─── PRODUCTS ─────────────────────────────────────────────
 export const products = pgTable("products", {
   id: serial("id").primaryKey(),
@@ -99,6 +117,7 @@ export const products = pgTable("products", {
   isFeatured: boolean("is_featured").notNull().default(false),
   isService: boolean("is_service").notNull().default(false),
   allowPreorder: boolean("allow_preorder").notNull().default(false),
+  shippingClassId: integer("shipping_class_id").references(() => shippingClasses.id),
   metaTitle: varchar("meta_title", { length: 255 }),
   metaDescription: text("meta_description"),
   viewCount: integer("view_count").notNull().default(0),
@@ -111,6 +130,7 @@ export const products = pgTable("products", {
   index("products_brand_idx").on(t.brandId),
   index("products_active_idx").on(t.isActive),
   index("products_featured_idx").on(t.isFeatured),
+  index("products_shipping_class_idx").on(t.shippingClassId),
   uniqueIndex("products_ean_unique").on(t.ean).where(sql`ean IS NOT NULL`),
 ]);
 
@@ -636,13 +656,22 @@ export const invoiceDocuments = pgTable("invoice_documents", {
   issuedAt: timestamp("issued_at"),
   /** Provider-side reference (e.g. document URL/key) — never credentials. */
   documentReference: varchar("document_reference", { length: 500 }),
+  amountCents: integer("amount_cents"),
+  currency: varchar("currency", { length: 3 }).notNull().default("EUR"),
+  source: varchar("source", { length: 50 }).notNull().default("provider"),
+  originalDocumentId: integer("original_document_id"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
 }, (t) => [
   index("invoice_documents_order_idx").on(t.orderId),
   index("invoice_documents_status_idx").on(t.status),
+  index("invoice_documents_original_idx").on(t.originalDocumentId),
   uniqueIndex("invoice_documents_provider_document_unique").on(t.provider, t.providerDocumentId)
     .where(sql`provider_document_id IS NOT NULL`),
+  uniqueIndex("invoice_documents_one_manual_invoice_per_order").on(t.orderId, t.source, t.documentType)
+    .where(sql`source = 'manual' AND document_type = 'invoice'`),
+  check("invoice_documents_amount_non_negative", sql`amount_cents IS NULL OR amount_cents >= 0`),
+  check("invoice_documents_currency_format", sql`currency ~ '^[A-Z]{3}$'`),
 ]);
 
 // ─── B.3.1: NORMALIZED PROVIDER-SIDE STATES ───────────────

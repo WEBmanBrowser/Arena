@@ -1,12 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/db";
-import { products, brands, categories, stockMovements, suppliers, productSuppliers } from "@/db/schema";
+import { products, brands, categories, stockMovements, suppliers, productSuppliers, shippingClasses } from "@/db/schema";
 import { eq, sql, and } from "drizzle-orm";
 import { getCurrentUser, isManager } from "@/lib/auth";
 import { slugify } from "@/lib/utils";
 import { createAuditLog } from "@/lib/audit";
 import { isValidGTIN } from "@/lib/validation";
 import { parseCSV, autoMapHeaders, applyMapping, CSV_MAX_SIZE } from "@/lib/csv";
+import { ensureDefaultShippingConfiguration } from "@/lib/shipping-rates";
 
 interface ImportError { row: number; field: string; value: string; code: string; message: string; }
 interface ImportResult { row: number; sku: string; name: string; action: "create" | "update" | "skip"; errors: ImportError[]; changes?: Record<string, { from: unknown; to: unknown }>; }
@@ -41,6 +42,7 @@ export async function POST(req: NextRequest) {
   }
 
   // Load reference data
+  await ensureDefaultShippingConfiguration();
   const allProducts = await db.select().from(products);
   const skuMap: Record<string, typeof allProducts[0]> = {};
   allProducts.forEach(p => { if (p.sku) skuMap[p.sku] = p; });
@@ -51,8 +53,12 @@ export async function POST(req: NextRequest) {
   const catNameMap: Record<string, number> = {};
   allCats.forEach(c => { catNameMap[c.name.toLowerCase()] = c.id; });
   const allSuppliers = await db.select().from(suppliers);
+  const allShippingClasses = await db.select().from(shippingClasses);
   const supplierNameMap: Record<string, number> = {};
   allSuppliers.forEach(s => { supplierNameMap[s.name.toLowerCase()] = s.id; });
+  const shippingClassKeyMap: Record<string, { id: number; isActive: boolean }> = {};
+  allShippingClasses.forEach(c => { shippingClassKeyMap[c.key.toLowerCase()] = { id: c.id, isActive: c.isActive }; shippingClassKeyMap[c.displayName.toLowerCase()] = { id: c.id, isActive: c.isActive }; });
+  const defaultShippingClassId = shippingClassKeyMap.small?.id ?? null;
 
   const results: ImportResult[] = [];
   let newCount = 0, updateCount = 0, skipCount = 0, errCount = 0;
@@ -102,6 +108,17 @@ export async function POST(req: NextRequest) {
       }
     }
 
+    // Shipping class check (optional; missing means default small for new physical products)
+    let shippingClassId: number | null = null;
+    if (mapped.shippingClass) {
+      const cls = shippingClassKeyMap[mapped.shippingClass.toLowerCase()];
+      if (!cls || !cls.isActive) {
+        errors.push({ row: rowNum, field: "shippingClass", value: mapped.shippingClass, code: "SHIPPING_CLASS_NOT_FOUND", message: `Classe de envio inválida/inativa: ${mapped.shippingClass}` });
+      } else {
+        shippingClassId = cls.id;
+      }
+    }
+
     // Supplier check
     let supplierId: number | null = null;
     if (mapped.supplier) {
@@ -129,6 +146,7 @@ export async function POST(req: NextRequest) {
     if (existing && action === "update") {
       if (price !== null && price.toFixed(2) !== existing.price) changes.price = { from: existing.price, to: price.toFixed(2) };
       if (stockVal !== null && stockVal !== existing.stock) changes.stock = { from: existing.stock, to: stockVal };
+      if (shippingClassId !== null && shippingClassId !== existing.shippingClassId) changes.shippingClassId = { from: existing.shippingClassId, to: shippingClassId };
     }
 
     results.push({ row: rowNum, sku, name: name || existing?.name || "", action, errors, changes: Object.keys(changes).length ? changes : undefined });
@@ -155,6 +173,8 @@ export async function POST(req: NextRequest) {
         const mapped = applyMapping(parsed.rows[r.row - 2], mapping);
         const price = mapped.price ? parseFloat(mapped.price.replace(",", ".")) : null;
         const stockVal = mapped.stock ? parseInt(mapped.stock) : null;
+        const mappedClass = mapped.shippingClass ? shippingClassKeyMap[mapped.shippingClass.toLowerCase()] : null;
+        const resolvedShippingClassId = mappedClass?.id ?? defaultShippingClassId;
 
         // Resolve brand/category/supplier (create if needed)
         let bid = mapped.brand ? brandNameMap[mapped.brand.toLowerCase()] : null;
@@ -185,6 +205,7 @@ export async function POST(req: NextRequest) {
             ean: mapped.ean || null, brandId: bid, categoryId: cid,
             price: price?.toFixed(2) || "0.00", vatRate: mapped.vatRate || "23.00",
             stock: stockVal ?? 0, minStock: mapped.minStock ? parseInt(mapped.minStock) : 0,
+            shippingClassId: resolvedShippingClassId,
             isActive: true,
           }).returning();
 
@@ -207,6 +228,7 @@ export async function POST(req: NextRequest) {
           if (mapped.ean) updateData.ean = mapped.ean;
           if (mapped.vatRate) updateData.vatRate = mapped.vatRate;
           if (mapped.minStock) updateData.minStock = parseInt(mapped.minStock);
+          if (mapped.shippingClass && resolvedShippingClassId) updateData.shippingClassId = resolvedShippingClassId;
 
           if (stockVal !== null && stockVal !== existing.stock) {
             updateData.stock = stockVal;

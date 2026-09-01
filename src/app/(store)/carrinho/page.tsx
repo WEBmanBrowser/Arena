@@ -58,11 +58,10 @@ export default function CarrinhoPage() {
     } catch { setCouponError("Erro ao validar cupão"); }
   };
 
-  // Use localStorage prices for display only — server recalculates everything at checkout
+  // Use localStorage prices for merchandise display only — server recalculates prices, IVA, discounts and shipping at checkout.
   const subtotal = cart.reduce((acc, c) => acc + c.price * c.quantity, 0);
-  const shipping = subtotal >= 50 ? 0 : 4.99;
   const discount = couponResult ? parseFloat(couponResult.discount) : 0;
-  const total = subtotal + shipping - discount;
+  const estimatedMerchandiseTotal = Math.max(0, subtotal - discount);
 
   if (cart.length === 0) {
     return (
@@ -106,12 +105,12 @@ export default function CarrinhoPage() {
             <div className="flex justify-between text-slate-600"><span>Subtotal</span><span>{subtotal.toFixed(2)}€</span></div>
             <div className="flex justify-between text-slate-600">
               <span>Portes</span>
-              <span>{shipping === 0 ? <span className="text-green-600">Grátis</span> : `${shipping.toFixed(2)}€`}</span>
+              <span className="text-slate-400">Calculados no checkout</span>
             </div>
             {discount > 0 && <div className="flex justify-between text-green-600"><span>Desconto ({couponResult?.code})</span><span>-{discount.toFixed(2)}€</span></div>}
             <hr />
-            <div className="flex justify-between font-bold text-lg text-slate-900"><span>Total</span><span>{total.toFixed(2)}€</span></div>
-            <p className="text-xs text-slate-400">IVA incluído</p>
+            <div className="flex justify-between font-bold text-lg text-slate-900"><span>Subtotal estimado</span><span>{estimatedMerchandiseTotal.toFixed(2)}€</span></div>
+            <p className="text-xs text-slate-400">IVA e portes finais recalculados pelo servidor.</p>
           </div>
 
           <div className="mt-4">
@@ -124,7 +123,7 @@ export default function CarrinhoPage() {
             {couponResult && <p className="text-xs text-green-600 mt-1">✓ Cupão {couponResult.code} aplicado</p>}
           </div>
 
-          {shipping > 0 && subtotal < 50 && <p className="text-xs text-slate-500 mt-3">🚚 Faltam {(50 - subtotal).toFixed(2)}€ para portes grátis</p>}
+          <p className="text-xs text-slate-500 mt-3">🚚 Classes, portes e eventual oferta são calculados de forma autoritativa no checkout.</p>
 
           <Link href="/checkout" className="block w-full mt-4 py-3 bg-sky-600 hover:bg-sky-700 text-white text-center font-semibold rounded-lg transition">
             Finalizar Compra →

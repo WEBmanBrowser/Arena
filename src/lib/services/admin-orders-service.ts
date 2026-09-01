@@ -7,7 +7,7 @@
  */
 
 import { db } from "@/db";
-import { orderItems, orders, orderStatusHistory, payments, users, ORDER_TRANSITIONS, ORDER_STATUSES, PAYMENT_STATUSES, DELIVERY_TYPES } from "@/db/schema";
+import { invoiceDocuments, orderItems, orders, orderStatusHistory, payments, users, ORDER_TRANSITIONS, ORDER_STATUSES, PAYMENT_STATUSES, DELIVERY_TYPES } from "@/db/schema";
 import { and, asc, desc, eq, gte, ilike, lte, or, sql } from "drizzle-orm";
 import { createAuditLog } from "@/lib/audit";
 import { transitionOrderStatus } from "@/lib/orders";
@@ -56,6 +56,8 @@ export type AdminOrderItemRow = typeof orderItems.$inferSelect;
 
 export type AdminOrderPaymentRow = typeof payments.$inferSelect;
 
+export type AdminOrderInvoiceDocumentRow = typeof invoiceDocuments.$inferSelect;
+
 export type AdminOrderCustomerRow = {
   id: number;
   name: string;
@@ -81,6 +83,7 @@ export type AdminOrderDetail = {
   items: AdminOrderItemRow[];
   customer: AdminOrderCustomerRow | null;
   payments: AdminOrderPaymentRow[];
+  invoiceDocuments: AdminOrderInvoiceDocumentRow[];
   statusHistory: AdminOrderStatusHistoryRow[];
 };
 
@@ -231,6 +234,7 @@ export async function getAdminOrderDetail(orderId: number): Promise<AdminOrderDe
   // — never re-joined with current product data.
   const items = await db.select().from(orderItems).where(eq(orderItems.orderId, orderId)).orderBy(asc(orderItems.id));
   const paymentRows = await db.select().from(payments).where(eq(payments.orderId, orderId)).orderBy(desc(payments.createdAt));
+  const invoiceRows = await db.select().from(invoiceDocuments).where(eq(invoiceDocuments.orderId, orderId)).orderBy(desc(invoiceDocuments.createdAt));
   const history = await db.select({
     id: orderStatusHistory.id,
     fromStatus: orderStatusHistory.fromStatus,
@@ -257,6 +261,7 @@ export async function getAdminOrderDetail(orderId: number): Promise<AdminOrderDe
     items,
     customer,
     payments: paymentRows,
+    invoiceDocuments: invoiceRows,
     statusHistory: history,
   };
 }

@@ -420,10 +420,18 @@ export default function ContaClient() {
                   {orderDetail && (
                     <div className="mt-4 bg-white border rounded-xl p-4">
                       <div className="flex justify-between mb-2">
-                        <h3 className="font-bold">Encomenda #{(orderDetail as Record<string, unknown>).orderNumber as string}</h3>
+                        <h3 className="font-bold">Encomenda #{((orderDetail as any).order?.orderNumber || (orderDetail as any).orderNumber) as string}</h3>
                         <button onClick={() => setOrderDetail(null)} className="text-slate-400">✕</button>
                       </div>
-                      <p className="text-xs text-slate-500">Detalhe disponível com snapshots históricos (dados preservados).</p>
+                      <p className="text-xs text-slate-500 mb-3">Detalhe disponível com snapshots históricos (dados preservados).</p>
+                      {(orderDetail as any).invoiceDocuments?.length ? (
+                        <div className="border-t pt-3">
+                          <h4 className="font-semibold text-sm mb-2">Documentos fiscais</h4>
+                          {(orderDetail as any).invoiceDocuments.map((doc: any) => (
+                            <p key={doc.id} className="text-xs text-slate-600">{doc.documentType === "invoice" ? "Fatura" : "Documento"}: {doc.documentNumber || doc.documentReference} · {doc.amountCents != null ? `${(doc.amountCents / 100).toFixed(2)} ${doc.currency}` : ""} · {fmtDate(doc.issuedAt)}</p>
+                          ))}
+                        </div>
+                      ) : <p className="text-xs text-slate-400">Sem documento fiscal registado.</p>}
                     </div>
                   )}
                 </>

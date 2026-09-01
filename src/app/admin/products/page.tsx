@@ -20,13 +20,14 @@ export default function AdminProductsPage() {
   const [showBulkPrice, setShowBulkPrice] = useState(false);
   const [categories, setCategories] = useState<any[]>([]);
   const [brands, setBrands] = useState<any[]>([]);
+  const [shippingClasses, setShippingClasses] = useState<any[]>([]);
   const [selected, setSelected] = useState<number[]>([]);
   const [error, setError] = useState("");
   const [form, setForm] = useState({
     name: "", sku: "", ean: "", price: "", comparePrice: "", costPrice: "", stock: "0",
     minStock: "0", categoryId: "", brandId: "", shortDescription: "", description: "",
     isActive: true, isFeatured: false, isService: false, allowPreorder: false,
-    attributes: "{}", tags: "[]", vatRate: "23.00",
+    attributes: "{}", tags: "[]", vatRate: "23.00", shippingClassId: "",
   });
 
   const fetchProducts = useCallback(() => {
@@ -40,6 +41,7 @@ export default function AdminProductsPage() {
       setProducts(d.products || []);
       setTotal(d.total || 0);
       setPages(d.pages || 1);
+      setShippingClasses(d.shippingClasses || []);
     });
   }, [page, limit, sort, search, brandFilter, categoryFilter, activeFilter, stockFilter]);
 
@@ -52,19 +54,19 @@ export default function AdminProductsPage() {
 
   const openNew = () => {
     setEditingProduct(null);
-    setForm({ name: "", sku: "", ean: "", price: "", comparePrice: "", costPrice: "", stock: "0", minStock: "0", categoryId: "", brandId: "", shortDescription: "", description: "", isActive: true, isFeatured: false, isService: false, allowPreorder: false, attributes: "{}", tags: "[]", vatRate: "23.00" });
+    setForm({ name: "", sku: "", ean: "", price: "", comparePrice: "", costPrice: "", stock: "0", minStock: "0", categoryId: "", brandId: "", shortDescription: "", description: "", isActive: true, isFeatured: false, isService: false, allowPreorder: false, attributes: "{}", tags: "[]", vatRate: "23.00", shippingClassId: "" });
     setShowForm(true); setError("");
   };
 
   const openEdit = (p: any) => {
     setEditingProduct(p);
-    setForm({ name: p.name, sku: p.sku || "", ean: p.ean || "", price: p.price, comparePrice: p.comparePrice || "", costPrice: p.costPrice || "", stock: String(p.stock), minStock: String(p.minStock), categoryId: p.categoryId ? String(p.categoryId) : "", brandId: p.brandId ? String(p.brandId) : "", shortDescription: p.shortDescription || "", description: p.description || "", isActive: p.isActive, isFeatured: p.isFeatured, isService: p.isService, allowPreorder: p.allowPreorder, attributes: JSON.stringify(p.attributes || {}), tags: JSON.stringify(p.tags || []), vatRate: p.vatRate || "23.00" });
+    setForm({ name: p.name, sku: p.sku || "", ean: p.ean || "", price: p.price, comparePrice: p.comparePrice || "", costPrice: p.costPrice || "", stock: String(p.stock), minStock: String(p.minStock), categoryId: p.categoryId ? String(p.categoryId) : "", brandId: p.brandId ? String(p.brandId) : "", shortDescription: p.shortDescription || "", description: p.description || "", isActive: p.isActive, isFeatured: p.isFeatured, isService: p.isService, allowPreorder: p.allowPreorder, attributes: JSON.stringify(p.attributes || {}), tags: JSON.stringify(p.tags || []), vatRate: p.vatRate || "23.00", shippingClassId: p.shippingClassId ? String(p.shippingClassId) : "" });
     setShowForm(true); setError("");
   };
 
   const saveProduct = async () => {
     setError("");
-    const body: any = { ...form, stock: parseInt(form.stock), minStock: parseInt(form.minStock), categoryId: form.categoryId ? parseInt(form.categoryId) : null, brandId: form.brandId ? parseInt(form.brandId) : null, ean: form.ean || null, comparePrice: form.comparePrice || null, costPrice: form.costPrice || null, attributes: JSON.parse(form.attributes || "{}"), tags: JSON.parse(form.tags || "[]") };
+    const body: any = { ...form, stock: parseInt(form.stock), minStock: parseInt(form.minStock), categoryId: form.categoryId ? parseInt(form.categoryId) : null, brandId: form.brandId ? parseInt(form.brandId) : null, shippingClassId: form.shippingClassId ? parseInt(form.shippingClassId) : null, ean: form.ean || null, comparePrice: form.comparePrice || null, costPrice: form.costPrice || null, attributes: JSON.parse(form.attributes || "{}"), tags: JSON.parse(form.tags || "[]") };
     if (editingProduct) body.id = editingProduct.id;
     const res = await fetch("/api/admin/products", { method: editingProduct ? "PUT" : "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
     const data = await res.json();
@@ -160,6 +162,13 @@ export default function AdminProductsPage() {
                   <select value={form.categoryId} onChange={e => u("categoryId", e.target.value)} className="w-full border rounded px-3 py-1.5 text-sm">
                     <option value="">Selecionar</option>
                     {categories.map((c: any) => <option key={c.id} value={c.id}>{c.parentId ? "— " : ""}{c.name}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-xs text-slate-500">Classe de envio</label>
+                  <select value={form.shippingClassId} onChange={e => u("shippingClassId", e.target.value)} className="w-full border rounded px-3 py-1.5 text-sm">
+                    <option value="">Pequeno (padrão)</option>
+                    {shippingClasses.map((c: any) => <option key={c.id} value={c.id} disabled={!c.isActive}>{c.displayName} — {(c.rateCents / 100).toFixed(2)} €{!c.isActive ? " (inativa)" : ""}</option>)}
                   </select>
                 </div>
               </div>

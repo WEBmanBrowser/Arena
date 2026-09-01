@@ -24,7 +24,7 @@
  *   Monetary values are INTEGER CENTS in the service API.
  */
 import { db } from "@/db";
-import { addresses, customerNotes, orders, orderItems, users, wishlists, rmaRequests, RMA_STATUSES } from "@/db/schema";
+import { addresses, customerNotes, invoiceDocuments, orders, orderItems, users, wishlists, rmaRequests, RMA_STATUSES } from "@/db/schema";
 import { and, asc, desc, eq, gte, ilike, inArray, lte, or, sql, type SQLWrapper, type SQL } from "drizzle-orm";
 import { createAuditLog } from "@/lib/audit";
 
@@ -647,5 +647,18 @@ export async function getAccountOrderDetail(orderId: number, userId: number) {
   if (!order || order.userId !== userId) return null; // IDOR-safe: 404
 
   const items = await db.select().from(orderItems).where(eq(orderItems.orderId, orderId)).orderBy(asc(orderItems.id));
-  return { order, items };
+  const invoices = await db.select({
+    id: invoiceDocuments.id,
+    documentType: invoiceDocuments.documentType,
+    documentNumber: invoiceDocuments.documentNumber,
+    status: invoiceDocuments.status,
+    issuedAt: invoiceDocuments.issuedAt,
+    documentReference: invoiceDocuments.documentReference,
+    amountCents: invoiceDocuments.amountCents,
+    currency: invoiceDocuments.currency,
+  }).from(invoiceDocuments).where(and(
+    eq(invoiceDocuments.orderId, orderId),
+    eq(invoiceDocuments.status, "issued"),
+  )).orderBy(desc(invoiceDocuments.createdAt));
+  return { order, items, invoiceDocuments: invoices };
 }

@@ -43,6 +43,13 @@
       "when": 1788215528188,
       "tag": "0005_integration_foundations",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1788258304977,
+      "tag": "0006_b34a_operational_shipping_manual_invoicing",
+      "breakpoints": true
     }
   ]
 }
