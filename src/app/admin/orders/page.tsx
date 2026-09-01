@@ -87,6 +87,8 @@ export default function AdminOrdersPage() {
   const [detailLoading, setDetailLoading] = useState(false);
   const [comment, setComment] = useState("");
   const [tracking, setTracking] = useState("");
+  const [invoiceReference, setInvoiceReference] = useState("");
+  const [invoiceIssuedAt, setInvoiceIssuedAt] = useState("");
   const [saving, setSaving] = useState(false);
 
   const load = useCallback(async (page = 1) => {
@@ -113,6 +115,8 @@ export default function AdminOrdersPage() {
       if (!res.ok) throw new Error(data.error || "Erro");
       setDetail(data);
       setTracking(data.order.trackingNumber || "");
+      setInvoiceReference("");
+      setInvoiceIssuedAt(new Date().toISOString().slice(0, 10));
       setComment("");
     } catch (e) { setError((e as Error).message); }
     setDetailLoading(false);
@@ -140,6 +144,20 @@ export default function AdminOrdersPage() {
     if (!res.ok) { setError(data.error || "Erro"); return; }
     setDetail(data.order || data);
     load(pagination.page);
+  };
+
+  const recordInvoice = async () => {
+    if (!detail || saving || !invoiceReference.trim()) return;
+    setSaving(true); setError("");
+    const res = await fetch(`/api/admin/orders/${detail.order.id}/manual-invoice`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ officialReference: invoiceReference.trim(), issuedAt: invoiceIssuedAt || undefined }),
+    });
+    const data = await res.json();
+    setSaving(false);
+    if (!res.ok) { setError(data.error || "Erro"); return; }
+    await openDetail(detail.order.id);
   };
 
   const setFilter = (patch: Partial<Filters>) => setFilters(f => ({ ...f, ...patch }));
@@ -276,6 +294,19 @@ export default function AdminOrdersPage() {
           <section className="mt-6">
             <h4 className="font-semibold mb-2 text-sm">Pagamentos</h4>
             {detail.payments.length === 0 ? <p className="text-xs text-slate-400">Sem registos de pagamento.</p> : detail.payments.map(p => <div key={p.id} className="text-xs bg-slate-50 rounded p-2 mb-1">{p.provider} · {PAYMENT_METHOD_LABELS[p.method ?? ""] || p.method || "—"} · {fmtMoney(p.amount)} {p.currency} · {PAYMENT_STATUS_LABELS[p.status] || p.status} {p.paidAt ? `· pago em ${fmtDate(p.paidAt)}` : ""}</div>)}
+          </section>
+
+          <section className="mt-6">
+            <h4 className="font-semibold mb-2 text-sm">Faturação manual</h4>
+            {detail.invoiceDocuments.length === 0 ? <p className="text-xs text-slate-400 mb-2">Sem documentos fiscais registados.</p> : detail.invoiceDocuments.map(doc => <div key={doc.id} className="text-xs bg-slate-50 rounded p-2 mb-1">{doc.documentType} · {doc.documentNumber || doc.documentReference || "—"} · {doc.status} · {doc.amountCents != null ? `${(doc.amountCents / 100).toFixed(2)} ${doc.currency}` : "—"} · {fmtDate(doc.issuedAt)}</div>)}
+            {!detail.invoiceDocuments.some(doc => doc.documentType === "invoice" && doc.status === "issued") && (
+              <div className="flex flex-wrap gap-2 mt-3">
+                <input value={invoiceReference} onChange={e => setInvoiceReference(e.target.value)} maxLength={100} placeholder="Referência/n.º oficial emitido externamente" className="border rounded px-3 py-1.5 text-xs flex-1 min-w-64" />
+                <input type="date" value={invoiceIssuedAt} onChange={e => setInvoiceIssuedAt(e.target.value)} className="border rounded px-3 py-1.5 text-xs" />
+                <button onClick={recordInvoice} disabled={saving || !invoiceReference.trim()} className="px-3 py-1.5 bg-sky-600 text-white rounded text-xs disabled:opacity-50">Registar fatura</button>
+              </div>
+            )}
+            <p className="text-[11px] text-slate-400 mt-1">Regista apenas documentos já emitidos no sistema fiscal externo. Campos emitidos ficam imutáveis.</p>
           </section>
 
           <section className="mt-6">

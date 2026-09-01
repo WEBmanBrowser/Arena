@@ -3,6 +3,7 @@ import { db } from "@/db";
 import { products, coupons } from "@/db/schema";
 import { eq, and } from "drizzle-orm";
 import { toCents, toEuros, calcVatFromGross, lineTotal } from "@/lib/money";
+import { calculateShippingForCart, ShippingRateError } from "@/lib/shipping-rates";
 
 /**
  * POST /api/cart/quote
@@ -124,7 +125,12 @@ export async function POST(req: NextRequest) {
     }
 
     const afterDiscountCents = subtotalCents - discountCents;
-    const shippingCents = deliveryType === "pickup" ? 0 : (afterDiscountCents >= 5000 ? 0 : 499);
+    const shippingQuote = await calculateShippingForCart({
+      items: quoteLines.map((line) => ({ productId: line.productId, quantity: line.quantity })),
+      deliveryType: deliveryType === "pickup" ? "pickup" : "shipping",
+      merchandiseAfterDiscountCents: afterDiscountCents,
+    });
+    const shippingCents = shippingQuote.shippingCents;
     const totalCents = afterDiscountCents + shippingCents;
 
     // Recalculate VAT on discounted amount (proportional)
@@ -145,9 +151,14 @@ export async function POST(req: NextRequest) {
       couponError,
       allInStock,
       anyPriceChanged,
-      freeShippingThreshold: "50.00",
+      freeShippingThreshold: shippingQuote.freeShippingThresholdEuros,
+      shippingClass: shippingQuote.winningClass ? { key: shippingQuote.winningClass.key, displayName: shippingQuote.winningClass.displayName } : null,
+      freeShippingApplied: shippingQuote.freeShippingApplied,
     });
   } catch (e) {
+    if (e instanceof ShippingRateError) {
+      return NextResponse.json({ error: e.message, code: e.code }, { status: 400 });
+    }
     console.error("Cart quote error:", e);
     return NextResponse.json({ error: "Erro ao calcular carrinho" }, { status: 500 });
   }

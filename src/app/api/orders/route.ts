@@ -6,6 +6,7 @@ import { getCurrentUser } from "@/lib/auth";
 import { generateOrderNumber } from "@/lib/utils";
 import { toCents, toEuros, calcVatFromGross, lineTotal as calcLineTotal, allocateDiscount, unitPriceNet as calcUnitPriceNet, getReservationMinutes } from "@/lib/money";
 import { sendEmail, orderCreatedEmail } from "@/lib/email";
+import { calculateShippingForCart, ShippingRateError } from "@/lib/shipping-rates";
 
 export async function POST(req: NextRequest) {
   try {
@@ -97,7 +98,13 @@ export async function POST(req: NextRequest) {
 
       // ── 4. Calculate totals ─────────────────────────────────
       const afterDiscountCents = subtotalCents - discountCents;
-      const shippingCents = deliveryType === "pickup" ? 0 : (afterDiscountCents >= 5000 ? 0 : 499);
+      const delivery = deliveryType === "pickup" ? "pickup" : "shipping";
+      const shippingQuote = await calculateShippingForCart({
+        items: orderLines.map((line) => ({ productId: line.product.id, quantity: line.quantity })),
+        deliveryType: delivery,
+        merchandiseAfterDiscountCents: afterDiscountCents,
+      }, tx as typeof db);
+      const shippingCents = shippingQuote.shippingCents;
       const totalCents = afterDiscountCents + shippingCents;
 
       // Calculate total VAT from per-line after-discount values
@@ -126,8 +133,8 @@ export async function POST(req: NextRequest) {
         total: toEuros(totalCents),
         paymentMethod: paymentMethod || "bank_transfer",
         paymentStatus: "pending",
-        shippingMethod: shippingMethod || null,
-        deliveryType: deliveryType || "shipping",
+        shippingMethod: delivery === "pickup" ? "store_pickup" : (shippingQuote.winningClass?.key || shippingMethod || null),
+        deliveryType: delivery,
         couponCode: validatedCouponCode,
         nif: nif || null,
         companyName: companyName || null,
@@ -206,6 +213,7 @@ export async function POST(req: NextRequest) {
     });
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : "Erro ao criar encomenda";
+    if (e instanceof ShippingRateError) return NextResponse.json({ error: e.message, code: e.code }, { status: 400 });
     if (msg.startsWith("VALIDATION:")) return NextResponse.json({ error: msg.replace("VALIDATION:", "") }, { status: 400 });
     console.error("Order creation error:", e);
     return NextResponse.json({ error: "Erro ao criar encomenda" }, { status: 500 });

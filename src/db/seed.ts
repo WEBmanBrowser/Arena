@@ -1,6 +1,7 @@
 import { db } from "./index";
-import { users, categories, brands, products, banners, settings, smartShoppingProfiles, pages } from "./schema";
+import { users, categories, brands, products, banners, settings, smartShoppingProfiles, pages, shippingClasses } from "./schema";
 import * as bcryptjs from "bcryptjs";
+import { eq } from "drizzle-orm";
 
 async function seed() {
   console.log("🌱 Seeding database...");
@@ -116,6 +117,12 @@ async function seed() {
   for (const b of allBrands) brandMap[b.slug] = b.id;
 
   // Products
+  await db.insert(shippingClasses).values([
+    { key: "small", displayName: "Pequeno", rateCents: 490, priority: 10, isActive: true, notes: "Classe inicial para produtos pequenos" },
+    { key: "large", displayName: "Grande", rateCents: 790, priority: 20, isActive: true, notes: "Classe inicial para produtos grandes" },
+  ]).onConflictDoNothing();
+  const [smallShippingClass] = await db.select({ id: shippingClasses.id }).from(shippingClasses).where(eq(shippingClasses.key, "small")).limit(1);
+
   const productData = [
     {
       name: "[DEMO] AMD Ryzen 7 7800X3D",
@@ -369,7 +376,7 @@ async function seed() {
   ];
 
   for (const p of productData) {
-    await db.insert(products).values(p as any).onConflictDoNothing();
+    await db.insert(products).values({ ...p, shippingClassId: (p as any).isService ? null : smallShippingClass?.id } as any).onConflictDoNothing();
   }
 
   // Banners
@@ -452,8 +459,9 @@ async function seed() {
     { key: "store_address", value: "Esposende, Braga, Portugal", group: "store" },
     { key: "store_hours", value: "Seg-Sex: 9:00-18:30 | Sáb: 9:00-13:00", group: "store" },
     { key: "store_pickup", value: "true", group: "store" },
-    { key: "shipping_free_above", value: "50.00", group: "shipping" },
-    { key: "shipping_default_cost", value: "4.99", group: "shipping" },
+    { key: "shipping_free_threshold_enabled", value: "true", group: "shipping" },
+    { key: "shipping_free_threshold_cents", value: "10000", group: "shipping" },
+    { key: "invoice_mode", value: "manual", group: "invoicing" },
     { key: "vat_rate", value: "23", group: "tax" },
     { key: "google_analytics_id", value: "", group: "analytics" },
     { key: "meta_pixel_id", value: "", group: "analytics" },

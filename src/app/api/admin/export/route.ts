@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/db";
-import { products, brands, categories } from "@/db/schema";
+import { products, brands, categories, shippingClasses } from "@/db/schema";
 import { eq, asc } from "drizzle-orm";
 import { getCurrentUser, isStaff } from "@/lib/auth";
 import { createAuditLog } from "@/lib/audit";
@@ -13,10 +13,13 @@ export async function GET(req: NextRequest) {
   const allProducts = await db.select().from(products).orderBy(asc(products.name));
   const allBrands = await db.select().from(brands);
   const allCategories = await db.select().from(categories);
+  const allShippingClasses = await db.select().from(shippingClasses);
   const brandMap: Record<number, string> = {};
   const catMap: Record<number, string> = {};
+  const shippingClassMap: Record<number, string> = {};
   allBrands.forEach(b => { brandMap[b.id] = b.name; });
   allCategories.forEach(c => { catMap[c.id] = c.name; });
+  allShippingClasses.forEach(c => { shippingClassMap[c.id] = c.key; });
 
   // CSV formula injection protection
   const sanitize = (v: string | null | undefined): string => {
@@ -27,11 +30,12 @@ export async function GET(req: NextRequest) {
     return s;
   };
 
-  const headers = ["SKU", "EAN", "Nome", "Marca", "Categoria", "Preço", "IVA%", "Stock", "Reservado", "Disponível", "Stock Mínimo", "Ativo"];
+  const headers = ["SKU", "EAN", "Nome", "Marca", "Categoria", "Classe Envio", "Preço", "IVA%", "Stock", "Reservado", "Disponível", "Stock Mínimo", "Ativo"];
   const rows = allProducts.map(p => [
     sanitize(p.sku), sanitize(p.ean), sanitize(p.name),
     sanitize(p.brandId ? brandMap[p.brandId] : ""),
     sanitize(p.categoryId ? catMap[p.categoryId] : ""),
+    sanitize(p.shippingClassId ? shippingClassMap[p.shippingClassId] : ""),
     p.price, p.vatRate, String(p.stock), String(p.reservedStock),
     String(p.stock - p.reservedStock), String(p.minStock),
     p.isActive ? "Sim" : "Não",

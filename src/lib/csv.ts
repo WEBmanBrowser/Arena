@@ -74,6 +74,7 @@ const HEADER_ALIASES: Record<string, string> = {
   skufornecedor: "supplierSku", suppliersku: "supplierSku",
   precocusto: "costPrice", costprice: "costPrice", custo: "costPrice",
   leadtime: "leadTimeDays", leadtimedays: "leadTimeDays", prazo: "leadTimeDays",
+  classeenvio: "shippingClass", shippingclass: "shippingClass", portes: "shippingClass",
 };
 
 /** Auto-map CSV headers to canonical fields */

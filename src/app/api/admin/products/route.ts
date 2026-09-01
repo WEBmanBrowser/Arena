@@ -1,12 +1,22 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/db";
-import { products, orderItems } from "@/db/schema";
+import { products, orderItems, shippingClasses } from "@/db/schema";
 import { eq, desc, asc, ilike, and, or, sql, ne } from "drizzle-orm";
 import { getCurrentUser, isStaff, isManager } from "@/lib/auth";
 import { slugify } from "@/lib/utils";
 import { createAuditLog } from "@/lib/audit";
 import { isValidGTIN, createProductSchema, updateProductSchema, validate } from "@/lib/validation";
 import { buildAdminProductConditions } from "@/lib/product-filters";
+import { ensureDefaultShippingConfiguration } from "@/lib/shipping-rates";
+
+async function resolveShippingClassId(inputId: number | null | undefined, isService: boolean): Promise<number | null> {
+  await ensureDefaultShippingConfiguration();
+  if (isService) return inputId ?? null;
+  const requestedKey = inputId ? eq(shippingClasses.id, inputId) : eq(shippingClasses.key, "small");
+  const [cls] = await db.select({ id: shippingClasses.id, isActive: shippingClasses.isActive }).from(shippingClasses).where(requestedKey).limit(1);
+  if (!cls || !cls.isActive) throw new Error("INVALID_SHIPPING_CLASS");
+  return cls.id;
+}
 
 function catchUniqueViolation(e: unknown): NextResponse | null {
   const msg = e instanceof Error ? e.message : "";
@@ -51,9 +61,11 @@ export async function GET(req: NextRequest) {
     default: orderBy = desc(products.createdAt);
   }
 
+  await ensureDefaultShippingConfiguration();
   const [countResult] = await db.select({ count: sql<number>`count(*)` }).from(products).where(where);
   const items = await db.select().from(products).where(where).orderBy(orderBy).limit(limit).offset(offset);
-  return NextResponse.json({ products: items, total: Number(countResult.count), page, pages: Math.ceil(Number(countResult.count) / limit), limit });
+  const classes = await db.select().from(shippingClasses).orderBy(shippingClasses.priority, shippingClasses.displayName);
+  return NextResponse.json({ products: items, shippingClasses: classes, total: Number(countResult.count), page, pages: Math.ceil(Number(countResult.count) / limit), limit });
 }
 
 export async function POST(req: NextRequest) {
@@ -62,7 +74,7 @@ export async function POST(req: NextRequest) {
 
   const raw = await req.json();
   // Coerce types from form
-  const input = { ...raw, stock: raw.stock != null ? Number(raw.stock) : 0, minStock: raw.minStock != null ? Number(raw.minStock) : 0, brandId: raw.brandId ? Number(raw.brandId) : null, categoryId: raw.categoryId ? Number(raw.categoryId) : null };
+  const input = { ...raw, stock: raw.stock != null ? Number(raw.stock) : 0, minStock: raw.minStock != null ? Number(raw.minStock) : 0, brandId: raw.brandId ? Number(raw.brandId) : null, categoryId: raw.categoryId ? Number(raw.categoryId) : null, shippingClassId: raw.shippingClassId ? Number(raw.shippingClassId) : null };
   const v = validate(createProductSchema, input);
   if (!v.success) return NextResponse.json({ error: "VALIDATION_ERROR", details: v.error }, { status: 400 });
   const d = v.data;
@@ -77,6 +89,12 @@ export async function POST(req: NextRequest) {
   if (isNaN(price) || price < 0) return NextResponse.json({ error: "Preço inválido" }, { status: 400 });
 
   let slug = d.slug || slugify(d.name);
+  let shippingClassId: number | null;
+  try {
+    shippingClassId = await resolveShippingClassId(d.shippingClassId, !!d.isService);
+  } catch {
+    return NextResponse.json({ error: "INVALID_SHIPPING_CLASS" }, { status: 400 });
+  }
   const [existingSlug] = await db.select({ id: products.id }).from(products).where(eq(products.slug, slug)).limit(1);
   if (existingSlug) slug = slug + "-" + Date.now().toString(36);
 
@@ -90,6 +108,7 @@ export async function POST(req: NextRequest) {
       weight: d.weight || null, dimensions: d.dimensions || null,
       images: d.images || [], attributes: d.attributes || {}, tags: d.tags || [],
       isActive: d.isActive !== false, isFeatured: !!d.isFeatured, isService: !!d.isService, allowPreorder: !!d.allowPreorder,
+      shippingClassId,
       metaTitle: d.metaTitle || null, metaDescription: d.metaDescription || null,
     }).returning();
 
@@ -107,7 +126,7 @@ export async function PUT(req: NextRequest) {
   if (!user || !isManager(user.role)) return NextResponse.json({ error: "Não autorizado" }, { status: 403 });
 
   const raw = await req.json();
-  const input = { ...raw, id: raw.id ? Number(raw.id) : undefined, minStock: raw.minStock != null ? Number(raw.minStock) : undefined, brandId: raw.brandId ? Number(raw.brandId) : null, categoryId: raw.categoryId ? Number(raw.categoryId) : null };
+  const input = { ...raw, id: raw.id ? Number(raw.id) : undefined, minStock: raw.minStock != null ? Number(raw.minStock) : undefined, brandId: raw.brandId ? Number(raw.brandId) : null, categoryId: raw.categoryId ? Number(raw.categoryId) : null, shippingClassId: raw.shippingClassId ? Number(raw.shippingClassId) : null };
   const v = validate(updateProductSchema, input);
   if (!v.success) return NextResponse.json({ error: "VALIDATION_ERROR", details: v.error }, { status: 400 });
   const d = v.data;
@@ -133,6 +152,15 @@ export async function PUT(req: NextRequest) {
     if (isNaN(p) || p < 0) return NextResponse.json({ error: "Preço inválido" }, { status: 400 });
   }
 
+  let newShippingClassId: number | null | undefined;
+  if (d.shippingClassId !== undefined || d.isService !== undefined) {
+    try {
+      newShippingClassId = await resolveShippingClassId(d.shippingClassId ?? existing.shippingClassId, d.isService ?? existing.isService);
+    } catch {
+      return NextResponse.json({ error: "INVALID_SHIPPING_CLASS" }, { status: 400 });
+    }
+  }
+
   const updateData: Record<string, unknown> = {};
   if (d.name !== undefined) { updateData.name = d.name; updateData.slug = d.slug || slugify(d.name); }
   if (d.sku !== undefined) updateData.sku = d.sku;
@@ -148,6 +176,8 @@ export async function PUT(req: NextRequest) {
   if (d.minStock !== undefined) updateData.minStock = d.minStock;
   if (d.isActive !== undefined) updateData.isActive = d.isActive;
   if (d.isFeatured !== undefined) updateData.isFeatured = d.isFeatured;
+  if (d.isService !== undefined) updateData.isService = d.isService;
+  if (newShippingClassId !== undefined) updateData.shippingClassId = newShippingClassId;
   if (d.metaTitle !== undefined) updateData.metaTitle = d.metaTitle;
   if (d.metaDescription !== undefined) updateData.metaDescription = d.metaDescription;
   updateData.updatedAt = new Date();
@@ -155,8 +185,13 @@ export async function PUT(req: NextRequest) {
   try {
     const [updated] = await db.update(products).set(updateData).where(eq(products.id, d.id)).returning();
     const priceChanged = d.price !== undefined && d.price !== existing.price;
+    const shippingChanged = newShippingClassId !== undefined && newShippingClassId !== existing.shippingClassId;
     await createAuditLog({ userId: user.id, action: "product.updated", entity: "product", entityId: d.id,
       details: priceChanged ? { priceFrom: existing.price, priceTo: d.price } : { name: updated.name } });
+    if (shippingChanged) {
+      await createAuditLog({ userId: user.id, action: "product.shipping_class_changed", entity: "product", entityId: d.id,
+        details: { from: existing.shippingClassId, to: newShippingClassId } });
+    }
     return NextResponse.json({ product: updated });
   } catch (e) {
     const mapped = catchUniqueViolation(e);
