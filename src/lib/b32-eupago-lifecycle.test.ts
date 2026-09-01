@@ -2,6 +2,7 @@
 // Real PostgreSQL, real production services. Network is stubbed; dummy keys only.
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import pg from "pg";
 import { db } from "@/db";
 import {
   auditLogs,
@@ -901,6 +902,82 @@ describe("B.3.2 — refunds integrate with the B.3.5 ledger", () => {
     expect(state.refundedCents).toBe(2500);
     const audits = await db.select().from(auditLogs).where(eq(auditLogs.action, "refund.provider_settled"));
     expect(audits).toHaveLength(1);
+  });
+
+  it("preserves two distinct equal refund movements when settlement races", async () => {
+    const { order, admin, trid } = await paidOrderWithRefundBase(10000);
+    const requested = await Promise.all(
+      [0, 1].map(() =>
+        requestRefund({
+          orderId: order.id,
+          amountCents: 2500,
+          idempotencyKey: `b32-refund-${unique()}`,
+          requestedBy: admin.id,
+          provider: "eupago",
+        })
+      )
+    );
+    const refundIds = requested.map(({ refund }) => refund.id).sort((a, b) => a - b);
+    await db
+      .update(refundAttempts)
+      .set({ providerOriginalTransactionId: trid })
+      .where(inArray(refundAttempts.id, refundIds));
+
+    // Hold the first candidate so both deliveries reach settlement concurrently
+    // on separate pool connections/transactions. Waiting for both lock waiters
+    // makes the race deterministic rather than timing-dependent.
+    const blocker = new pg.Client({ connectionString: process.env.DATABASE_URL });
+    await blocker.connect();
+    try {
+      await blocker.query("BEGIN");
+      await blocker.query("SELECT id FROM refund_attempts WHERE id = $1 FOR UPDATE", [refundIds[0]]);
+
+      const refundTrids = [`R-${unique()}`, `R-${unique()}`];
+      const deliveries = refundTrids.map(async (refundTrid) =>
+        processEupagoWebhook(
+          await plainWebhook({
+            trid: refundTrid,
+            originalTrid: trid,
+            status: "Refund",
+            amount: "25.00",
+            currency: "EUR",
+          })
+        )
+      );
+
+      let lockWaiters = 0;
+      for (let attempt = 0; attempt < 200 && lockWaiters < 2; attempt += 1) {
+        const result = await blocker.query<{ count: string }>(
+          "SELECT count(*)::text AS count FROM pg_stat_activity WHERE wait_event_type = 'Lock'"
+        );
+        lockWaiters = Number(result.rows[0].count);
+        if (lockWaiters < 2) await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(lockWaiters).toBeGreaterThanOrEqual(2);
+      await blocker.query("COMMIT");
+
+      const results = await Promise.all(deliveries);
+      expect(results.map((result) => result.outcome).sort()).toEqual([
+        "refund_settled",
+        "refund_settled",
+      ]);
+
+      const rows = await db
+        .select()
+        .from(refundAttempts)
+        .where(inArray(refundAttempts.id, refundIds));
+      expect(rows.map((row) => row.status)).toEqual(["succeeded", "succeeded"]);
+      expect(new Set(rows.map((row) => row.providerRefundId))).toEqual(new Set(refundTrids));
+
+      const events = await db
+        .select()
+        .from(providerWebhookEvents)
+        .where(inArray(providerWebhookEvents.providerEventId, refundTrids));
+      expect(events.map((event) => event.status)).toEqual(["processed", "processed"]);
+    } finally {
+      await blocker.query("ROLLBACK").catch(() => {});
+      await blocker.end();
+    }
   });
 
   it("supports multiple partial refunds correlated by originalTrid", async () => {
