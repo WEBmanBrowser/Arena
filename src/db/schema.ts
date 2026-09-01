@@ -607,6 +607,28 @@ export const paymentAttempts = pgTable("payment_attempts", {
   failureReason: varchar("failure_reason", { length: 255 }),
   expiresAt: timestamp("expires_at"),
   completedAt: timestamp("completed_at"),
+  // ── B.3.2 (additive): Eupago correlation + exactly-once-attempt state ──
+  /**
+   * Stable INTERNAL identifier sent to the provider as `identifier`/`id`.
+   * Persisted BEFORE the provider create call and never regenerated on
+   * retry/recovery — it is the pre-create recovery primitive.
+   */
+  providerIdentifier: varchar("provider_identifier", { length: 64 }),
+  /** Provider fund-movement id (Eupago `trid`) for the settling payment. */
+  providerTransactionId: varchar("provider_transaction_id", { length: 64 }),
+  /** Multibanco entity code (operational display only). */
+  providerEntity: varchar("provider_entity", { length: 20 }),
+  /**
+   * Local exactly-once-attempt state. `armed` = identifier committed, at most
+   * one create request may be issued. `requested` = the single create request
+   * was issued. `reconciliation_required` = ambiguous outcome, operator/
+   * recovery lookup must resolve it — NEVER an automatic recreate.
+   */
+  recoveryState: varchar("recovery_state", { length: 30 }),
+  /** Sanitized operator-intervention code (never provider payloads). */
+  operatorActionCode: varchar("operator_action_code", { length: 60 }),
+  /** Timestamp the single provider create request was issued. */
+  providerRequestedAt: timestamp("provider_requested_at"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
 }, (t) => [
@@ -614,6 +636,13 @@ export const paymentAttempts = pgTable("payment_attempts", {
   index("pa_status_idx").on(t.status),
   uniqueIndex("pa_provider_reference_unique").on(t.provider, t.providerReference)
     .where(sql`provider_reference IS NOT NULL`),
+  // B.3.2: the stable identifier is unique per provider — a duplicate would
+  // break create-idempotency and recovery correlation.
+  uniqueIndex("pa_provider_identifier_unique").on(t.provider, t.providerIdentifier)
+    .where(sql`provider_identifier IS NOT NULL`),
+  // B.3.2: one fund movement (trid) settles at most one attempt per provider.
+  uniqueIndex("pa_provider_transaction_unique").on(t.provider, t.providerTransactionId)
+    .where(sql`provider_transaction_id IS NOT NULL`),
 ]);
 
 // ─── B.3.1: SHIPMENTS (external carrier synchronization) ──
@@ -687,6 +716,14 @@ export type PaymentAttemptStatus = (typeof PAYMENT_ATTEMPT_STATUSES)[number];
 export const PAYMENT_ATTEMPT_METHODS = ["multibanco", "mbway", "card"] as const;
 export type PaymentAttemptMethod = (typeof PAYMENT_ATTEMPT_METHODS)[number];
 
+// ─── B.3.2: PROVIDER CREATE/REFUND RECOVERY STATES ────────
+// Local exactly-once-attempt semantics. Eupago exposes NO formal
+// Idempotency-Key contract for create/refund, so ambiguity is never resolved
+// by a blind retry: it becomes `reconciliation_required` until a recovery
+// lookup or a trusted webhook proves the real provider state.
+export const PROVIDER_RECOVERY_STATES = ["armed", "requested", "reconciliation_required"] as const;
+export type ProviderRecoveryState = (typeof PROVIDER_RECOVERY_STATES)[number];
+
 export const SHIPMENT_STATUSES = ["pending", "created", "label_ready", "in_transit", "delivered", "exception", "cancelled"] as const;
 export type ShipmentStatus = (typeof SHIPMENT_STATUSES)[number];
 
@@ -729,6 +766,21 @@ export const refundAttempts = pgTable("refund_attempts", {
   errorMessage: varchar("error_message", { length: 500 }),
   requestedBy: integer("requested_by").notNull().references(() => users.id),
   completedAt: timestamp("completed_at"),
+  // ── B.3.2 (additive): provider refund correlation ──
+  /**
+   * The ORIGINAL payment fund-movement id (Eupago `originalTrid`) this refund
+   * is executed against. Eupago issues a DISTINCT trid for the refund
+   * movement itself — stored in providerRefundId once known.
+   */
+  providerOriginalTransactionId: varchar("provider_original_transaction_id", { length: 64 }),
+  /**
+   * Local exactly-once-request state for provider refund execution:
+   * `armed` | `requested` | `reconciliation_required`. Never auto-retried.
+   */
+  recoveryState: varchar("recovery_state", { length: 30 }),
+  /** Sanitized operator-intervention code (e.g. IBAN/BIC required). */
+  operatorActionCode: varchar("operator_action_code", { length: 60 }),
+  providerRequestedAt: timestamp("provider_requested_at"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
 }, (t) => [
@@ -736,6 +788,9 @@ export const refundAttempts = pgTable("refund_attempts", {
   index("refund_attempts_payment_idx").on(t.paymentId),
   index("refund_attempts_status_idx").on(t.status),
   uniqueIndex("refund_attempts_idempotency_key_unique").on(t.idempotencyKey),
+  // B.3.2: a provider refund movement (refund trid) settles at most one attempt.
+  uniqueIndex("refund_attempts_provider_refund_unique").on(t.provider, t.providerRefundId)
+    .where(sql`provider_refund_id IS NOT NULL AND provider <> 'manual'`),
   check("refund_attempts_amount_positive", sql`${t.amountCents} > 0`),
   check("refund_attempts_currency_format", sql`${t.currency} ~ '^[A-Z]{3}$'`),
 ]);
