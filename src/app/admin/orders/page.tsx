@@ -41,6 +41,25 @@ function fmtMoney(v: string | null | undefined) {
   return `${parseFloat(v || "0").toFixed(2)}€`;
 }
 
+/** B.3.5 — deterministic € string → integer cents (no floating-point math). */
+function parseEurosToCents(v: string): number | null {
+  const m = /^(\d+)(?:[.,](\d{1,2}))?$/.exec(v.trim());
+  if (!m) return null;
+  return Number(m[1]) * 100 + Number((m[2] ?? "").padEnd(2, "0"));
+}
+
+const REFUND_STATUS_LABELS: Record<string, string> = {
+  pending: "Pendente",
+  processing: "Em processamento",
+  succeeded: "Concluído",
+  failed: "Falhado",
+  cancelled: "Cancelado",
+};
+
+function fmtCents(cents: number) {
+  return `${(cents / 100).toFixed(2)}€`;
+}
+
 /** Render an address object (jsonb) as human-readable lines — never JSON.stringify. */
 function formatAddress(addr: unknown): string[] {
   if (!addr || typeof addr !== "object") return ["—"];
@@ -89,6 +108,11 @@ export default function AdminOrdersPage() {
   const [tracking, setTracking] = useState("");
   const [invoiceReference, setInvoiceReference] = useState("");
   const [invoiceIssuedAt, setInvoiceIssuedAt] = useState("");
+  const [refundAmount, setRefundAmount] = useState("");
+  const [refundReason, setRefundReason] = useState("");
+  const [refundReference, setRefundReference] = useState("");
+  const [refundCompletedAt, setRefundCompletedAt] = useState("");
+  const [refundAsCompleted, setRefundAsCompleted] = useState(false);
   const [saving, setSaving] = useState(false);
 
   const load = useCallback(async (page = 1) => {
@@ -117,6 +141,11 @@ export default function AdminOrdersPage() {
       setTracking(data.order.trackingNumber || "");
       setInvoiceReference("");
       setInvoiceIssuedAt(new Date().toISOString().slice(0, 10));
+      setRefundAmount("");
+      setRefundReason("");
+      setRefundReference("");
+      setRefundCompletedAt(new Date().toISOString().slice(0, 10));
+      setRefundAsCompleted(false);
       setComment("");
     } catch (e) { setError((e as Error).message); }
     setDetailLoading(false);
@@ -153,6 +182,51 @@ export default function AdminOrdersPage() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ officialReference: invoiceReference.trim(), issuedAt: invoiceIssuedAt || undefined }),
+    });
+    const data = await res.json();
+    setSaving(false);
+    if (!res.ok) { setError(data.error || "Erro"); return; }
+    await openDetail(detail.order.id);
+  };
+
+  // ── B.3.5 refunds ──────────────────────────────────────
+  const submitRefund = async () => {
+    if (!detail || saving) return;
+    const cents = parseEurosToCents(refundAmount);
+    if (cents == null || cents <= 0) { setError("Montante de reembolso inválido."); return; }
+    if (refundAsCompleted && !refundReference.trim()) { setError("Referência externa obrigatória para registo de reembolso concluído."); return; }
+    if (!confirm(refundAsCompleted
+      ? `Confirmar registo de reembolso manual CONCLUÍDO de ${(cents / 100).toFixed(2)} €? Confirme apenas se o dinheiro já foi efetivamente devolvido ao cliente.`
+      : `Solicitar reembolso de ${(cents / 100).toFixed(2)} €?`)) return;
+    setSaving(true); setError("");
+    const res = await fetch(`/api/admin/orders/${detail.order.id}/refunds`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        amountCents: cents,
+        reason: refundReason.trim() || undefined,
+        idempotencyKey: `admin-ui-${crypto.randomUUID()}`,
+        ...(refundAsCompleted ? { manualCompletion: { externalReference: refundReference.trim(), completedAt: refundCompletedAt } } : {}),
+      }),
+    });
+    const data = await res.json();
+    setSaving(false);
+    if (!res.ok) { setError(data.error || "Erro"); return; }
+    await openDetail(detail.order.id);
+  };
+
+  const refundAction = async (refundId: number, action: "complete" | "cancel" | "retry" | "fail") => {
+    if (!detail || saving) return;
+    if (action === "complete" && !refundReference.trim()) { setError("Referência externa obrigatória para concluir o reembolso."); return; }
+    if (action === "complete" && !confirm("Confirmar que o reembolso foi EFETIVAMENTE executado externamente?")) return;
+    if (action === "cancel" && !confirm("Cancelar este pedido de reembolso? (liberta o valor comprometido)")) return;
+    setSaving(true); setError("");
+    const res = await fetch(`/api/admin/refunds/${refundId}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(action === "complete"
+        ? { action, externalReference: refundReference.trim(), completedAt: refundCompletedAt }
+        : { action }),
     });
     const data = await res.json();
     setSaving(false);
@@ -307,6 +381,59 @@ export default function AdminOrdersPage() {
               </div>
             )}
             <p className="text-[11px] text-slate-400 mt-1">Regista apenas documentos já emitidos no sistema fiscal externo. Campos emitidos ficam imutáveis.</p>
+          </section>
+
+          <section className="mt-6">
+            <h4 className="font-semibold mb-2 text-sm">Reembolsos</h4>
+            {detail.refundState ? (
+              <>
+                <div className="text-xs bg-slate-50 rounded p-2 mb-2 grid grid-cols-2 md:grid-cols-4 gap-2">
+                  <span>Pago: <strong>{fmtCents(detail.refundState.paidCents)}</strong></span>
+                  <span>Reembolsado: <strong>{fmtCents(detail.refundState.refundedCents)}</strong></span>
+                  <span>Comprometido: <strong>{fmtCents(detail.refundState.committedCents)}</strong></span>
+                  <span>Reembolsável: <strong>{fmtCents(detail.refundState.remainingRefundableCents)}</strong></span>
+                </div>
+                {detail.refundState.fiscalCreditNotePending && (
+                  <p className="text-xs text-amber-600 mb-2">Nota de crédito pendente: registe o documento fiscal emitido externamente na secção de faturação.</p>
+                )}
+                {detail.refundState.fullyRefunded && (
+                  <p className="text-xs text-green-700 mb-2">Pagamento totalmente reembolsado. A transição de estado da encomenda para “Reembolsado” (se aplicável) é uma operação explícita na secção de estados.</p>
+                )}
+                {detail.refundState.refunds.length === 0 ? <p className="text-xs text-slate-400 mb-2">Sem reembolsos registados.</p> : detail.refundState.refunds.map(r => (
+                  <div key={r.id} className="text-xs bg-slate-50 rounded p-2 mb-1">
+                    #{r.id} · {fmtCents(r.amountCents)} {r.currency} · {REFUND_STATUS_LABELS[r.status] || r.status} · {r.provider === "manual" ? "manual" : r.provider}
+                    {r.providerRefundId ? ` · ref. ${r.providerRefundId}` : ""}
+                    {" · "}{fmtDate(r.createdAt)}
+                    {r.completedAt ? ` · concluído ${fmtDate(r.completedAt)}` : ""}
+                    <div className="flex gap-1 mt-1">
+                      {r.status === "pending" && r.provider === "manual" && <button onClick={() => refundAction(r.id, "complete")} disabled={saving} className="px-2 py-0.5 bg-green-600 text-white rounded disabled:opacity-50">Concluir c/ ref. externa</button>}
+                      {r.status === "pending" && <button onClick={() => refundAction(r.id, "cancel")} disabled={saving} className="px-2 py-0.5 bg-slate-500 text-white rounded disabled:opacity-50">Cancelar</button>}
+                      {r.status === "failed" && <button onClick={() => refundAction(r.id, "retry")} disabled={saving} className="px-2 py-0.5 bg-sky-600 text-white rounded disabled:opacity-50">Reintentar</button>}
+                    </div>
+                  </div>
+                ))}
+                {detail.refundState.paidCents > 0 && detail.refundState.remainingRefundableCents > 0 && (
+                  <div className="border rounded p-3 mt-2">
+                    <div className="flex flex-wrap gap-2">
+                      <input value={refundAmount} onChange={e => setRefundAmount(e.target.value)} maxLength={12} placeholder="Montante € (ex. 12.34)" className="border rounded px-3 py-1.5 text-xs w-36" />
+                      <input value={refundReason} onChange={e => setRefundReason(e.target.value)} maxLength={500} placeholder="Motivo interno (opcional)" className="border rounded px-3 py-1.5 text-xs flex-1 min-w-48" />
+                    </div>
+                    <label className="flex items-center gap-2 mt-2 text-xs text-slate-600">
+                      <input type="checkbox" checked={refundAsCompleted} onChange={e => setRefundAsCompleted(e.target.checked)} />
+                      Registar como reembolso manual CONCLUÍDO (o dinheiro já foi devolvido externamente — ex. transferência bancária)
+                    </label>
+                    {refundAsCompleted && (
+                      <div className="flex flex-wrap gap-2 mt-2">
+                        <input value={refundReference} onChange={e => setRefundReference(e.target.value)} maxLength={255} placeholder="Referência externa (obrigatória)" className="border rounded px-3 py-1.5 text-xs flex-1 min-w-48" />
+                        <input type="date" value={refundCompletedAt} onChange={e => setRefundCompletedAt(e.target.value)} className="border rounded px-3 py-1.5 text-xs" />
+                      </div>
+                    )}
+                    <button onClick={submitRefund} disabled={saving || !parseEurosToCents(refundAmount)} className="mt-2 px-3 py-1.5 bg-sky-600 text-white rounded text-xs disabled:opacity-50">Solicitar reembolso</button>
+                    <p className="text-[11px] text-slate-400 mt-1">Proteção contra sobre-reembolso aplicada no servidor. Reembolsos nunca repõem stock automaticamente.</p>
+                  </div>
+                )}
+              </>
+            ) : <p className="text-xs text-slate-400">Estado de reembolso indisponível.</p>}
           </section>
 
           <section className="mt-6">

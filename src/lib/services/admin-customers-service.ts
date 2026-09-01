@@ -24,7 +24,7 @@
  *   Monetary values are INTEGER CENTS in the service API.
  */
 import { db } from "@/db";
-import { addresses, customerNotes, invoiceDocuments, orders, orderItems, users, wishlists, rmaRequests, RMA_STATUSES } from "@/db/schema";
+import { addresses, customerNotes, invoiceDocuments, orders, orderItems, users, wishlists, rmaRequests, refundAttempts, RMA_STATUSES } from "@/db/schema";
 import { and, asc, desc, eq, gte, ilike, inArray, lte, or, sql, type SQLWrapper, type SQL } from "drizzle-orm";
 import { createAuditLog } from "@/lib/audit";
 
@@ -660,5 +660,20 @@ export async function getAccountOrderDetail(orderId: number, userId: number) {
     eq(invoiceDocuments.orderId, orderId),
     eq(invoiceDocuments.status, "issued"),
   )).orderBy(desc(invoiceDocuments.createdAt));
-  return { order, items, invoiceDocuments: invoices };
+
+  // B.3.5 — customer-safe refund visibility: only amount/status/dates.
+  // Never internal reasons, error diagnostics or provider details.
+  // failed/cancelled attempts are internal operational noise — excluded.
+  const refunds = await db.select({
+    amountCents: refundAttempts.amountCents,
+    currency: refundAttempts.currency,
+    status: refundAttempts.status,
+    createdAt: refundAttempts.createdAt,
+    completedAt: refundAttempts.completedAt,
+  }).from(refundAttempts).where(and(
+    eq(refundAttempts.orderId, orderId),
+    inArray(refundAttempts.status, ["pending", "processing", "succeeded"]),
+  )).orderBy(desc(refundAttempts.createdAt));
+
+  return { order, items, invoiceDocuments: invoices, refunds };
 }

@@ -13,6 +13,24 @@ export function toCents(euros: number | string): number {
   return Math.round(n * 100);
 }
 
+/**
+ * B.3.5 — Deterministic decimal-string → integer cents conversion.
+ *
+ * Used for authoritative financial amounts (payments.amount etc.). Unlike
+ * toCents() this NEVER touches binary floating-point: the string is parsed
+ * with a strict regex and combined with integer arithmetic only. Returns
+ * null for anything that is not a plain non-negative decimal with 1–2
+ * fraction digits (e.g. "127.90", "100", "0.05").
+ */
+export function decimalToCents(value: string | null | undefined): number | null {
+  if (typeof value !== "string") return null;
+  const m = /^(\d+)(?:\.(\d{1,2}))?$/.exec(value.trim());
+  if (!m) return null;
+  const whole = Number(m[1]);
+  const frac = Number((m[2] ?? "").padEnd(2, "0"));
+  return whole * 100 + frac;
+}
+
 /** Convert cents to euros string with 2 decimal places */
 export function toEuros(cents: number): string {
   return (cents / 100).toFixed(2);

@@ -432,6 +432,16 @@ export default function ContaClient() {
                           ))}
                         </div>
                       ) : <p className="text-xs text-slate-400">Sem documento fiscal registado.</p>}
+                      {(orderDetail as any).refunds?.length ? (
+                        <div className="border-t pt-3">
+                          <h4 className="font-semibold text-sm mb-2">Reembolsos</h4>
+                          {(orderDetail as any).refunds.map((r: any, i: number) => (
+                            <p key={i} className="text-xs text-slate-600">
+                              {(r.amountCents / 100).toFixed(2)} {r.currency} · {r.status === "succeeded" ? "Reembolsado" : r.status === "pending" ? "Pendente" : "Em processamento"} · {fmtDate(r.completedAt ?? r.createdAt)}
+                            </p>
+                          ))}
+                        </div>
+                      ) : null}
                     </div>
                   )}
                 </>
