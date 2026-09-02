@@ -344,6 +344,83 @@ describe("B.4.1 dashboard read model", () => {
     expect(d.criticalAlertCount).toBeGreaterThanOrEqual(5);
   });
 
+  it(
+    "ignored webhook COUNTERS count the full population (not capped by the 10-row display list)",
+    async () => {
+      // Regression for the MEDIUM: >10 ignored Eupago financial movements must
+      // still be counted in full in the alert/badge counters, even though the
+      // display LIST stays capped at 10.
+      const before = await getDashboardData();
+
+      const insertIgnored = async (
+        suffix: string,
+        kind: "payment" | "refund",
+        lastError: string
+      ) => {
+        await db.insert(providerWebhookEvents).values({
+          provider: "eupago",
+          providerEventId: `${TAG}-cap-${suffix}`,
+          payloadHash: `${TAG}-cap-${suffix}`.padEnd(64, "0"),
+          eventType: `${kind}.paid`,
+          status: "ignored",
+          metadata: { kind, status: "Paid" },
+          lastError,
+        });
+      };
+
+      // 12 refund ignores (all REFUND_ATTEMPT_NOT_FOUND) + 12 payment ignores.
+      const REFUND_N = 12;
+      const PAYMENT_N = 12;
+      for (let i = 0; i < REFUND_N; i++) {
+        await insertIgnored(`r${i}`, "refund", "REFUND_ATTEMPT_NOT_FOUND");
+      }
+      for (let i = 0; i < PAYMENT_N; i++) {
+        await insertIgnored(`p${i}`, "payment", "ATTEMPT_NOT_FOUND");
+      }
+
+      const after = await getDashboardData();
+      const sum = after.ignoredFinancialEvents;
+
+      // The display LIST remains capped (display-only).
+      expect(sum.events.length).toBeLessThanOrEqual(10);
+
+      // Counters cover the COMPLETE population — not clamped at 10.
+      expect(sum.refundMismatches - before.ignoredFinancialEvents.refundMismatches).toBe(REFUND_N);
+      expect(sum.paymentMismatches - before.ignoredFinancialEvents.paymentMismatches).toBe(PAYMENT_N);
+      expect(sum.refundMismatches).toBeGreaterThan(10);
+      expect(sum.paymentMismatches).toBeGreaterThan(10);
+      // Dedicated REFUND_ATTEMPT_NOT_FOUND count stays accurate.
+      expect(
+        sum.refundAttemptNotFound - before.ignoredFinancialEvents.refundAttemptNotFound
+      ).toBe(REFUND_N);
+      expect(sum.total - before.ignoredFinancialEvents.total).toBe(REFUND_N + PAYMENT_N);
+
+      // The Requires Attention ALERT badges carry the full counts.
+      const alertByCode = Object.fromEntries(after.alerts.map((a) => [a.code, a.count]));
+      expect(
+        alertByCode["IGNORED_REFUND_WEBHOOK"]! -
+          (before.alerts.find((a) => a.code === "IGNORED_REFUND_WEBHOOK")?.count ?? 0)
+      ).toBe(REFUND_N);
+      expect(
+        alertByCode["IGNORED_PAYMENT_WEBHOOK"]! -
+          (before.alerts.find((a) => a.code === "IGNORED_PAYMENT_WEBHOOK")?.count ?? 0)
+      ).toBe(PAYMENT_N);
+      expect(alertByCode["IGNORED_REFUND_WEBHOOK"]!).toBeGreaterThan(10);
+
+      // Read-only: the underlying rows are untouched (no replay/mutation).
+      const [stillIgnored] = await db
+        .select({ c: sql<number>`count(*)::int` })
+        .from(providerWebhookEvents)
+        .where(eq(providerWebhookEvents.status, "ignored"));
+      const [paymentRows] = await db
+        .select({ c: sql<number>`count(*)::int` })
+        .from(providerWebhookEvents)
+        .where(sql`${providerWebhookEvents.providerEventId} LIKE ${TAG + "-cap-p%"}`);
+      expect(Number(paymentRows.c)).toBe(PAYMENT_N);
+      expect(Number(stillIgnored.c)).toBeGreaterThanOrEqual(REFUND_N + PAYMENT_N);
+    }
+  );
+
   it("ignored Eupago events are READ-ONLY: fetching never mutates their status", async () => {
     await db.insert(providerWebhookEvents).values({
       provider: "eupago",

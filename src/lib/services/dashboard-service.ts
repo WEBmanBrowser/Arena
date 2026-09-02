@@ -458,8 +458,27 @@ export async function getDashboardData(): Promise<DashboardData> {
       };
     });
 
+    // ── B.3.5.1 counters over the COMPLETE population (never the capped
+    //    display list). All counts are DB aggregates; the 10-row `events`
+    //    list below is display-only. Classification reuses the exact trusted
+    //    semantics established by B.3.2/B.3.5.1: a mismatched (ignored)
+    //    movement is a refund when metadata.kind='refund' or the event type
+    //    starts with 'refund', and a payment when metadata.kind='payment' or
+    //    the event type starts with 'payment' — mirroring the row mapping.
     const [ignoredCountRow] = await tx
-      .select({ c: sql<number>`count(*)::int` })
+      .select({
+        total: sql<number>`count(*)::int`,
+        paymentMismatches: sql<number>`count(*) FILTER (WHERE
+          ${providerWebhookEvents.lastError} IS NOT NULL AND (
+            ${providerWebhookEvents.metadata}->>'kind' = 'payment'
+            OR ${providerWebhookEvents.eventType} LIKE 'payment%'))::int`,
+        refundMismatches: sql<number>`count(*) FILTER (WHERE
+          ${providerWebhookEvents.lastError} IS NOT NULL AND (
+            ${providerWebhookEvents.metadata}->>'kind' = 'refund'
+            OR ${providerWebhookEvents.eventType} LIKE 'refund%'))::int`,
+        refundAttemptNotFound: sql<number>`count(*) FILTER (WHERE
+          ${providerWebhookEvents.lastError} = 'REFUND_ATTEMPT_NOT_FOUND')::int`,
+      })
       .from(providerWebhookEvents)
       .where(
         and(
@@ -467,31 +486,12 @@ export async function getDashboardData(): Promise<DashboardData> {
           eq(providerWebhookEvents.status, "ignored")
         )
       );
-    // Counts split by reason so every uncorrelated movement is visible.
-    const paymentMismatches = ignoredEvents.filter(
-      (e) => e.kind === "payment" && e.reasonCode !== null
-    ).length;
-    const refundMismatches = ignoredEvents.filter(
-      (e) => e.kind === "refund" && e.reasonCode !== null
-    ).length;
-    // The list is capped at 10, so counts of a specific reason must come from
-    // the DB, not the capped list.
-    const [refundNotFoundRow] = await tx
-      .select({ c: sql<number>`count(*)::int` })
-      .from(providerWebhookEvents)
-      .where(
-        and(
-          eq(providerWebhookEvents.provider, EUPAGO_PROVIDER),
-          eq(providerWebhookEvents.status, "ignored"),
-          eq(providerWebhookEvents.lastError, "REFUND_ATTEMPT_NOT_FOUND")
-        )
-      );
 
     const ignoredFinancialEvents: IgnoredFinancialSummary = {
-      total: Number(ignoredCountRow.c),
-      paymentMismatches,
-      refundMismatches,
-      refundAttemptNotFound: Number(refundNotFoundRow.c),
+      total: Number(ignoredCountRow.total),
+      paymentMismatches: Number(ignoredCountRow.paymentMismatches),
+      refundMismatches: Number(ignoredCountRow.refundMismatches),
+      refundAttemptNotFound: Number(ignoredCountRow.refundAttemptNotFound),
       events: ignoredEvents,
     };
 
