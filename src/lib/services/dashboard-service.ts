@@ -605,21 +605,21 @@ export async function getDashboardData(): Promise<DashboardData> {
       if (a.count > 0) alerts.push(a);
     };
 
-    push({ severity: "critical", code: "PAYMENT_RECONCILIATION", label: "Pagamentos em reconciliação manual", count: Number(reconciliationRequired.c), href: "/admin/orders" });
-    push({ severity: "critical", code: "OPEN_RECONCILIATION_ANOMALY", label: "Anomalias de reconciliação abertas", count: Number(openAnomalies.c), href: "/admin/orders" });
-    push({ severity: "critical", code: "REFUND_ATTENTION", label: "Reembolsos a aguardar resolução", count: Number(refundsAttention.c), href: "/admin/orders" });
+    push({ severity: "critical", code: "PAYMENT_RECONCILIATION", label: "Pagamentos em reconciliação manual", count: Number(reconciliationRequired.c), href: "/admin/orders?queue=exceptions" });
+    push({ severity: "critical", code: "OPEN_RECONCILIATION_ANOMALY", label: "Anomalias de reconciliação abertas", count: Number(openAnomalies.c), href: "/admin/orders?queue=exceptions" });
+    push({ severity: "critical", code: "REFUND_ATTENTION", label: "Reembolsos a aguardar resolução", count: Number(refundsAttention.c), href: "/admin/orders?queue=refund_attention" });
     // B.3.5.1: trusted Eupago movements that could not be correlated. Terminal
     // on the webhook path (same-trid redelivery is deduped) — manual review.
-    push({ severity: "critical", code: "IGNORED_PAYMENT_WEBHOOK", label: "Webhooks de pagamento Eupago não correlacionados", count: ignoredFinancialEvents.paymentMismatches, href: "/admin/orders" });
-    push({ severity: "critical", code: "IGNORED_REFUND_WEBHOOK", label: "Webhooks de reembolso Eupago não correlacionados", count: ignoredFinancialEvents.refundMismatches, href: "/admin/orders" });
-    push({ severity: "warning", code: "PAYMENT_PENDING", label: "Encomendas por pagar", count: Number(pendingPayment.c), href: "/admin/orders" });
-    push({ severity: "warning", code: "AWAITING_FULFILLMENT", label: "Encomendas pagas a aguardar expedição", count: awaitingFulfillment, href: "/admin/orders" });
-    push({ severity: "warning", code: "MANUAL_INVOICE_ATTENTION", label: "Encomendas pagas sem documento de faturação", count: Number(manualInvoiceAttention.c), href: "/admin/orders" });
+    push({ severity: "critical", code: "IGNORED_PAYMENT_WEBHOOK", label: "Webhooks de pagamento Eupago não correlacionados", count: ignoredFinancialEvents.paymentMismatches, href: "/admin/orders?queue=exceptions" });
+    push({ severity: "critical", code: "IGNORED_REFUND_WEBHOOK", label: "Webhooks de reembolso Eupago não correlacionados", count: ignoredFinancialEvents.refundMismatches, href: "/admin/orders?queue=exceptions" });
+    push({ severity: "warning", code: "PAYMENT_PENDING", label: "Encomendas por pagar", count: Number(pendingPayment.c), href: "/admin/orders?queue=awaiting_payment" });
+    push({ severity: "warning", code: "AWAITING_FULFILLMENT", label: "Encomendas pagas a aguardar expedição", count: awaitingFulfillment, href: "/admin/orders?queue=paid_needs_processing" });
+    push({ severity: "warning", code: "MANUAL_INVOICE_ATTENTION", label: "Encomendas pagas sem documento de faturação", count: Number(manualInvoiceAttention.c), href: "/admin/orders?queue=missing_invoice" });
     push({ severity: "warning", code: "OPEN_RMA", label: "Pedidos RMA abertos", count: Number(openRma.c), href: "/admin/rma" });
     push({ severity: "warning", code: "OUT_OF_STOCK", label: "Produtos sem stock", count: Number(outOfStock.c), href: "/admin/inventory" });
     push({ severity: "warning", code: "LOW_STOCK", label: "Produtos com stock baixo", count: Number(lowStock.c), href: "/admin/inventory" });
-    push({ severity: "warning", code: "INVOICE_FAILURE", label: "Documentos de faturação com falha", count: Number(invoiceFailures.c), href: "/admin/orders" });
-    push({ severity: "info", code: "WEBHOOK_FAILURES", label: "Webhooks de fornecedor com falha", count: Number(failedWebhooks.c), href: "/admin/orders" });
+    push({ severity: "warning", code: "INVOICE_FAILURE", label: "Documentos de faturação com falha", count: Number(invoiceFailures.c), href: "/admin/orders?queue=exceptions" });
+    push({ severity: "info", code: "WEBHOOK_FAILURES", label: "Webhooks de fornecedor com falha", count: Number(failedWebhooks.c), href: "/admin/orders?queue=exceptions" });
 
     alerts.sort((a, b) => {
       const rank = { critical: 0, warning: 1, info: 2 };

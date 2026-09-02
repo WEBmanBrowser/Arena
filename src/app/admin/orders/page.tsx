@@ -1,6 +1,12 @@
 "use client";
 import { useCallback, useEffect, useState } from "react";
-import type { AdminOrderDetail, AdminOrderListPagination, AdminOrderListRow } from "@/lib/services/admin-orders-service";
+import type {
+  AdminOrderDetail,
+  AdminOrderListPagination,
+  AdminOrderListRow,
+  AdminOrderQueueCounts,
+  AdminOrderQueue,
+} from "@/lib/services/admin-orders-service";
 
 const STATUS_LABELS: Record<string, string> = {
   pending_payment: "A aguardar pagamento",
@@ -16,14 +22,42 @@ const STATUS_LABELS: Record<string, string> = {
   returned: "Devolvido",
 };
 
-const PAYMENT_STATUS_LABELS: Record<string, string> = { pending: "Pendente", paid: "Pago", cancelled: "Cancelado", expired: "Expirado", refunded: "Reembolsado" };
-const PAYMENT_METHOD_LABELS: Record<string, string> = { bank_transfer: "Transferência bancária", mbway: "MB WAY", card: "Cartão", cash: "Numerário (loja)" };
+const PAYMENT_STATUS_LABELS: Record<string, string> = {
+  pending: "Pendente",
+  paid: "Pago",
+  cancelled: "Cancelado",
+  expired: "Expirado",
+  refunded: "Reembolsado",
+};
+
+const PAYMENT_METHOD_LABELS: Record<string, string> = {
+  bank_transfer: "Transferência bancária",
+  mbway: "MB WAY",
+  multibanco: "Multibanco",
+  card: "Cartão",
+  cash: "Numerário (loja)",
+};
+
 const SORT_OPTIONS = [
   { value: "newest", label: "Mais recentes" },
   { value: "oldest", label: "Mais antigas" },
   { value: "total_desc", label: "Total (maior → menor)" },
   { value: "total_asc", label: "Total (menor → maior)" },
 ];
+
+const QUEUES: Array<{ id: AdminOrderQueue | ""; label: string; badgeKey?: keyof AdminOrderQueueCounts }> = [
+  { id: "", label: "Todas" },
+  { id: "awaiting_payment", label: "Por Pagar", badgeKey: "awaiting_payment" },
+  { id: "paid_needs_processing", label: "Por Processar", badgeKey: "paid_needs_processing" },
+  { id: "preparing", label: "Em Preparação", badgeKey: "preparing" },
+  { id: "ready_to_ship", label: "Prontas p/ Envio", badgeKey: "ready_to_ship" },
+  { id: "ready_for_pickup", label: "Levantamento em Loja", badgeKey: "ready_for_pickup" },
+  { id: "shipped", label: "Enviadas", badgeKey: "shipped" },
+  { id: "refund_attention", label: "Reembolsos", badgeKey: "refund_attention" },
+  { id: "missing_invoice", label: "Sem Fatura", badgeKey: "missing_invoice" },
+  { id: "exceptions", label: "Exceções", badgeKey: "exceptions" },
+];
+
 const CRITICAL_STATUSES = ["cancelled", "refunded"];
 
 function statusColor(s: string) {
@@ -41,7 +75,11 @@ function fmtMoney(v: string | null | undefined) {
   return `${parseFloat(v || "0").toFixed(2)}€`;
 }
 
-/** B.3.5 — deterministic € string → integer cents (no floating-point math). */
+function fmtCents(cents: number) {
+  return `${(cents / 100).toFixed(2)}€`;
+}
+
+/** Deterministic € string → integer cents. */
 function parseEurosToCents(v: string): number | null {
   const m = /^(\d+)(?:[.,](\d{1,2}))?$/.exec(v.trim());
   if (!m) return null;
@@ -56,11 +94,7 @@ const REFUND_STATUS_LABELS: Record<string, string> = {
   cancelled: "Cancelado",
 };
 
-function fmtCents(cents: number) {
-  return `${(cents / 100).toFixed(2)}€`;
-}
-
-/** Render an address object (jsonb) as human-readable lines — never JSON.stringify. */
+/** Render an address object (jsonb) as human-readable lines. */
 function formatAddress(addr: unknown): string[] {
   if (!addr || typeof addr !== "object") return ["—"];
   const a = addr as Record<string, unknown>;
@@ -86,6 +120,7 @@ function AddressBlock({ addr }: { addr: unknown }) {
 }
 
 type Filters = {
+  queue: string;
   search: string;
   status: string;
   paymentStatus: string;
@@ -98,8 +133,34 @@ type Filters = {
 export default function AdminOrdersPage() {
   const [orders, setOrders] = useState<AdminOrderListRow[]>([]);
   const [pagination, setPagination] = useState<AdminOrderListPagination>({ page: 1, pageSize: 25, total: 0, totalPages: 1 });
+  const [queueCounts, setQueueCounts] = useState<AdminOrderQueueCounts | null>(null);
   const [pageSize, setPageSize] = useState(25);
-  const [filters, setFilters] = useState<Filters>({ search: "", status: "", paymentStatus: "", deliveryType: "", sort: "newest", dateFrom: "", dateTo: "" });
+  const [filters, setFilters] = useState<Filters>(() => {
+    if (typeof window !== "undefined") {
+      const urlParams = new URLSearchParams(window.location.search);
+      return {
+        queue: urlParams.get("queue") || "",
+        search: urlParams.get("search") || "",
+        status: urlParams.get("status") || "",
+        paymentStatus: urlParams.get("paymentStatus") || "",
+        deliveryType: urlParams.get("deliveryType") || "",
+        sort: urlParams.get("sort") || "newest",
+        dateFrom: urlParams.get("dateFrom") || "",
+        dateTo: urlParams.get("dateTo") || "",
+      };
+    }
+    return {
+      queue: "",
+      search: "",
+      status: "",
+      paymentStatus: "",
+      deliveryType: "",
+      sort: "newest",
+      dateFrom: "",
+      dateTo: "",
+    };
+  });
+  const [selectedOrderIds, setSelectedOrderIds] = useState<number[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [detail, setDetail] = useState<AdminOrderDetail | null>(null);
@@ -108,12 +169,19 @@ export default function AdminOrdersPage() {
   const [tracking, setTracking] = useState("");
   const [invoiceReference, setInvoiceReference] = useState("");
   const [invoiceIssuedAt, setInvoiceIssuedAt] = useState("");
+  const [creditNoteOriginalDocId, setCreditNoteOriginalDocId] = useState<number | null>(null);
+  const [creditNoteReference, setCreditNoteReference] = useState("");
+  const [creditNoteAmount, setCreditNoteAmount] = useState("");
+  const [creditNoteIssuedAt, setCreditNoteIssuedAt] = useState("");
   const [refundAmount, setRefundAmount] = useState("");
   const [refundReason, setRefundReason] = useState("");
   const [refundReference, setRefundReference] = useState("");
   const [refundCompletedAt, setRefundCompletedAt] = useState("");
   const [refundAsCompleted, setRefundAsCompleted] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [bulkActionLoading, setBulkActionLoading] = useState(false);
+  const [bulkResult, setBulkResult] = useState<{ total: number; succeeded: number[]; failed: Array<{ id: number; reason: string }> } | null>(null);
+  const [pickingSheetOrder, setPickingSheetOrder] = useState<AdminOrderDetail | null>(null);
 
   const load = useCallback(async (page = 1) => {
     setLoading(true); setError("");
@@ -125,6 +193,7 @@ export default function AdminOrdersPage() {
       if (!res.ok) throw new Error(data.error || "Erro");
       setOrders(data.orders || []);
       setPagination(data.pagination || { page: 1, pageSize, total: 0, totalPages: 1 });
+      if (data.queueCounts) setQueueCounts(data.queueCounts);
     } catch (e) { setError((e as Error).message); }
     setLoading(false);
   }, [filters, pageSize]);
@@ -141,6 +210,11 @@ export default function AdminOrdersPage() {
       setTracking(data.order.trackingNumber || "");
       setInvoiceReference("");
       setInvoiceIssuedAt(new Date().toISOString().slice(0, 10));
+      const firstInvoice = data.invoiceDocuments.find((doc: { documentType: string; status: string }) => doc.documentType === "invoice" && doc.status === "issued");
+      setCreditNoteOriginalDocId(firstInvoice?.id || null);
+      setCreditNoteReference("");
+      setCreditNoteAmount("");
+      setCreditNoteIssuedAt(new Date().toISOString().slice(0, 10));
       setRefundAmount("");
       setRefundReason("");
       setRefundReference("");
@@ -187,9 +261,31 @@ export default function AdminOrdersPage() {
     setSaving(false);
     if (!res.ok) { setError(data.error || "Erro"); return; }
     await openDetail(detail.order.id);
+    load(pagination.page);
   };
 
-  // ── B.3.5 refunds ──────────────────────────────────────
+  const recordCreditNote = async () => {
+    if (!detail || saving || !creditNoteOriginalDocId || !creditNoteReference.trim()) return;
+    const cents = parseEurosToCents(creditNoteAmount);
+    if (cents == null || cents <= 0) { setError("Montante de nota de crédito inválido."); return; }
+    setSaving(true); setError("");
+    const res = await fetch(`/api/admin/orders/${detail.order.id}/credit-notes`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        originalDocumentId: creditNoteOriginalDocId,
+        officialReference: creditNoteReference.trim(),
+        amountCents: cents,
+        issuedAt: creditNoteIssuedAt || undefined,
+      }),
+    });
+    const data = await res.json();
+    setSaving(false);
+    if (!res.ok) { setError(data.error || "Erro"); return; }
+    await openDetail(detail.order.id);
+    load(pagination.page);
+  };
+
   const submitRefund = async () => {
     if (!detail || saving) return;
     const cents = parseEurosToCents(refundAmount);
@@ -213,6 +309,7 @@ export default function AdminOrdersPage() {
     setSaving(false);
     if (!res.ok) { setError(data.error || "Erro"); return; }
     await openDetail(detail.order.id);
+    load(pagination.page);
   };
 
   const refundAction = async (refundId: number, action: "complete" | "cancel" | "retry" | "fail") => {
@@ -224,235 +321,732 @@ export default function AdminOrdersPage() {
     const res = await fetch(`/api/admin/refunds/${refundId}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(action === "complete"
-        ? { action, externalReference: refundReference.trim(), completedAt: refundCompletedAt }
-        : { action }),
+      body: JSON.stringify({
+        action,
+        externalReference: action === "complete" ? refundReference.trim() : undefined,
+        completedAt: action === "complete" ? (refundCompletedAt || new Date().toISOString()) : undefined,
+      }),
     });
     const data = await res.json();
     setSaving(false);
     if (!res.ok) { setError(data.error || "Erro"); return; }
     await openDetail(detail.order.id);
+    load(pagination.page);
   };
 
-  const setFilter = (patch: Partial<Filters>) => setFilters(f => ({ ...f, ...patch }));
+  const executeBulk = async (action: "start_processing" | "mark_ready_for_pickup") => {
+    if (selectedOrderIds.length === 0 || bulkActionLoading) return;
+    const label = action === "start_processing" ? "Iniciar preparação (Mover para Em processamento)" : "Marcar pronto para levantamento";
+    if (!confirm(`${label} para as ${selectedOrderIds.length} encomendas selecionadas?`)) return;
+    setBulkActionLoading(true); setError(""); setBulkResult(null);
+    try {
+      const res = await fetch("/api/admin/orders/bulk", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action, orderIds: selectedOrderIds }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Erro no processamento em lote");
+      setBulkResult(data);
+      setSelectedOrderIds([]);
+      load(pagination.page);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+    setBulkActionLoading(false);
+  };
+
+  const toggleSelectAll = () => {
+    if (selectedOrderIds.length === orders.length) {
+      setSelectedOrderIds([]);
+    } else {
+      setSelectedOrderIds(orders.map(o => o.id));
+    }
+  };
+
+  const toggleSelectOrder = (id: number) => {
+    setSelectedOrderIds(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
+  };
 
   return (
-    <div>
-      <div className="flex items-center justify-between mb-6">
-        <h2 className="text-xl font-bold text-slate-800">Encomendas</h2>
-        <span className="text-sm text-slate-500">{pagination.total} encomenda(s)</span>
+    <div className="space-y-6">
+      {/* Header */}
+      <div className="flex flex-wrap justify-between items-center gap-4">
+        <div>
+          <h2 className="text-xl font-bold text-slate-800">Gestão Operacional de Encomendas</h2>
+          <p className="text-xs text-slate-500">Fluxos de cumprimento, preparação, envio, levantamento e exceções</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <button onClick={() => load(pagination.page)} className="px-3 py-1.5 text-xs bg-white border border-slate-300 rounded hover:bg-slate-50 text-slate-700">
+            ↻ Atualizar
+          </button>
+        </div>
       </div>
 
-      <div className="bg-white border rounded-xl p-4 mb-4 flex flex-wrap gap-2 items-center">
-        <input value={filters.search} onChange={e => setFilter({ search: e.target.value })} placeholder="Pesquisar encomenda, cliente, email..." className="border rounded px-3 py-1.5 text-sm w-72" />
-        <select value={filters.status} onChange={e => setFilter({ status: e.target.value })} className="border rounded px-2 py-1.5 text-sm">
-          <option value="">Estado</option>{Object.entries(STATUS_LABELS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
-        </select>
-        <select value={filters.paymentStatus} onChange={e => setFilter({ paymentStatus: e.target.value })} className="border rounded px-2 py-1.5 text-sm">
-          <option value="">Pagamento</option>{Object.entries(PAYMENT_STATUS_LABELS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
-        </select>
-        <select value={filters.deliveryType} onChange={e => setFilter({ deliveryType: e.target.value })} className="border rounded px-2 py-1.5 text-sm">
-          <option value="">Entrega</option><option value="shipping">Envio</option><option value="pickup">Levantamento</option>
-        </select>
-        <select value={filters.sort} onChange={e => setFilter({ sort: e.target.value })} className="border rounded px-2 py-1.5 text-sm">
-          {SORT_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-        </select>
-        <input type="date" value={filters.dateFrom} onChange={e => setFilter({ dateFrom: e.target.value })} title="De" className="border rounded px-2 py-1.5 text-sm text-slate-600" aria-label="Data de" />
-        <span className="text-slate-400 text-sm">→</span>
-        <input type="date" value={filters.dateTo} onChange={e => setFilter({ dateTo: e.target.value })} title="Até (dia completo)" className="border rounded px-2 py-1.5 text-sm text-slate-600" aria-label="Data até (dia completo)" />
-        <select value={pageSize} onChange={e => setPageSize(parseInt(e.target.value))} className="border rounded px-2 py-1.5 text-sm ml-auto">
-          <option value="25">25 / página</option><option value="50">50 / página</option><option value="100">100 / página</option>
-        </select>
+      {/* Operational Queues Navigation */}
+      <div className="border-b border-slate-200">
+        <nav className="flex space-x-2 overflow-x-auto pb-2 text-xs">
+          {QUEUES.map((q) => {
+            const isActive = filters.queue === q.id;
+            const count = q.badgeKey && queueCounts ? queueCounts[q.badgeKey] : null;
+            return (
+              <button
+                key={q.id || "all"}
+                onClick={() => setFilters(prev => ({ ...prev, queue: q.id, status: "" }))}
+                className={`flex items-center gap-1.5 px-3 py-2 rounded-t-lg font-medium whitespace-nowrap transition-colors ${
+                  isActive
+                    ? "bg-slate-900 text-white"
+                    : "bg-slate-100 text-slate-600 hover:bg-slate-200 hover:text-slate-900"
+                }`}
+              >
+                <span>{q.label}</span>
+                {count != null && count > 0 && (
+                  <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-bold ${
+                    isActive ? "bg-white/20 text-white" : q.id === "exceptions" || q.id === "refund_attention" ? "bg-red-100 text-red-700" : "bg-slate-300 text-slate-800"
+                  }`}>
+                    {count}
+                  </span>
+                )}
+              </button>
+            );
+          })}
+        </nav>
       </div>
 
-      {error && <div className="mb-4 p-3 bg-red-50 text-red-600 rounded-lg text-sm">{error}</div>}
+      {error && <div className="p-3 bg-red-50 text-red-700 text-sm rounded border border-red-200">{error}</div>}
 
-      <div className="bg-white rounded-xl border overflow-hidden">
-        {loading && <p className="text-sm text-slate-500 p-4">A carregar...</p>}
-        {!loading && orders.length === 0 && (
-          <div className="p-10 text-center text-slate-500">
-            <p className="text-3xl mb-2">📦</p>
-            <p className="text-sm font-medium">Nenhuma encomenda encontrada</p>
-            <p className="text-xs text-slate-400 mt-1">Ajusta os filtros ou a pesquisa.</p>
+      {/* Bulk Results Alert */}
+      {bulkResult && (
+        <div className="p-3 bg-sky-50 text-sky-900 text-xs rounded border border-sky-200 flex justify-between items-center">
+          <div>
+            <strong>Resultado do lote:</strong> {bulkResult.succeeded.length} com sucesso, {bulkResult.failed.length} falharam de {bulkResult.total} total.
+            {bulkResult.failed.length > 0 && (
+              <ul className="mt-1 list-disc list-inside text-red-600">
+                {bulkResult.failed.map(f => <li key={f.id}>Encomenda #{f.id}: {f.reason}</li>)}
+              </ul>
+            )}
           </div>
-        )}
-        {!loading && orders.length > 0 && (
-          <table className="w-full text-sm">
-            <thead className="bg-slate-50"><tr><th className="text-left p-3">Encomenda</th><th className="text-left p-3 hidden md:table-cell">Data</th><th className="text-left p-3">Cliente</th><th className="text-right p-3">Total</th><th className="text-center p-3">Pagamento</th><th className="text-center p-3">Estado</th><th className="text-center p-3 hidden md:table-cell">Entrega</th><th className="text-right p-3">Ações</th></tr></thead>
-            <tbody>{orders.map(o => <tr key={o.id} className="border-t hover:bg-slate-50"><td className="p-3 font-medium">#{o.orderNumber}</td><td className="p-3 hidden md:table-cell text-slate-500">{fmtDate(o.createdAt)}</td><td className="p-3"><p className="font-medium">{o.customerName}</p><p className="text-xs text-slate-400">{o.customerEmail}</p></td><td className="p-3 text-right font-bold">{fmtMoney(o.total)}</td><td className="p-3 text-center text-xs">{PAYMENT_STATUS_LABELS[o.paymentStatus] || o.paymentStatus}</td><td className="p-3 text-center"><span className={`px-2 py-0.5 rounded text-xs font-medium ${statusColor(o.status)}`}>{STATUS_LABELS[o.status] || o.status}</span></td><td className="p-3 text-center hidden md:table-cell text-xs">{o.deliveryType === "pickup" ? "📍 Loja" : "🚚 Envio"}</td><td className="p-3 text-right"><button onClick={() => openDetail(o.id)} className="text-sky-600 text-xs font-medium">Detalhes</button></td></tr>)}</tbody>
+          <button onClick={() => setBulkResult(null)} className="text-slate-400 hover:text-slate-600 ml-4 font-bold">×</button>
+        </div>
+      )}
+
+      {/* Filters Bar */}
+      <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm space-y-3">
+        <div className="flex flex-wrap gap-2 items-center">
+          <input
+            type="text"
+            placeholder="Pesquisar n.º, cliente ou email..."
+            value={filters.search}
+            onChange={(e) => setFilters(prev => ({ ...prev, search: e.target.value }))}
+            className="border rounded px-3 py-1.5 text-xs flex-1 min-w-48"
+          />
+          <select
+            value={filters.status}
+            onChange={(e) => setFilters(prev => ({ ...prev, status: e.target.value }))}
+            className="border rounded px-2.5 py-1.5 text-xs"
+          >
+            <option value="">Todos os estados</option>
+            {Object.entries(STATUS_LABELS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+          </select>
+          <select
+            value={filters.paymentStatus}
+            onChange={(e) => setFilters(prev => ({ ...prev, paymentStatus: e.target.value }))}
+            className="border rounded px-2.5 py-1.5 text-xs"
+          >
+            <option value="">Todos os pagamentos</option>
+            {Object.entries(PAYMENT_STATUS_LABELS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+          </select>
+          <select
+            value={filters.deliveryType}
+            onChange={(e) => setFilters(prev => ({ ...prev, deliveryType: e.target.value }))}
+            className="border rounded px-2.5 py-1.5 text-xs"
+          >
+            <option value="">Envio e Levantamento</option>
+            <option value="shipping">Envio ao domicílio</option>
+            <option value="pickup">Levantamento em loja</option>
+          </select>
+          <select
+            value={filters.sort}
+            onChange={(e) => setFilters(prev => ({ ...prev, sort: e.target.value }))}
+            className="border rounded px-2.5 py-1.5 text-xs"
+          >
+            {SORT_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+          </select>
+          <button
+            onClick={() => setFilters({ queue: "", search: "", status: "", paymentStatus: "", deliveryType: "", sort: "newest", dateFrom: "", dateTo: "" })}
+            className="px-2.5 py-1.5 text-xs text-slate-500 hover:text-slate-800"
+          >
+            Limpar
+          </button>
+        </div>
+      </div>
+
+      {/* Bulk Action Toolbar */}
+      {selectedOrderIds.length > 0 && (
+        <div className="p-3 bg-slate-900 text-white rounded-xl flex flex-wrap items-center justify-between gap-3 shadow">
+          <span className="text-xs font-semibold">{selectedOrderIds.length} encomenda(s) selecionada(s)</span>
+          <div className="flex flex-wrap gap-2">
+            <button
+              onClick={() => executeBulk("start_processing")}
+              disabled={bulkActionLoading}
+              className="px-3 py-1 bg-sky-600 hover:bg-sky-500 text-white rounded text-xs font-medium disabled:opacity-50"
+            >
+              Iniciar Preparação (Mover p/ Em processamento)
+            </button>
+            <button
+              onClick={() => executeBulk("mark_ready_for_pickup")}
+              disabled={bulkActionLoading}
+              className="px-3 py-1 bg-indigo-600 hover:bg-indigo-500 text-white rounded text-xs font-medium disabled:opacity-50"
+            >
+              Marcar Pronto p/ Levantamento (Loja)
+            </button>
+            <button
+              onClick={() => setSelectedOrderIds([])}
+              className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded text-xs"
+            >
+              Cancelar seleção
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Orders Table */}
+      <div className="bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm">
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs text-left">
+            <thead className="bg-slate-50 text-slate-600 uppercase text-[10px] tracking-wider border-b">
+              <tr>
+                <th className="p-3 w-8 text-center">
+                  <input
+                    type="checkbox"
+                    checked={orders.length > 0 && selectedOrderIds.length === orders.length}
+                    onChange={toggleSelectAll}
+                  />
+                </th>
+                <th className="p-3">Encomenda</th>
+                <th className="p-3">Data</th>
+                <th className="p-3">Cliente</th>
+                <th className="p-3">Entrega</th>
+                <th className="p-3">Estado</th>
+                <th className="p-3">Pagamento</th>
+                <th className="p-3">Tracking</th>
+                <th className="p-3 text-right">Total</th>
+                <th className="p-3 text-center">Ações</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {loading && orders.length === 0 ? (
+                <tr><td colSpan={10} className="p-8 text-center text-slate-400">A carregar encomendas...</td></tr>
+              ) : orders.length === 0 ? (
+                <tr><td colSpan={10} className="p-8 text-center text-slate-400">Nenhuma encomenda encontrada nesta fila/filtro.</td></tr>
+              ) : orders.map((o) => {
+                const isSelected = selectedOrderIds.includes(o.id);
+                return (
+                  <tr key={o.id} className={`hover:bg-slate-50 transition ${isSelected ? "bg-sky-50/50" : ""}`}>
+                    <td className="p-3 text-center">
+                      <input
+                        type="checkbox"
+                        checked={isSelected}
+                        onChange={() => toggleSelectOrder(o.id)}
+                      />
+                    </td>
+                    <td className="p-3 font-semibold text-slate-800">
+                      <button onClick={() => openDetail(o.id)} className="hover:text-sky-600 hover:underline">
+                        {o.orderNumber}
+                      </button>
+                    </td>
+                    <td className="p-3 text-slate-500 whitespace-nowrap">{fmtDate(o.createdAt)}</td>
+                    <td className="p-3">
+                      <div className="font-medium text-slate-700">{o.customerName}</div>
+                      <div className="text-[10px] text-slate-400">{o.customerEmail}</div>
+                    </td>
+                    <td className="p-3">
+                      <span className={`px-2 py-0.5 rounded-full text-[10px] ${o.deliveryType === "pickup" ? "bg-purple-50 text-purple-700" : "bg-slate-100 text-slate-700"}`}>
+                        {o.deliveryType === "pickup" ? "Levantamento" : "Envio"}
+                      </span>
+                    </td>
+                    <td className="p-3">
+                      <span className={`px-2 py-0.5 rounded-full font-medium text-[10px] ${statusColor(o.status)}`}>
+                        {STATUS_LABELS[o.status] || o.status}
+                      </span>
+                    </td>
+                    <td className="p-3">
+                      <div className="font-medium">{PAYMENT_STATUS_LABELS[o.paymentStatus] || o.paymentStatus}</div>
+                      <div className="text-[10px] text-slate-400">{PAYMENT_METHOD_LABELS[o.paymentMethod ?? ""] || o.paymentMethod || "—"}</div>
+                    </td>
+                    <td className="p-3 font-mono text-[11px] text-slate-600">{o.trackingNumber || "—"}</td>
+                    <td className="p-3 text-right font-bold text-slate-800">{fmtMoney(o.total)}</td>
+                    <td className="p-3 text-center">
+                      <button onClick={() => openDetail(o.id)} className="px-2.5 py-1 text-[11px] bg-slate-100 hover:bg-slate-200 text-slate-700 rounded font-medium">
+                        Detalhe
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
           </table>
-        )}
-      </div>
+        </div>
 
-      <div className="flex justify-between mt-4 text-sm">
-        <button disabled={pagination.page <= 1} onClick={() => load(pagination.page - 1)} className="px-3 py-1 border rounded disabled:opacity-50">Anterior</button>
-        <span className="text-slate-500">Página {pagination.page} / {pagination.totalPages}</span>
-        <button disabled={pagination.page >= pagination.totalPages} onClick={() => load(pagination.page + 1)} className="px-3 py-1 border rounded disabled:opacity-50">Seguinte</button>
-      </div>
-
-      {detailLoading && <p className="mt-6 text-sm text-slate-500">A carregar detalhe...</p>}
-
-      {detail && !detailLoading && (
-        <div className="mt-6 bg-white border rounded-xl p-6">
-          <div className="flex justify-between mb-4"><h3 className="font-bold text-slate-800">Encomenda #{detail.order.orderNumber}</h3><button onClick={() => setDetail(null)} className="text-slate-400 hover:text-slate-600">Fechar</button></div>
-
-          <div className="grid md:grid-cols-2 gap-6 text-sm">
-            <section>
-              <h4 className="font-semibold mb-2">Resumo</h4>
-              <p>Estado: <span className={`px-2 py-0.5 rounded text-xs ${statusColor(detail.order.status)}`}>{STATUS_LABELS[detail.order.status] || detail.order.status}</span></p>
-              <p>Data: {fmtDate(detail.order.createdAt)}</p>
-              <p>Subtotal: {fmtMoney(detail.order.subtotal)}</p>
-              <p>Desconto: {fmtMoney(detail.order.discount)}</p>
-              <p>IVA: {fmtMoney(detail.order.vat)}</p>
-              <p>Portes: {fmtMoney(detail.order.shipping)}</p>
-              <p className="text-base">Total: <strong>{fmtMoney(detail.order.total)}</strong></p>
-              <p>Método de pagamento: {PAYMENT_METHOD_LABELS[detail.order.paymentMethod ?? ""] || detail.order.paymentMethod || "—"}</p>
-              <p>Tracking: {detail.order.trackingNumber ? <span className="font-mono text-xs bg-slate-100 px-1.5 py-0.5 rounded">{detail.order.trackingNumber}</span> : "—"}</p>
-            </section>
-
-            <section>
-              <h4 className="font-semibold mb-2">Cliente</h4>
-              {detail.customer ? (
-                <>
-                  <p><span className="text-xs uppercase tracking-wide text-sky-600 font-semibold">Cliente registado</span></p>
-                  <p className="font-medium">{detail.customer.name}</p>
-                  <p className="text-slate-600">{detail.customer.email}</p>
-                  {detail.customer.phone && <p className="text-slate-600">Telefone: {detail.customer.phone}</p>}
-                  <p className="text-slate-600">NIF: {detail.customer.nif || "—"}</p>
-                  {detail.customer.company && <p className="text-slate-600">Empresa: {detail.customer.company}</p>}
-                </>
-              ) : (
-                <>
-                  <p><span className="text-xs uppercase tracking-wide text-amber-600 font-semibold">Cliente guest (sem registo)</span></p>
-                  <p className="font-medium">{detail.order.guestName || "—"}</p>
-                  <p className="text-slate-600">{detail.order.guestEmail || "—"}</p>
-                  {detail.order.guestPhone && <p className="text-slate-600">Telefone: {detail.order.guestPhone}</p>}
-                </>
-              )}
-            </section>
-
-            <section>
-              <h4 className="font-semibold mb-2">Morada de faturação</h4>
-              <AddressBlock addr={detail.order.billingAddress} />
-            </section>
-
-            <section>
-              <h4 className="font-semibold mb-2">Entrega</h4>
-              {detail.order.deliveryType === "pickup" ? (
-                <p className="text-sm text-slate-700">📍 <strong>Levantamento em loja</strong> — a encomenda será recolhida nas nossas instalações.</p>
-              ) : (
-                <>
-                  <p className="text-sm text-slate-700 mb-1">🚚 Envio para:</p>
-                  <AddressBlock addr={detail.order.shippingAddress} />
-                </>
-              )}
-              <div className="flex gap-2 mt-3">
-                <input value={tracking} onChange={e => setTracking(e.target.value)} maxLength={255} placeholder="Número de tracking" className="border rounded px-3 py-1.5 text-xs flex-1" />
-                <button onClick={saveTracking} disabled={saving} className="px-3 py-1 bg-sky-600 text-white rounded text-xs disabled:opacity-50">Guardar tracking</button>
-              </div>
-              <p className="text-[11px] text-slate-400 mt-1">Vazio = limpar tracking. Máx. 255 caracteres.</p>
-            </section>
+        {/* Pagination */}
+        <div className="p-3 bg-slate-50 border-t flex flex-wrap items-center justify-between text-xs text-slate-600 gap-2">
+          <span>Total: <strong>{pagination.total}</strong> encomendas · Página <strong>{pagination.page}</strong> de <strong>{pagination.totalPages}</strong></span>
+          <div className="flex items-center gap-2">
+            <select value={pageSize} onChange={(e) => setPageSize(Number(e.target.value))} className="border rounded px-2 py-1 text-xs">
+              <option value={10}>10 por pág</option>
+              <option value={25}>25 por pág</option>
+              <option value={50}>50 por pág</option>
+              <option value={100}>100 por pág</option>
+            </select>
+            <button onClick={() => load(pagination.page - 1)} disabled={pagination.page <= 1} className="px-2.5 py-1 border rounded bg-white disabled:opacity-40">Anterior</button>
+            <button onClick={() => load(pagination.page + 1)} disabled={pagination.page >= pagination.totalPages} className="px-2.5 py-1 border rounded bg-white disabled:opacity-40">Seguinte</button>
           </div>
+        </div>
+      </div>
 
-          <section className="mt-6">
-            <h4 className="font-semibold mb-2 text-sm">Produtos</h4>
-            <div className="overflow-x-auto">
-              <table className="w-full text-xs">
-                <thead className="bg-slate-50"><tr><th className="p-2 text-left">Produto</th><th className="p-2">SKU</th><th className="p-2 text-right">Qtd</th><th className="p-2 text-right">Unit. Bruto</th><th className="p-2 text-right">Unit. Líq.</th><th className="p-2 text-right">IVA</th><th className="p-2 text-right">Desc.</th><th className="p-2 text-right">Total</th></tr></thead>
-                <tbody>{detail.items.map(i => <tr key={i.id} className="border-t"><td className="p-2">{i.productName}</td><td className="p-2 text-center">{i.productSku}</td><td className="p-2 text-right">{i.quantity}</td><td className="p-2 text-right">{fmtMoney(i.unitPriceGross)}</td><td className="p-2 text-right">{fmtMoney(i.unitPriceNet)}</td><td className="p-2 text-right">{fmtMoney(i.vatAmount)} ({i.vatRate}%)</td><td className="p-2 text-right">{fmtMoney(i.discountAmount)}</td><td className="p-2 text-right font-medium">{fmtMoney(i.lineTotalGross)}</td></tr>)}</tbody>
+      {/* Picking Sheet Modal / Print View */}
+      {pickingSheetOrder && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 overflow-y-auto print:p-0 print:bg-white print:static">
+          <div className="bg-white rounded-xl max-w-3xl w-full p-6 shadow-2xl space-y-4 print:shadow-none print:p-0 print:max-w-none">
+            <div className="flex justify-between items-start border-b pb-3 print:border-b-2 print:border-black">
+              <div>
+                <h3 className="text-lg font-bold text-slate-900">Guia de Preparação e Picking</h3>
+                <p className="text-xs text-slate-500">Encomenda #{pickingSheetOrder.order.orderNumber} · {fmtDate(pickingSheetOrder.order.createdAt)}</p>
+              </div>
+              <div className="flex gap-2 print:hidden">
+                <button onClick={() => window.print()} className="px-3 py-1.5 bg-slate-900 text-white rounded text-xs font-semibold hover:bg-slate-800">
+                  🖨 Imprimir
+                </button>
+                <button onClick={() => setPickingSheetOrder(null)} className="px-3 py-1.5 bg-slate-100 text-slate-700 rounded text-xs hover:bg-slate-200">
+                  Fechar
+                </button>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4 text-xs">
+              <div className="border rounded p-3 bg-slate-50 print:bg-white">
+                <h4 className="font-bold text-slate-800 mb-1">Dados de Entrega</h4>
+                <p><strong>Tipo:</strong> {pickingSheetOrder.order.deliveryType === "pickup" ? "Levantamento em loja" : "Envio ao domicílio"}</p>
+                <p><strong>Método:</strong> {pickingSheetOrder.order.shippingMethod || "Padrão"}</p>
+                <div className="mt-1">
+                  <h5 className="font-semibold text-[11px] text-slate-600">Morada de envio:</h5>
+                  <AddressBlock addr={pickingSheetOrder.order.shippingAddress || pickingSheetOrder.order.billingAddress} />
+                </div>
+              </div>
+              <div className="border rounded p-3 bg-slate-50 print:bg-white">
+                <h4 className="font-bold text-slate-800 mb-1">Cliente & Observações</h4>
+                <p><strong>Nome:</strong> {pickingSheetOrder.customer?.name || pickingSheetOrder.order.guestName || "Cliente"}</p>
+                <p><strong>Email:</strong> {pickingSheetOrder.customer?.email || pickingSheetOrder.order.guestEmail || "—"}</p>
+                <p><strong>Telefone:</strong> {pickingSheetOrder.customer?.phone || pickingSheetOrder.order.guestPhone || "—"}</p>
+                {pickingSheetOrder.order.notes && (
+                  <div className="mt-2 p-2 bg-amber-50 border border-amber-200 rounded text-[11px] text-amber-800">
+                    <strong>Notas do cliente:</strong> {pickingSheetOrder.order.notes}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div>
+              <h4 className="font-bold text-xs text-slate-800 mb-2">Itens para Separação / Picking</h4>
+              <table className="w-full text-xs border border-slate-200 text-left">
+                <thead className="bg-slate-100 text-slate-700 border-b">
+                  <tr>
+                    <th className="p-2 w-8 text-center">✓</th>
+                    <th className="p-2">Produto</th>
+                    <th className="p-2">SKU</th>
+                    <th className="p-2">EAN</th>
+                    <th className="p-2 text-right">Qtd</th>
+                    <th className="p-2 text-right">Stock Armazém</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-200">
+                  {pickingSheetOrder.items.map((i) => (
+                    <tr key={i.id}>
+                      <td className="p-2 text-center border-r font-mono text-base">[ ]</td>
+                      <td className="p-2 font-medium">{i.productName}</td>
+                      <td className="p-2 font-mono text-slate-600">{i.productSku || "—"}</td>
+                      <td className="p-2 font-mono text-slate-600">{i.ean || "—"}</td>
+                      <td className="p-2 text-right font-bold text-base">{i.quantity}</td>
+                      <td className="p-2 text-right text-slate-500">{i.warehouseStock ?? "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
               </table>
             </div>
-            <p className="text-[11px] text-slate-400 mt-1">Preços e nomes apresentados são os snapshots históricos da compra.</p>
-          </section>
 
-          <section className="mt-6">
-            <h4 className="font-semibold mb-2 text-sm">Pagamentos</h4>
-            {detail.payments.length === 0 ? <p className="text-xs text-slate-400">Sem registos de pagamento.</p> : detail.payments.map(p => <div key={p.id} className="text-xs bg-slate-50 rounded p-2 mb-1">{p.provider} · {PAYMENT_METHOD_LABELS[p.method ?? ""] || p.method || "—"} · {fmtMoney(p.amount)} {p.currency} · {PAYMENT_STATUS_LABELS[p.status] || p.status} {p.paidAt ? `· pago em ${fmtDate(p.paidAt)}` : ""}</div>)}
-          </section>
+            <div className="border-t pt-3 flex justify-between text-xs text-slate-500">
+              <div>Separado por: ________________________ Data: ____/____/________</div>
+              <div>Conferido por: ________________________</div>
+            </div>
+          </div>
+        </div>
+      )}
 
-          <section className="mt-6">
-            <h4 className="font-semibold mb-2 text-sm">Faturação manual</h4>
-            {detail.invoiceDocuments.length === 0 ? <p className="text-xs text-slate-400 mb-2">Sem documentos fiscais registados.</p> : detail.invoiceDocuments.map(doc => <div key={doc.id} className="text-xs bg-slate-50 rounded p-2 mb-1">{doc.documentType} · {doc.documentNumber || doc.documentReference || "—"} · {doc.status} · {doc.amountCents != null ? `${(doc.amountCents / 100).toFixed(2)} ${doc.currency}` : "—"} · {fmtDate(doc.issuedAt)}</div>)}
-            {!detail.invoiceDocuments.some(doc => doc.documentType === "invoice" && doc.status === "issued") && (
-              <div className="flex flex-wrap gap-2 mt-3">
-                <input value={invoiceReference} onChange={e => setInvoiceReference(e.target.value)} maxLength={100} placeholder="Referência/n.º oficial emitido externamente" className="border rounded px-3 py-1.5 text-xs flex-1 min-w-64" />
-                <input type="date" value={invoiceIssuedAt} onChange={e => setInvoiceIssuedAt(e.target.value)} className="border rounded px-3 py-1.5 text-xs" />
-                <button onClick={recordInvoice} disabled={saving || !invoiceReference.trim()} className="px-3 py-1.5 bg-sky-600 text-white rounded text-xs disabled:opacity-50">Registar fatura</button>
+      {/* Order Detail Modal / Panel */}
+      {detailLoading && <div className="p-6 text-center text-slate-400">A carregar detalhe da encomenda...</div>}
+
+      {detail && (
+        <div className="bg-white rounded-xl border border-slate-200 p-6 shadow-sm space-y-6">
+          <div className="flex flex-wrap justify-between items-start border-b pb-4 gap-4">
+            <div>
+              <div className="flex items-center gap-2">
+                <h3 className="text-lg font-bold text-slate-900">Encomenda #{detail.order.orderNumber}</h3>
+                <span className={`px-2.5 py-0.5 rounded-full text-xs font-semibold ${statusColor(detail.order.status)}`}>
+                  {STATUS_LABELS[detail.order.status] || detail.order.status}
+                </span>
+                <span className="px-2 py-0.5 rounded-full text-xs bg-slate-100 text-slate-700">
+                  {PAYMENT_STATUS_LABELS[detail.order.paymentStatus] || detail.order.paymentStatus}
+                </span>
+              </div>
+              <p className="text-xs text-slate-500 mt-1">Criada em {fmtDate(detail.order.createdAt)} · Atualizada em {fmtDate(detail.order.updatedAt)}</p>
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setPickingSheetOrder(detail)}
+                className="px-3 py-1.5 bg-slate-900 text-white rounded text-xs font-medium hover:bg-slate-800"
+              >
+                🖨 Imprimir Picking
+              </button>
+              <button onClick={() => setDetail(null)} className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded text-xs">
+                Fechar
+              </button>
+            </div>
+          </div>
+
+          {/* Operational Fulfillment & Delivery Panel */}
+          <section className="bg-slate-50 border rounded-xl p-4">
+            <h4 className="font-bold text-sm text-slate-800 mb-3">
+              {detail.order.deliveryType === "pickup" ? "📦 Levantamento em Loja" : "🚚 Envio ao Domicílio"}
+            </h4>
+
+            {detail.order.deliveryType === "shipping" ? (
+              <div className="space-y-3 text-xs">
+                <div className="flex flex-wrap gap-4 items-center">
+                  <span>Método de envio: <strong>{detail.order.shippingMethod || "Padrão"}</strong></span>
+                  <div className="flex items-center gap-2 flex-1 min-w-64">
+                    <input
+                      type="text"
+                      value={tracking}
+                      onChange={(e) => setTracking(e.target.value)}
+                      placeholder="N.º de seguimento (tracking)"
+                      className="border rounded px-3 py-1.5 text-xs flex-1 bg-white"
+                      maxLength={255}
+                    />
+                    <button onClick={saveTracking} disabled={saving} className="px-3 py-1.5 bg-slate-800 text-white rounded text-xs disabled:opacity-50">
+                      Guardar Tracking
+                    </button>
+                  </div>
+                </div>
+                {detail.order.status === "processing" && (
+                  <div className="p-2.5 bg-blue-50 border border-blue-200 rounded flex justify-between items-center">
+                    <span className="text-blue-800">Encomenda pronta para envio após embalamento?</span>
+                    <button
+                      onClick={() => changeStatus("shipped")}
+                      disabled={saving}
+                      className="px-3 py-1 bg-blue-600 hover:bg-blue-500 text-white rounded font-medium disabled:opacity-50"
+                    >
+                      Marcar como Enviada (Shipped)
+                    </button>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="space-y-3 text-xs">
+                <div className="p-2.5 bg-purple-50 border border-purple-200 rounded text-purple-900">
+                  Esta encomenda deve ser levantada na loja física pelo cliente.
+                </div>
+                {detail.order.status === "processing" && (
+                  <div className="flex justify-between items-center p-2.5 bg-indigo-50 border border-indigo-200 rounded">
+                    <span className="text-indigo-800">Itens separados e prontos para o cliente levantar?</span>
+                    <button
+                      onClick={() => changeStatus("ready_for_pickup")}
+                      disabled={saving}
+                      className="px-3 py-1 bg-indigo-600 hover:bg-indigo-500 text-white rounded font-medium disabled:opacity-50"
+                    >
+                      Marcar Pronto para Levantamento
+                    </button>
+                  </div>
+                )}
+                {detail.order.status === "ready_for_pickup" && (
+                  <div className="flex justify-between items-center p-2.5 bg-green-50 border border-green-200 rounded">
+                    <span className="text-green-800">Cliente recolheu os produtos na loja física?</span>
+                    <button
+                      onClick={() => changeStatus("delivered")}
+                      disabled={saving}
+                      className="px-3 py-1 bg-green-600 hover:bg-green-500 text-white rounded font-medium disabled:opacity-50"
+                    >
+                      Confirmar Entrega ao Cliente (Delivered)
+                    </button>
+                  </div>
+                )}
               </div>
             )}
-            <p className="text-[11px] text-slate-400 mt-1">Regista apenas documentos já emitidos no sistema fiscal externo. Campos emitidos ficam imutáveis.</p>
           </section>
 
-          <section className="mt-6">
-            <h4 className="font-semibold mb-2 text-sm">Reembolsos</h4>
+          {/* Customer & Addresses */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
+            <div className="border rounded p-3">
+              <h5 className="font-bold text-slate-800 mb-1">Cliente</h5>
+              <p><strong>Nome:</strong> {detail.customer?.name || detail.order.guestName || "—"}</p>
+              <p><strong>Email:</strong> {detail.customer?.email || detail.order.guestEmail || "—"}</p>
+              <p><strong>Telefone:</strong> {detail.customer?.phone || detail.order.guestPhone || "—"}</p>
+              <p><strong>NIF:</strong> {detail.customer?.nif || detail.order.nif || "—"}</p>
+            </div>
+            <div className="border rounded p-3">
+              <h5 className="font-bold text-slate-800 mb-1">Morada de Envio</h5>
+              <AddressBlock addr={detail.order.shippingAddress} />
+            </div>
+            <div className="border rounded p-3">
+              <h5 className="font-bold text-slate-800 mb-1">Morada de Faturação</h5>
+              <AddressBlock addr={detail.order.billingAddress} />
+            </div>
+          </div>
+
+          {/* Items Table */}
+          <section>
+            <h4 className="font-semibold mb-2 text-sm">Itens da Encomenda</h4>
+            <div className="border rounded overflow-x-auto">
+              <table className="w-full text-xs text-left">
+                <thead className="bg-slate-50 border-b">
+                  <tr>
+                    <th className="p-2">Produto</th>
+                    <th className="p-2 text-center">SKU</th>
+                    <th className="p-2 text-right">Qtd</th>
+                    <th className="p-2 text-right">Preço Unit. (Bruto)</th>
+                    <th className="p-2 text-right">Preço Unit. (Líquido)</th>
+                    <th className="p-2 text-right">IVA</th>
+                    <th className="p-2 text-right">Desc.</th>
+                    <th className="p-2 text-right">Total</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y">
+                  {detail.items.map(i => (
+                    <tr key={i.id}>
+                      <td className="p-2 font-medium">{i.productName}</td>
+                      <td className="p-2 text-center font-mono text-slate-600">{i.productSku || "—"}</td>
+                      <td className="p-2 text-right font-bold">{i.quantity}</td>
+                      <td className="p-2 text-right">{fmtMoney(i.unitPriceGross)}</td>
+                      <td className="p-2 text-right">{fmtMoney(i.unitPriceNet)}</td>
+                      <td className="p-2 text-right">{fmtMoney(i.vatAmount)} ({i.vatRate}%)</td>
+                      <td className="p-2 text-right">{fmtMoney(i.discountAmount)}</td>
+                      <td className="p-2 text-right font-semibold">{fmtMoney(i.lineTotalGross)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="flex justify-end mt-2 text-xs text-slate-700">
+              <div className="space-y-1 text-right min-w-48">
+                <div>Subtotal: <strong>{fmtMoney(detail.order.subtotal)}</strong></div>
+                <div>Envio: <strong>{fmtMoney(detail.order.shipping)}</strong></div>
+                <div>IVA: <strong>{fmtMoney(detail.order.vat)}</strong></div>
+                {parseFloat(detail.order.discount || "0") > 0 && <div>Desconto: <strong>-{fmtMoney(detail.order.discount)}</strong></div>}
+                <div className="text-sm font-bold border-t pt-1 text-slate-900">Total: {fmtMoney(detail.order.total)}</div>
+              </div>
+            </div>
+          </section>
+
+          {/* Unified Operational Timeline */}
+          <section className="border-t pt-4">
+            <h4 className="font-semibold mb-3 text-sm text-slate-800">Linha Temporal Operacional Unificada</h4>
+            {detail.timeline.length === 0 ? (
+              <p className="text-xs text-slate-400">Sem eventos registados.</p>
+            ) : (
+              <div className="space-y-2 relative border-l-2 border-slate-200 ml-3 pl-4">
+                {detail.timeline.map((event) => (
+                  <div key={event.id} className="relative text-xs">
+                    <div className="absolute -left-[21px] top-1 w-2.5 h-2.5 rounded-full bg-slate-400 border border-white" />
+                    <div className="flex flex-wrap justify-between items-baseline gap-2">
+                      <span className="font-semibold text-slate-800">{event.title}</span>
+                      <span className="text-[10px] text-slate-400">{fmtDate(event.timestamp)}</span>
+                    </div>
+                    {event.description && <p className="text-slate-600 mt-0.5">{event.description}</p>}
+                    {event.actor && <p className="text-[10px] text-slate-400">Por: {event.actor}</p>}
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+
+          {/* Payment Attempts */}
+          <section className="border-t pt-4">
+            <h4 className="font-semibold mb-2 text-sm text-slate-800">Tentativas de Pagamento (Gateway)</h4>
+            {detail.paymentAttempts.length === 0 ? (
+              <p className="text-xs text-slate-400">Sem tentativas de gateway registadas.</p>
+            ) : (
+              <div className="space-y-1.5">
+                {detail.paymentAttempts.map((pa) => (
+                  <div key={pa.id} className="text-xs bg-slate-50 border rounded p-2.5 flex flex-wrap justify-between items-center gap-2">
+                    <div>
+                      <span className="font-bold">{pa.provider}</span> · Método: <strong>{pa.method}</strong> · Montante: <strong>{fmtCents(pa.amountCents)} {pa.currency}</strong> · Estado: <span className="font-semibold">{pa.status}</span>
+                      {pa.providerReference && <span className="block text-[11px] text-slate-500">Ref: {pa.providerReference}</span>}
+                      {pa.providerTransactionId && <span className="block text-[11px] text-slate-500">Trx ID: {pa.providerTransactionId}</span>}
+                      {pa.recoveryState && <span className="block text-[11px] text-amber-600 font-semibold">Estado de recuperação: {pa.recoveryState}</span>}
+                      {pa.failureReason && <span className="block text-[11px] text-red-600">Erro: {pa.failureReason}</span>}
+                    </div>
+                    <span className="text-[10px] text-slate-400">{fmtDate(pa.createdAt)}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+
+          {/* Manual Invoicing & Credit Notes */}
+          <section className="border-t pt-4">
+            <h4 className="font-semibold mb-2 text-sm text-slate-800">Documentos Fiscais & Faturação Manual</h4>
+            {detail.invoiceDocuments.length === 0 ? (
+              <p className="text-xs text-slate-400 mb-2">Sem documentos fiscais registados.</p>
+            ) : (
+              detail.invoiceDocuments.map((doc) => (
+                <div key={doc.id} className="text-xs bg-slate-50 border rounded p-2 mb-1.5 flex justify-between items-center">
+                  <div>
+                    <strong>{doc.documentType === "invoice" ? "Fatura" : "Nota de Crédito"}</strong> · Ref: <strong>{doc.documentNumber || doc.documentReference || "—"}</strong> · Estado: {doc.status} · {doc.amountCents != null ? `${fmtCents(doc.amountCents)} ${doc.currency}` : ""}
+                  </div>
+                  <span className="text-[10px] text-slate-400">Emitido: {fmtDate(doc.issuedAt)}</span>
+                </div>
+              ))
+            )}
+
+            {/* Record Invoice Form */}
+            {!detail.invoiceDocuments.some((doc) => doc.documentType === "invoice" && doc.status === "issued") && (
+              <div className="mt-3 p-3 bg-slate-50 border rounded-lg">
+                <h5 className="font-semibold text-xs text-slate-700 mb-2">Registar Fatura Manual Emitida Externamente</h5>
+                <div className="flex flex-wrap gap-2">
+                  <input
+                    value={invoiceReference}
+                    onChange={(e) => setInvoiceReference(e.target.value)}
+                    maxLength={100}
+                    placeholder="Referência oficial (ex. FT 2026/001)"
+                    className="border rounded px-3 py-1.5 text-xs flex-1 min-w-48 bg-white"
+                  />
+                  <input
+                    type="date"
+                    value={invoiceIssuedAt}
+                    onChange={(e) => setInvoiceIssuedAt(e.target.value)}
+                    className="border rounded px-3 py-1.5 text-xs bg-white"
+                  />
+                  <button onClick={recordInvoice} disabled={saving || !invoiceReference.trim()} className="px-3 py-1.5 bg-sky-600 text-white rounded text-xs disabled:opacity-50">
+                    Registar Fatura
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Record Credit Note Form (if refund exists and invoice exists) */}
+            {detail.refundState && detail.refundState.refundedCents > 0 && detail.invoiceDocuments.some(doc => doc.documentType === "invoice" && doc.status === "issued") && (
+              <div className="mt-3 p-3 bg-amber-50/70 border border-amber-200 rounded-lg">
+                <h5 className="font-semibold text-xs text-amber-900 mb-2">Registar Nota de Crédito Manual (Reembolso)</h5>
+                <div className="flex flex-wrap gap-2">
+                  <select
+                    value={creditNoteOriginalDocId || ""}
+                    onChange={(e) => setCreditNoteOriginalDocId(Number(e.target.value))}
+                    className="border rounded px-2.5 py-1.5 text-xs bg-white"
+                  >
+                    {detail.invoiceDocuments.filter(d => d.documentType === "invoice" && d.status === "issued").map(d => (
+                      <option key={d.id} value={d.id}>Fatura original: {d.documentNumber || d.providerDocumentId}</option>
+                    ))}
+                  </select>
+                  <input
+                    value={creditNoteReference}
+                    onChange={(e) => setCreditNoteReference(e.target.value)}
+                    maxLength={100}
+                    placeholder="Referência NC oficial (ex. NC 2026/001)"
+                    className="border rounded px-3 py-1.5 text-xs flex-1 min-w-36 bg-white"
+                  />
+                  <input
+                    value={creditNoteAmount}
+                    onChange={(e) => setCreditNoteAmount(e.target.value)}
+                    maxLength={12}
+                    placeholder="Montante €"
+                    className="border rounded px-3 py-1.5 text-xs w-28 bg-white"
+                  />
+                  <input
+                    type="date"
+                    value={creditNoteIssuedAt}
+                    onChange={(e) => setCreditNoteIssuedAt(e.target.value)}
+                    className="border rounded px-3 py-1.5 text-xs bg-white"
+                  />
+                  <button onClick={recordCreditNote} disabled={saving || !creditNoteReference.trim() || !parseEurosToCents(creditNoteAmount)} className="px-3 py-1.5 bg-amber-700 text-white rounded text-xs disabled:opacity-50">
+                    Registar Nota de Crédito
+                  </button>
+                </div>
+              </div>
+            )}
+          </section>
+
+          {/* Refunds Section */}
+          <section className="border-t pt-4">
+            <h4 className="font-semibold mb-2 text-sm text-slate-800">Reembolsos & Compensações</h4>
             {detail.refundState ? (
               <>
-                <div className="text-xs bg-slate-50 rounded p-2 mb-2 grid grid-cols-2 md:grid-cols-4 gap-2">
+                <div className="text-xs bg-slate-50 border rounded p-3 mb-2 grid grid-cols-2 md:grid-cols-4 gap-2">
                   <span>Pago: <strong>{fmtCents(detail.refundState.paidCents)}</strong></span>
                   <span>Reembolsado: <strong>{fmtCents(detail.refundState.refundedCents)}</strong></span>
                   <span>Comprometido: <strong>{fmtCents(detail.refundState.committedCents)}</strong></span>
-                  <span>Reembolsável: <strong>{fmtCents(detail.refundState.remainingRefundableCents)}</strong></span>
+                  <span>Disponível p/ Reembolso: <strong>{fmtCents(detail.refundState.remainingRefundableCents)}</strong></span>
                 </div>
-                {detail.refundState.fiscalCreditNotePending && (
-                  <p className="text-xs text-amber-600 mb-2">Nota de crédito pendente: registe o documento fiscal emitido externamente na secção de faturação.</p>
-                )}
-                {detail.refundState.fullyRefunded && (
-                  <p className="text-xs text-green-700 mb-2">Pagamento totalmente reembolsado. A transição de estado da encomenda para “Reembolsado” (se aplicável) é uma operação explícita na secção de estados.</p>
-                )}
-                {detail.refundState.refunds.length === 0 ? <p className="text-xs text-slate-400 mb-2">Sem reembolsos registados.</p> : detail.refundState.refunds.map(r => (
-                  <div key={r.id} className="text-xs bg-slate-50 rounded p-2 mb-1">
-                    #{r.id} · {fmtCents(r.amountCents)} {r.currency} · {REFUND_STATUS_LABELS[r.status] || r.status} · {r.provider === "manual" ? "manual" : r.provider}
-                    {r.providerRefundId ? ` · ref. ${r.providerRefundId}` : ""}
-                    {" · "}{fmtDate(r.createdAt)}
-                    {r.completedAt ? ` · concluído ${fmtDate(r.completedAt)}` : ""}
-                    <div className="flex gap-1 mt-1">
-                      {r.status === "pending" && r.provider === "manual" && <button onClick={() => refundAction(r.id, "complete")} disabled={saving} className="px-2 py-0.5 bg-green-600 text-white rounded disabled:opacity-50">Concluir c/ ref. externa</button>}
-                      {r.status === "pending" && <button onClick={() => refundAction(r.id, "cancel")} disabled={saving} className="px-2 py-0.5 bg-slate-500 text-white rounded disabled:opacity-50">Cancelar</button>}
-                      {r.status === "failed" && <button onClick={() => refundAction(r.id, "retry")} disabled={saving} className="px-2 py-0.5 bg-sky-600 text-white rounded disabled:opacity-50">Reintentar</button>}
+                {detail.refundState.refunds.map((r) => (
+                  <div key={r.id} className="text-xs bg-slate-50 border rounded p-2 mb-1.5 flex flex-wrap justify-between items-center gap-2">
+                    <div>
+                      #{r.id} · {fmtCents(r.amountCents)} {r.currency} · <strong>{REFUND_STATUS_LABELS[r.status] || r.status}</strong> · {r.provider}
+                      {r.providerRefundId && <span> · Ref: {r.providerRefundId}</span>}
+                      {r.reason && <span className="block text-[11px] text-slate-500">Motivo: {r.reason}</span>}
+                    </div>
+                    <div className="flex gap-1">
+                      {r.status === "pending" && r.provider === "manual" && (
+                        <button onClick={() => refundAction(r.id, "complete")} disabled={saving} className="px-2 py-0.5 bg-green-600 text-white rounded text-[11px]">Concluir c/ ref</button>
+                      )}
+                      {r.status === "pending" && (
+                        <button onClick={() => refundAction(r.id, "cancel")} disabled={saving} className="px-2 py-0.5 bg-slate-500 text-white rounded text-[11px]">Cancelar</button>
+                      )}
+                      {r.status === "failed" && (
+                        <button onClick={() => refundAction(r.id, "retry")} disabled={saving} className="px-2 py-0.5 bg-sky-600 text-white rounded text-[11px]">Reintentar</button>
+                      )}
                     </div>
                   </div>
                 ))}
                 {detail.refundState.paidCents > 0 && detail.refundState.remainingRefundableCents > 0 && (
-                  <div className="border rounded p-3 mt-2">
+                  <div className="border rounded p-3 mt-2 bg-slate-50">
                     <div className="flex flex-wrap gap-2">
-                      <input value={refundAmount} onChange={e => setRefundAmount(e.target.value)} maxLength={12} placeholder="Montante € (ex. 12.34)" className="border rounded px-3 py-1.5 text-xs w-36" />
-                      <input value={refundReason} onChange={e => setRefundReason(e.target.value)} maxLength={500} placeholder="Motivo interno (opcional)" className="border rounded px-3 py-1.5 text-xs flex-1 min-w-48" />
+                      <input value={refundAmount} onChange={(e) => setRefundAmount(e.target.value)} maxLength={12} placeholder="Montante € (ex. 15.00)" className="border rounded px-3 py-1.5 text-xs w-36 bg-white" />
+                      <input value={refundReason} onChange={(e) => setRefundReason(e.target.value)} maxLength={500} placeholder="Motivo interno (opcional)" className="border rounded px-3 py-1.5 text-xs flex-1 min-w-48 bg-white" />
                     </div>
                     <label className="flex items-center gap-2 mt-2 text-xs text-slate-600">
-                      <input type="checkbox" checked={refundAsCompleted} onChange={e => setRefundAsCompleted(e.target.checked)} />
-                      Registar como reembolso manual CONCLUÍDO (o dinheiro já foi devolvido externamente — ex. transferência bancária)
+                      <input type="checkbox" checked={refundAsCompleted} onChange={(e) => setRefundAsCompleted(e.target.checked)} />
+                      Registar como reembolso manual CONCLUÍDO (o dinheiro já foi devolvido ao cliente externamente)
                     </label>
                     {refundAsCompleted && (
                       <div className="flex flex-wrap gap-2 mt-2">
-                        <input value={refundReference} onChange={e => setRefundReference(e.target.value)} maxLength={255} placeholder="Referência externa (obrigatória)" className="border rounded px-3 py-1.5 text-xs flex-1 min-w-48" />
-                        <input type="date" value={refundCompletedAt} onChange={e => setRefundCompletedAt(e.target.value)} className="border rounded px-3 py-1.5 text-xs" />
+                        <input value={refundReference} onChange={(e) => setRefundReference(e.target.value)} maxLength={255} placeholder="Referência externa (obrigatória)" className="border rounded px-3 py-1.5 text-xs flex-1 min-w-48 bg-white" />
+                        <input type="date" value={refundCompletedAt} onChange={(e) => setRefundCompletedAt(e.target.value)} className="border rounded px-3 py-1.5 text-xs bg-white" />
                       </div>
                     )}
-                    <button onClick={submitRefund} disabled={saving || !parseEurosToCents(refundAmount)} className="mt-2 px-3 py-1.5 bg-sky-600 text-white rounded text-xs disabled:opacity-50">Solicitar reembolso</button>
-                    <p className="text-[11px] text-slate-400 mt-1">Proteção contra sobre-reembolso aplicada no servidor. Reembolsos nunca repõem stock automaticamente.</p>
+                    <button onClick={submitRefund} disabled={saving || !parseEurosToCents(refundAmount)} className="mt-2 px-3 py-1.5 bg-sky-600 text-white rounded text-xs disabled:opacity-50">
+                      Solicitar Reembolso
+                    </button>
                   </div>
                 )}
               </>
             ) : <p className="text-xs text-slate-400">Estado de reembolso indisponível.</p>}
           </section>
 
-          <section className="mt-6">
-            <h4 className="font-semibold mb-2 text-sm">Alterar estado</h4>
+          {/* Change Status */}
+          <section className="border-t pt-4">
+            <h4 className="font-semibold mb-2 text-sm text-slate-800">Transição de Estado</h4>
             <div className="flex gap-2 flex-wrap items-center">
-              <input value={comment} onChange={e => setComment(e.target.value)} placeholder="Comentário opcional (ficará no histórico)" className="border rounded px-3 py-1.5 text-xs flex-1 min-w-48" />
-              {detail.order.allowedTransitions.filter(s => s !== "expired").map(s => <button key={s} onClick={() => changeStatus(s)} disabled={saving} className={`px-3 py-1.5 rounded text-xs text-white disabled:opacity-50 ${CRITICAL_STATUSES.includes(s) ? "bg-red-500" : "bg-sky-600"}`}>{STATUS_LABELS[s] || s}</button>)}
+              <input value={comment} onChange={(e) => setComment(e.target.value)} placeholder="Comentário opcional (ficará registado na linha temporal)" className="border rounded px-3 py-1.5 text-xs flex-1 min-w-48" />
+              {detail.order.allowedTransitions.filter((s) => s !== "expired").map((s) => (
+                <button
+                  key={s}
+                  onClick={() => changeStatus(s)}
+                  disabled={saving}
+                  className={`px-3 py-1.5 rounded text-xs text-white disabled:opacity-50 ${CRITICAL_STATUSES.includes(s) ? "bg-red-500 hover:bg-red-600" : "bg-sky-600 hover:bg-sky-500"}`}
+                >
+                  {STATUS_LABELS[s] || s}
+                </button>
+              ))}
             </div>
-            {detail.order.allowedTransitions.length === 0 && <p className="text-xs text-slate-400 mt-2">Estado final — sem transições permitidas.</p>}
-            {detail.order.status === "refunded" && <p className="text-xs text-amber-600 mt-2">Nota: este estado não executa reembolso em gateway externo.</p>}
-            <p className="text-[11px] text-slate-400 mt-1">Estados críticos (cancelar/reembolsar) requerem nível manager/admin e pedem confirmação.</p>
           </section>
-
-          <section className="mt-6">
-            <h4 className="font-semibold mb-2 text-sm">Histórico de estados</h4>
-            {detail.statusHistory.length === 0 ? <p className="text-xs text-slate-400">Sem histórico registado.</p> : detail.statusHistory.map(h => <div key={h.id} className="text-xs border-t py-2"><strong>{STATUS_LABELS[h.fromStatus ?? ""] || h.fromStatus || "—"}</strong> → <strong>{STATUS_LABELS[h.toStatus] || h.toStatus}</strong> · {fmtDate(h.createdAt)} {h.changedByName ? `· por ${h.changedByName}` : ""}{h.comment ? <p className="text-slate-500">{h.comment}</p> : null}</div>)}
-          </section>
-
-          {detail.order.notes && <section className="mt-6"><h4 className="font-semibold mb-2 text-sm">Notas da encomenda / cliente</h4><p className="text-sm text-slate-600">{detail.order.notes}</p></section>}
         </div>
       )}
     </div>
