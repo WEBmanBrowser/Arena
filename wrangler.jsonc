@@ -18,15 +18,14 @@
     "binding": "ASSETS"
   },
 
-  // Hyperdrive binding for Neon PostgreSQL
-  // Replace <YOUR_HYPERDRIVE_ID> with the actual ID after running:
-  //   npx wrangler hyperdrive create mdtech-neon-db --connection-string="postgres://USER:PASS@HOST/DB"
+  // Hyperdrive binding for Neon PostgreSQL (staging configuration: mdtech-staging).
+  // The binding name HYPERDRIVE is required by src/db/index.ts.
+  // No localConnectionString and no credentials are stored here: for local
+  // development set DATABASE_URL in .env instead (see src/db/index.ts).
   "hyperdrive": [
     {
       "binding": "HYPERDRIVE",
-      "id": "<YOUR_HYPERDRIVE_ID>",
-      // For local development, connect directly to your local or Neon PostgreSQL
-      "localConnectionString": "postgresql://postgres:postgres@127.0.0.1:5432/app_db"
+      "id": "04d318e1eafa44d7becfabe756c11d20"
     }
   ],
 
@@ -35,12 +34,14 @@
     "NODE_ENV": "production"
   },
 
-  // R2 bucket for product images
-  // Create with: npx wrangler r2 bucket create mdtech-product-images
+  // R2 bucket for product images (staging bucket: mdtech-staging).
+  // The binding name PRODUCT_IMAGES is required by src/lib/storage/r2.ts.
+  // Public access is NOT enabled; R2_PUBLIC_URL stays unset until a public
+  // domain is deliberately configured (getPublicUrl() then returns null).
   "r2_buckets": [
     {
       "binding": "PRODUCT_IMAGES",
-      "bucket_name": "mdtech-product-images"
+      "bucket_name": "mdtech-staging"
     }
   ],
 
@@ -54,8 +55,15 @@
     "crons": ["*/10 * * * *"]
   }
 
-  // SECRETS (set via `wrangler secret put`):
-  // - JWT_SECRET
-  // - CRON_SECRET (REQUIRED for cron; there is no JWT_SECRET fallback)
-  // These are NOT placed in this file for security.
+  // SECRETS (set via `wrangler secret put` — NEVER stored in this file):
+  // Required before the first staging deploy:
+  // - JWT_SECRET             (sessions; auth throws without it)
+  // - CRON_SECRET            (REQUIRED for cron; there is no JWT_SECRET fallback)
+  // Required only for the features that use them:
+  // - BULK_PREVIEW_SECRET    (>=32 chars; admin bulk price preview)
+  // - EUPAGO_API_KEY / EUPAGO_OAUTH_CLIENT_ID / EUPAGO_OAUTH_CLIENT_SECRET /
+  //   EUPAGO_WEBHOOK_KEY     (Eupago payments + webhook verification)
+  // - EMAIL_API_KEY          (outbound email; without it emails are logged, not sent)
+  // Optional non-secret vars: EUPAGO_ENVIRONMENT (default sandbox), EMAIL_FROM,
+  // NEXT_PUBLIC_SITE_URL / SITE_URL, ORDER_RESERVATION_MINUTES, R2_PUBLIC_URL.
 }
