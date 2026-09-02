@@ -631,14 +631,14 @@ export default function AdminOrdersPage() {
                   </tr>
                 ) : (
                   webhookAnomalies.anomalies.map((a) => {
-                    // B.3.5.2 — eligibility: the service layer pre-classifies a
-                    // row as recoverable when the persisted event carries the
-                    // trusted metadata. We surface the same pre-conditions in
-                    // the UI to avoid sending requests that are known-bad.
-                    const eligible =
-                      a.provider === "eupago" &&
-                      a.status === "ignored" &&
-                      a.lastError === "REFUND_ATTEMPT_NOT_FOUND";
+                    // B.3.5.2 — eligibility is derived SERVER-SIDE in the
+                    // admin orders service via the shared
+                    // isMetadataEligibleForRecovery predicate. The UI MUST
+                    // NOT re-derive the rule from local fields, because
+                    // that would let a non-eligible event (e.g. legacy row
+                    // without persisted trusted metadata) reach the
+                    // recovery endpoint. The button is shown ONLY when
+                    // the server explicitly marks the row as recoverable.
                     return (
                     <tr key={a.id} className="hover:bg-slate-50">
                       <td className="p-2.5 font-mono font-semibold text-slate-700">#{a.id}</td>
@@ -665,7 +665,7 @@ export default function AdminOrdersPage() {
                       </td>
                       <td className="p-2.5 text-slate-500 whitespace-nowrap">{fmtDate(a.receivedAt)}</td>
                       <td className="p-2.5 text-right">
-                        {eligible ? (
+                        {a.recoverable === true ? (
                           <button
                             onClick={() => recoverAnomaly(a.id)}
                             disabled={recoveringEventId != null}

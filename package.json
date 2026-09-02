@@ -14,7 +14,7 @@
     "db:generate": "npx drizzle-kit generate",
     "db:migrate": "npx drizzle-kit migrate",
     "db:seed": "npx tsx src/db/seed.ts",
-    "test": "vitest run",
+    "test": "node scripts/test-runner.cjs",
     "test:watch": "vitest"
   },
   "dependencies": {

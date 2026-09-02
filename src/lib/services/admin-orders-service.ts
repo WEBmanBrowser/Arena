@@ -27,6 +27,7 @@ import {
 import { and, asc, desc, eq, gte, ilike, inArray, lte, notInArray, or, sql, type SQL } from "drizzle-orm";
 import { createAuditLog } from "@/lib/audit";
 import { transitionOrderStatus } from "@/lib/orders";
+import { isMetadataEligibleForRecovery } from "@/lib/services/eupago-refund-recovery-service";
 import type { OrderRefundState } from "@/lib/refunds";
 import { getOrderRefundState } from "@/lib/refunds";
 
@@ -110,6 +111,17 @@ export type AdminWebhookAnomalyRow = {
   processedAt: Date | null;
   failedAt: Date | null;
   createdAt: Date;
+  /**
+   * Server-derived "metadata-eligible for a recovery attempt" boolean.
+   * When `true`, the admin UI MAY surface a "Recuperar" action; the
+   * actual recovery still has to be performed by the B.3.5.2 service,
+   * which is the only authority that can claim the event and correlate
+   * it with a refund attempt under a single transaction. This boolean
+   * is NOT a guarantee of financial success — it only means the row
+   * carries the persisted trusted metadata shape required to attempt
+   * recovery. The raw metadata is never exposed to the browser.
+   */
+  recoverable: boolean;
 };
 
 export interface AdminWebhookAnomalyParams {
@@ -468,6 +480,19 @@ export async function listAdminWebhookAnomalies(
           ? "payment"
           : "other";
 
+    // Server-side metadata-eligibility check. The shared predicate is the
+    // single source of truth for B.3.5.2 metadata eligibility, so the UI
+    // can never enable the recovery button for an event the recovery
+    // service would refuse. The raw metadata is intentionally NOT exposed
+    // to the browser — only this boolean is.
+    const recoverable = isMetadataEligibleForRecovery({
+      provider: r.provider,
+      status: r.status,
+      lastError: r.lastError,
+      providerEventId: r.providerEventId,
+      metadata: r.metadata,
+    });
+
     return {
       id: r.id,
       provider: r.provider,
@@ -481,6 +506,7 @@ export async function listAdminWebhookAnomalies(
       processedAt: r.processedAt,
       failedAt: r.failedAt,
       createdAt: r.createdAt,
+      recoverable,
     };
   });
 

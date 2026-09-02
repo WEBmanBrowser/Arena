@@ -102,22 +102,100 @@ interface PersistedTrustedMetadata {
   readonly entity?: unknown;
 }
 
-const REFUND_ATTEMPT_NOT_FOUND = "REFUND_ATTEMPT_NOT_FOUND";
+export const REFUND_ATTEMPT_NOT_FOUND = "REFUND_ATTEMPT_NOT_FOUND";
 
-function isSafePositiveIntegerCents(v: unknown): v is number {
+/**
+ * Trust-boundary primitives shared with the B.4.2 admin UI so the UI
+ * never duplicates the recovery eligibility rules. These are pure value
+ * predicates — they MUST stay free of any DB / network / financial
+ * mutation so they can be evaluated server-side on a single row.
+ */
+export function isSafePositiveIntegerCents(v: unknown): v is number {
   return typeof v === "number" && Number.isSafeInteger(v) && v > 0;
 }
 
-function isValidTridFormat(v: unknown): v is string {
+export function isValidTridFormat(v: unknown): v is string {
   return typeof v === "string" && v.length >= 1 && v.length <= 64 && /^[A-Za-z0-9._:\-]+$/.test(v);
 }
 
-function isValidCurrency(v: unknown): v is string {
+export function isValidCurrency(v: unknown): v is string {
   return typeof v === "string" && /^[A-Z]{3}$/.test(v);
+}
+
+/**
+ * Pure server-side metadata eligibility predicate for an ignored Eupago
+ * refund event. Returns true ONLY when the event row carries the minimum
+ * trusted metadata required for B.3.5.2 recovery to even attempt a
+ * financial settlement. This does NOT check the local refund_attempt
+ * candidate (that is the API's job at click time) — it only proves the
+ * persisted trusted metadata is sufficient to ASK for a recovery.
+ *
+ * Used by the B.4.2 admin UI to decide whether to surface the
+ * "Recuperar" button, and by the recovery service's pre-transaction
+ * read-only check.
+ */
+export function isMetadataEligibleForRecovery(
+  event: { provider: string; status: string; lastError: string | null; providerEventId: string | null; metadata: unknown }
+): boolean {
+  if (event.provider !== "eupago") return false;
+  if (event.status !== "ignored") return false;
+  if (event.lastError !== REFUND_ATTEMPT_NOT_FOUND) return false;
+  if (!event.providerEventId || !isValidTridFormat(event.providerEventId)) return false;
+  if (!event.metadata || typeof event.metadata !== "object") return false;
+  const meta = event.metadata as PersistedTrustedMetadata;
+  if (meta.kind !== "refund") return false;
+  if (meta.status !== "Refund") return false;
+  if (!isValidTridFormat(meta.originalTrid)) return false;
+  if (!isSafePositiveIntegerCents(meta.amountCents)) return false;
+  if (!isValidCurrency(meta.currency)) return false;
+  return true;
 }
 
 function fail(code: RecoveryRejectionCode, message: string): RecoveryOutcome {
   return { outcome: "rejected", code, message };
+}
+
+/**
+ * Maps a non-eligible event row to the SAME specific rejection code the
+ * B.3.5.2 pre-transaction check returned before the predicate was
+ * extracted. The public contract of the recovery service is preserved
+ * (callers / tests / API / UI all see the same code).
+ */
+function resolveSpecificRejection(event: {
+  provider: string;
+  status: string;
+  lastError: string | null;
+  providerEventId: string | null;
+  metadata: unknown;
+}): RecoveryOutcome {
+  if (event.lastError !== REFUND_ATTEMPT_NOT_FOUND) {
+    return fail("WRONG_LAST_ERROR", `Event lastError '${event.lastError ?? ""}' is not eligible for recovery`);
+  }
+  if (!event.providerEventId || !isValidTridFormat(event.providerEventId)) {
+    return fail("MISSING_TRID", "Event has no valid provider trid");
+  }
+  if (!event.metadata) {
+    return fail("MISSING_PERSISTED_METADATA", "Event carries no persisted trusted metadata");
+  }
+  const meta = event.metadata as PersistedTrustedMetadata;
+  if (meta.kind !== "refund") {
+    return fail("LEGACY_EVENT_UNRECOVERABLE", "Event is not classified as refund");
+  }
+  if (typeof meta.status !== "string" || meta.status !== "Refund") {
+    return fail("LEGACY_EVENT_UNRECOVERABLE", "Event status is not 'Refund'");
+  }
+  if (!isValidTridFormat(meta.originalTrid)) {
+    return fail("MISSING_ORIGINAL_TRID", "Event metadata has no valid originalTrid");
+  }
+  if (!isSafePositiveIntegerCents(meta.amountCents)) {
+    return fail("INVALID_AMOUNT", "Event metadata has no safe positive integer amountCents");
+  }
+  if (!isValidCurrency(meta.currency)) {
+    return fail("INVALID_CURRENCY", "Event metadata has no canonical 3-letter currency");
+  }
+  // Defensive fallback — should be unreachable when isMetadataEligibleForRecovery
+  // returns false.
+  return fail("LEGACY_EVENT_UNRECOVERABLE", "Event is not eligible for recovery");
 }
 
 /**
@@ -149,26 +227,29 @@ export async function recoverIgnoredEupagoRefund(input: {
     .limit(1);
   if (!event) return fail("WEBHOOK_EVENT_NOT_FOUND", "Webhook event not found");
   if (event.provider !== EUPAGO_PROVIDER_ID) return fail("WRONG_PROVIDER", "Event is not from Eupago");
+  if (event.status === "processed") return fail("ALREADY_PROCESSED", "Event already processed");
   if (event.status !== "ignored") {
-    if (event.status === "processed") return fail("ALREADY_PROCESSED", "Event already processed");
     return fail("WRONG_STATUS", `Event status '${event.status}' is not eligible for recovery`);
   }
-  if (event.lastError !== REFUND_ATTEMPT_NOT_FOUND) {
-    return fail("WRONG_LAST_ERROR", `Event lastError '${event.lastError ?? ""}' is not eligible for recovery`);
+  // Reuse the shared metadata-eligibility predicate so the UI and the
+  // service can never diverge on the metadata rule. The specific code
+  // is resolved AFTER the predicate passes, so the user-facing reason
+  // remains precise.
+  if (!isMetadataEligibleForRecovery(event)) {
+    return resolveSpecificRejection(event);
   }
-  if (!event.providerEventId || !isValidTridFormat(event.providerEventId)) {
+  // Predicate above guarantees the metadata shape, but the type guards
+  // below are required so TypeScript can narrow `meta.*` from `unknown`
+  // to `string` for the rest of the function. This mirrors the original
+  // inline shape; the predicate has already proven every branch passes.
+  const meta = event.metadata as PersistedTrustedMetadata;
+  if (!isValidTridFormat(event.providerEventId)) {
     return fail("MISSING_TRID", "Event has no valid provider trid");
   }
-  if (!event.metadata) {
-    return fail("MISSING_PERSISTED_METADATA", "Event carries no persisted trusted metadata");
-  }
-  const meta = event.metadata as PersistedTrustedMetadata;
   if (meta.kind !== "refund") {
     return fail("LEGACY_EVENT_UNRECOVERABLE", "Event is not classified as refund");
   }
-  if (typeof meta.status !== "string" || meta.status !== "Refund") {
-    // Provider status is "Refund" (the movement type) — without it, we
-    // cannot prove the trusted event was a refund movement.
+  if (meta.status !== "Refund") {
     return fail("LEGACY_EVENT_UNRECOVERABLE", "Event status is not 'Refund'");
   }
   if (!isValidTridFormat(meta.originalTrid)) {
