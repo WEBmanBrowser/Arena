@@ -94,7 +94,7 @@ export default function Header() {
         <Link href="/" className="shrink-0 flex items-center gap-2">
           <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-lime-400 to-sky-500 flex items-center justify-center font-black text-white text-lg">MD</div>
           <div className="hidden sm:block">
-            <div className="text-white font-bold text-sm leading-none">MD Tech Solutions</div>
+            <div className="text-white font-bold text-sm leading-none">MDTech Solutions</div>
             <div className="text-[10px] text-slate-400 leading-none mt-0.5">Reparação Rápida. Soluções Completas.</div>
           </div>
         </Link>

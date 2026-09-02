@@ -62,7 +62,7 @@ export async function sendEmail(params: {
   // 2. Attempt to send
   try {
     const apiKey = process.env.EMAIL_API_KEY;
-    const fromAddress = process.env.EMAIL_FROM || "noreply@mdtechsolutions.pt";
+    const fromAddress = process.env.EMAIL_FROM || "noreply@mdtech.pt";
 
     if (!apiKey) {
       // No email provider configured — log and skip
@@ -153,12 +153,12 @@ export function orderCreatedEmail(orderNumber: string, total: string): { subject
   return {
     subject: `MD Tech — Encomenda #${orderNumber} registada`,
     html: `<div style="font-family:system-ui;max-width:600px;margin:0 auto;padding:24px">
-      <h2 style="color:#0284c7">MD Tech Solutions</h2>
+      <h2 style="color:#0284c7">MDTech Solutions</h2>
       <p>A sua encomenda <strong>#${orderNumber}</strong> foi registada com sucesso.</p>
       <p>Total: <strong>${total}€</strong></p>
       <p>Estado: <strong>A aguardar pagamento</strong></p>
       <hr style="border:none;border-top:1px solid #e2e8f0;margin:24px 0">
-      <p style="font-size:12px;color:#64748b">MD Tech Solutions — Esposende, Portugal</p>
+      <p style="font-size:12px;color:#64748b">MDTech Solutions — Esposende, Portugal</p>
     </div>`,
   };
 }
@@ -167,12 +167,12 @@ export function orderCancelledEmail(orderNumber: string, reason?: string): { sub
   return {
     subject: `MD Tech — Encomenda #${orderNumber} cancelada`,
     html: `<div style="font-family:system-ui;max-width:600px;margin:0 auto;padding:24px">
-      <h2 style="color:#0284c7">MD Tech Solutions</h2>
+      <h2 style="color:#0284c7">MDTech Solutions</h2>
       <p>A sua encomenda <strong>#${orderNumber}</strong> foi cancelada.</p>
       ${reason ? `<p>Motivo: ${reason}</p>` : ""}
       <p>Se tiver questões, não hesite em contactar-nos.</p>
       <hr style="border:none;border-top:1px solid #e2e8f0;margin:24px 0">
-      <p style="font-size:12px;color:#64748b">MD Tech Solutions — Esposende, Portugal</p>
+      <p style="font-size:12px;color:#64748b">MDTech Solutions — Esposende, Portugal</p>
     </div>`,
   };
 }
@@ -181,11 +181,11 @@ export function orderExpiredEmail(orderNumber: string): { subject: string; html:
   return {
     subject: `MD Tech — Encomenda #${orderNumber} expirada`,
     html: `<div style="font-family:system-ui;max-width:600px;margin:0 auto;padding:24px">
-      <h2 style="color:#0284c7">MD Tech Solutions</h2>
+      <h2 style="color:#0284c7">MDTech Solutions</h2>
       <p>A sua encomenda <strong>#${orderNumber}</strong> expirou por falta de pagamento.</p>
       <p>Os artigos reservados foram libertados. Pode fazer uma nova encomenda a qualquer momento.</p>
       <hr style="border:none;border-top:1px solid #e2e8f0;margin:24px 0">
-      <p style="font-size:12px;color:#64748b">MD Tech Solutions — Esposende, Portugal</p>
+      <p style="font-size:12px;color:#64748b">MDTech Solutions — Esposende, Portugal</p>
     </div>`,
   };
 }
@@ -194,11 +194,11 @@ export function orderPaidEmail(orderNumber: string): { subject: string; html: st
   return {
     subject: `MD Tech — Pagamento confirmado #${orderNumber}`,
     html: `<div style="font-family:system-ui;max-width:600px;margin:0 auto;padding:24px">
-      <h2 style="color:#0284c7">MD Tech Solutions</h2>
+      <h2 style="color:#0284c7">MDTech Solutions</h2>
       <p>O pagamento da sua encomenda <strong>#${orderNumber}</strong> foi confirmado.</p>
       <p>A sua encomenda será processada em breve.</p>
       <hr style="border:none;border-top:1px solid #e2e8f0;margin:24px 0">
-      <p style="font-size:12px;color:#64748b">MD Tech Solutions — Esposende, Portugal</p>
+      <p style="font-size:12px;color:#64748b">MDTech Solutions — Esposende, Portugal</p>
     </div>`,
   };
 }

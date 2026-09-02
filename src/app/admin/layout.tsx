@@ -50,7 +50,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
             <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-lime-400 to-sky-500 flex items-center justify-center font-black text-white text-xs">MD</div>
             <div>
               <p className="text-white font-bold text-xs">Backoffice</p>
-              <p className="text-[10px] text-slate-500">MD Tech Solutions</p>
+              <p className="text-[10px] text-slate-500">MDTech Solutions</p>
             </div>
           </Link>
         </div>

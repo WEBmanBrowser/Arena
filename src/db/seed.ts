@@ -468,12 +468,12 @@ async function seed() {
 
   // Settings
   const settingsData = [
-    { key: "site_name", value: "MD Tech Solutions", group: "general" },
+    { key: "site_name", value: "MDTech Solutions", group: "general" },
     { key: "site_tagline", value: "Reparação Rápida. Soluções Completas.", group: "general" },
     { key: "company_name", value: "Marco Duarte Tech Solutions, Unipessoal Lda.", group: "general" },
     { key: "company_address", value: "Esposende, Portugal", group: "general" },
-    { key: "company_phone", value: "+351 253 000 000", group: "general" },
-    { key: "company_email", value: "info@mdtechsolutions.pt", group: "general" },
+    { key: "company_phone", value: "+351 917 801 898", group: "general" },
+    { key: "company_email", value: "geral@mdtech.pt", group: "general" },
     { key: "company_nif", value: "", group: "general" },
     { key: "store_address", value: "Esposende, Braga, Portugal", group: "store" },
     { key: "store_hours", value: "Seg-Sex: 9:00-18:30 | Sáb: 9:00-13:00", group: "store" },

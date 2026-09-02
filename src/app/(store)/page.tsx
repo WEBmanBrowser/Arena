@@ -156,7 +156,7 @@ export default async function HomePage() {
               <div>
                 <h2 className="text-2xl font-bold text-slate-800 mb-4">📍 Somos de Esposende</h2>
                 <p className="text-slate-600 mb-4">
-                  A MD Tech Solutions é uma empresa local de informática, com presença física em Esposende. 
+                  A MDTech Solutions é uma empresa local de informática, com presença física em Esposende. 
                   Oferecemos atendimento personalizado, assistência técnica especializada e a possibilidade 
                   de levantar as tuas encomendas diretamente na nossa loja.
                 </p>
@@ -177,7 +177,7 @@ export default async function HomePage() {
               </div>
               <div className="bg-gradient-to-br from-sky-50 to-lime-50 rounded-xl p-8 text-center">
                 <div className="w-20 h-20 mx-auto mb-4 rounded-2xl bg-gradient-to-br from-lime-400 to-sky-500 flex items-center justify-center font-black text-white text-2xl">MD</div>
-                <h3 className="font-bold text-slate-800 mb-2">MD Tech Solutions</h3>
+                <h3 className="font-bold text-slate-800 mb-2">MDTech Solutions</h3>
                 <p className="text-sm text-slate-500 mb-4">Reparação Rápida. Soluções Completas.</p>
                 <p className="text-xs text-slate-500">Esposende, Braga, Portugal</p>
                 <p className="text-xs text-slate-500">Seg-Sex: 9:00 - 18:30 | Sáb: 9:00 - 13:00</p>

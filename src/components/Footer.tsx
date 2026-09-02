@@ -9,14 +9,14 @@ export default function Footer() {
             <div className="flex items-center gap-2 mb-4">
               <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-lime-400 to-sky-500 flex items-center justify-center font-black text-white text-lg">MD</div>
               <div>
-                <div className="text-white font-bold text-sm">MD Tech Solutions</div>
+                <div className="text-white font-bold text-sm">MDTech Solutions</div>
                 <div className="text-[10px] text-slate-500">Reparação Rápida. Soluções Completas.</div>
               </div>
             </div>
             <p className="text-sm mb-3">Marco Duarte Tech Solutions, Unipessoal Lda.</p>
             <p className="text-sm">📍 Esposende, Braga, Portugal</p>
-            <p className="text-sm">📞 +351 253 000 000</p>
-            <p className="text-sm">✉️ info@mdtechsolutions.pt</p>
+            <p className="text-sm">📞 +351 917 801 898</p>
+            <p className="text-sm">✉️ geral@mdtech.pt</p>
           </div>
 
           <div>
