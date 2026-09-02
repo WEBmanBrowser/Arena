@@ -31,6 +31,18 @@ async function cleanupB34A() {
   await db.delete(products).where(like(products.sku, "B34A-%"));
   await db.delete(coupons).where(like(coupons.code, "B34A_%"));
   await db.delete(users).where(like(users.email, "b34a-%@test.local"));
+  // Manual invoicing tests use `actorUserId: 1` — ensure a user with that
+  // id exists so the audit_log FK is satisfied. The serial PK on users
+  // means the next insert would conflict unless we advance the sequence.
+  // We use a raw SQL insert with a fixed id; the test cleanup re-runs this
+  // idempotently, so the sequence is intentionally NOT advanced.
+  await db.execute(sql`
+    INSERT INTO users (id, email, password, name, role, is_active)
+    VALUES (1, 'b34a-actor@system.local', 'x', 'B.3.4A Actor', 'admin', true)
+    ON CONFLICT (id) DO NOTHING
+  `);
+  // Advance the users_id_seq so the next auto-insert picks an id > 1.
+  await db.execute(sql`SELECT setval(pg_get_serial_sequence('users', 'id'), GREATEST((SELECT MAX(id) FROM users), 1), true)`);
 }
 
 async function classId(key: string) {

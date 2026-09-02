@@ -21,7 +21,19 @@ async function resetTestData() {
   await db.delete(rmaRequests);
   await db.delete(payments);
   await db.delete(orders);
-  await db.update(products).set({ stock: 5, reservedStock: 0, soldCount: 0 }).where(eq(products.id, 1));
+  // The tests assume a seed product exists with id=1, price="10.00", stock=5.
+  // Wipe and reseed it idempotently so every test starts from the same fixture.
+  await db.delete(products).where(eq(products.id, 1));
+  await db.insert(products).values({
+    id: 1,
+    sku: "ORD-TEST-1",
+    name: "Order test product",
+    slug: "order-test-product",
+    price: "10.00",
+    stock: 5,
+    reservedStock: 0,
+    soldCount: 0,
+  });
   await db.delete(coupons);
   await db.execute(sql`INSERT INTO coupons (code,type,value,is_active,used_count,max_uses) VALUES ('TEST10','percentage','10.00',true,0,2) ON CONFLICT DO NOTHING`);
 }

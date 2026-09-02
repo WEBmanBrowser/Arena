@@ -187,6 +187,15 @@ export default function AdminOrdersPage() {
   const [bulkActionLoading, setBulkActionLoading] = useState(false);
   const [bulkResult, setBulkResult] = useState<{ total: number; succeeded: number[]; failed: Array<{ id: number; reason: string }> } | null>(null);
   const [pickingSheetOrder, setPickingSheetOrder] = useState<AdminOrderDetail | null>(null);
+  // B.3.5.2 — recovery action for an eligible ignored Eupago refund event.
+  // Only the id of the event currently being recovered is tracked here; the
+  // response payload sanitises the result and the table is reloaded.
+  const [recoveringEventId, setRecoveringEventId] = useState<number | null>(null);
+  const [recoveryResult, setRecoveryResult] = useState<
+    | null
+    | { kind: "ok"; message: string }
+    | { kind: "rejected"; code: string; message: string }
+  >(null);
 
   const load = useCallback(async (page = 1) => {
     setLoading(true); setError("");
@@ -379,6 +388,48 @@ export default function AdminOrdersPage() {
     setSelectedOrderIds(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
   };
 
+  // B.3.5.2 — Trigger recovery for a single ignored Eupago refund event.
+  // The handler is ONLY active for rows the service layer has pre-classified
+  // as eligible (provider=eupago, status=ignored, lastError=REFUND_ATTEMPT_NOT_FOUND).
+  // The request body is intentionally empty — the service refuses any
+  // client-supplied financial field by design.
+  const recoverAnomaly = async (eventId: number) => {
+    if (recoveringEventId != null) return;
+    if (!confirm(`Recuperar evento #${eventId}? Esta ação correlaciona o evento do fornecedor com um reembolso local existente. Só é bem-sucedida para eventos ignorados com metadados persistidos e um refund_attempt pendente.`)) return;
+    setRecoveringEventId(eventId);
+    setRecoveryResult(null);
+    try {
+      const res = await fetch(`/api/admin/webhook-anomalies/${eventId}/recover`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data?.outcome === "settled") {
+        const r = data.refund;
+        setRecoveryResult({
+          kind: "ok",
+          message: `Recuperado: reembolso #${r.id} de ${(r.amountCents / 100).toFixed(2)} ${r.currency} concluído (ref: ${r.providerRefundId}).`,
+        });
+      } else if (res.ok && data?.outcome === "already_settled") {
+        const r = data.refund;
+        setRecoveryResult({
+          kind: "ok",
+          message: `Já liquidado: reembolso #${r.id} de ${(r.amountCents / 100).toFixed(2)} ${r.currency} (ref: ${r.providerRefundId}). Estado do evento atualizado.`,
+        });
+      } else if (data?.outcome === "rejected") {
+        setRecoveryResult({ kind: "rejected", code: data.code, message: data.message || "Recuperação recusada" });
+      } else {
+        setRecoveryResult({ kind: "rejected", code: "ERROR", message: data?.error || `Erro ${res.status}` });
+      }
+      // Reload so the row reflects the new state (processed / settled / unchanged).
+      load(pagination.page);
+    } catch (e) {
+      setRecoveryResult({ kind: "rejected", code: "ERROR", message: (e as Error).message });
+    } finally {
+      setRecoveringEventId(null);
+    }
+  };
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -568,17 +619,27 @@ export default function AdminOrdersPage() {
                   <th className="p-2.5 text-center">Tentativas</th>
                   <th className="p-2.5">Motivo / Erro Sanitizado</th>
                   <th className="p-2.5">Recebido em</th>
+                  <th className="p-2.5 text-right">Ação</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {!webhookAnomalies || webhookAnomalies.anomalies.length === 0 ? (
                   <tr>
-                    <td colSpan={8} className="p-6 text-center text-slate-400">
+                    <td colSpan={9} className="p-6 text-center text-slate-400">
                       Sem anomalias de webhooks no filtro selecionado.
                     </td>
                   </tr>
                 ) : (
-                  webhookAnomalies.anomalies.map((a) => (
+                  webhookAnomalies.anomalies.map((a) => {
+                    // B.3.5.2 — eligibility is derived SERVER-SIDE in the
+                    // admin orders service via the shared
+                    // isMetadataEligibleForRecovery predicate. The UI MUST
+                    // NOT re-derive the rule from local fields, because
+                    // that would let a non-eligible event (e.g. legacy row
+                    // without persisted trusted metadata) reach the
+                    // recovery endpoint. The button is shown ONLY when
+                    // the server explicitly marks the row as recoverable.
+                    return (
                     <tr key={a.id} className="hover:bg-slate-50">
                       <td className="p-2.5 font-mono font-semibold text-slate-700">#{a.id}</td>
                       <td className="p-2.5 uppercase font-medium text-slate-600">{a.provider}</td>
@@ -603,12 +664,45 @@ export default function AdminOrdersPage() {
                         {a.lastError || "—"}
                       </td>
                       <td className="p-2.5 text-slate-500 whitespace-nowrap">{fmtDate(a.receivedAt)}</td>
+                      <td className="p-2.5 text-right">
+                        {a.recoverable === true ? (
+                          <button
+                            onClick={() => recoverAnomaly(a.id)}
+                            disabled={recoveringEventId != null}
+                            className="px-2.5 py-1 text-[11px] bg-emerald-600 hover:bg-emerald-500 text-white rounded font-medium disabled:opacity-50"
+                          >
+                            {recoveringEventId === a.id ? "A recuperar..." : "Recuperar"}
+                          </button>
+                        ) : (
+                          <span className="text-[10px] text-slate-400">—</span>
+                        )}
+                      </td>
                     </tr>
-                  ))
+                    );
+                  })
                 )}
               </tbody>
             </table>
           </div>
+          {recoveryResult && (
+            <div className={`p-3 text-xs rounded border ${
+              recoveryResult.kind === "ok"
+                ? "bg-emerald-50 text-emerald-900 border-emerald-200"
+                : "bg-amber-50 text-amber-900 border-amber-200"
+            }`}>
+              <strong>{recoveryResult.kind === "ok" ? "Recuperação concluída:" : "Recuperação recusada:"}</strong>{" "}
+              {recoveryResult.message}
+              {recoveryResult.kind === "rejected" && "code" in recoveryResult && (
+                <span className="ml-2 font-mono text-[11px] text-amber-700">[{recoveryResult.code}]</span>
+              )}
+              <button
+                onClick={() => setRecoveryResult(null)}
+                className="float-right text-slate-400 hover:text-slate-600 font-bold"
+              >
+                ×
+              </button>
+            </div>
+          )}
         </div>
       )}
 
