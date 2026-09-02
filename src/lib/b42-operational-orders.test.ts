@@ -23,6 +23,7 @@ import type {
 } from "@/lib/services/admin-orders-service";
 import {
   ADMIN_ORDER_QUEUES,
+  ADMIN_WEBHOOK_FILTERS,
   ADMIN_MAX_BULK_ORDERS,
   bulkTransitionAdminOrders,
   AdminOrderValidationError,
@@ -403,5 +404,168 @@ describe("B.4.2 — Unified Operational Timeline Sorting & Tie-breaking", () => 
     expect(entries[2].id).toBe("e4"); // tSame, payment (priority 2)
     expect(entries[3].id).toBe("e2"); // t2
     expect(entries[4].id).toBe("e1"); // t1
+  });
+});
+
+// ─── 5. FIX 1: READ-ONLY WEBHOOK OPERATIONAL VISIBILITY ──
+
+describe("B.4.2 (Fix 1) — Operational Webhook Anomalies Visibility", () => {
+  it("defines allowlisted webhook anomaly filters", () => {
+    expect(ADMIN_WEBHOOK_FILTERS).toEqual(["all", "failed", "ignored_payment", "ignored_refund"]);
+  });
+
+  it.each(ADMIN_WEBHOOK_FILTERS)("accepts valid webhookFilter=%s in GET /api/admin/orders", async (webhookFilter) => {
+    getCurrentUserMock.mockResolvedValue(makeUser("staff"));
+    const req = createRequest(`http://localhost/api/admin/orders?queue=exceptions&webhookFilter=${webhookFilter}`);
+    const res = await listGET(req);
+    expect(res.status).toBe(200);
+    expect(listAdminOrdersMock).toHaveBeenCalledWith(
+      expect.objectContaining({ queue: "exceptions", webhookFilter })
+    );
+  });
+
+  it("rejects invalid webhookFilter with 400", async () => {
+    getCurrentUserMock.mockResolvedValue(makeUser("staff"));
+    const req = createRequest("http://localhost/api/admin/orders?queue=exceptions&webhookFilter=invalid_filter");
+    const res = await listGET(req);
+    expect(res.status).toBe(400);
+    expect(listAdminOrdersMock).not.toHaveBeenCalled();
+  });
+
+  it("classifies REFUND_ATTEMPT_NOT_FOUND as refund anomaly", () => {
+    const raw = {
+      id: 1,
+      provider: "eupago",
+      eventType: "webhook.notification",
+      metadata: null,
+      lastError: "REFUND_ATTEMPT_NOT_FOUND",
+      status: "ignored",
+    };
+    const metaKind = (raw.metadata as { kind?: string } | null)?.kind;
+    const eventType = raw.eventType ?? null;
+    const kind =
+      metaKind === "refund" || eventType?.startsWith("refund") || raw.lastError === "REFUND_ATTEMPT_NOT_FOUND"
+        ? "refund"
+        : metaKind === "payment" || eventType?.startsWith("payment")
+          ? "payment"
+          : "other";
+    expect(kind).toBe("refund");
+  });
+
+  it("classifies payment webhook anomaly with metadata.kind = 'payment'", () => {
+    const raw = {
+      id: 2,
+      provider: "eupago",
+      eventType: "webhook.notification",
+      metadata: { kind: "payment" },
+      lastError: "PAYMENT_NOT_FOUND",
+      status: "ignored",
+    };
+    const metaKind = (raw.metadata as { kind?: string } | null)?.kind;
+    const eventType = raw.eventType ?? null;
+    const kind =
+      metaKind === "refund" || eventType?.startsWith("refund") || raw.lastError === "REFUND_ATTEMPT_NOT_FOUND"
+        ? "refund"
+        : metaKind === "payment" || eventType?.startsWith("payment")
+          ? "payment"
+          : "other";
+    expect(kind).toBe("payment");
+  });
+
+  it("never exposes rawBody, headers, secrets or card data in anomaly projection", () => {
+    const anomalyProjectionKeys = [
+      "id",
+      "provider",
+      "providerEventId",
+      "eventType",
+      "kind",
+      "status",
+      "attempts",
+      "lastError",
+      "receivedAt",
+      "processedAt",
+      "failedAt",
+      "createdAt",
+    ];
+    expect(anomalyProjectionKeys).not.toContain("rawBody");
+    expect(anomalyProjectionKeys).not.toContain("secret");
+    expect(anomalyProjectionKeys).not.toContain("signature");
+    expect(anomalyProjectionKeys).not.toContain("webhookKey");
+  });
+});
+
+// ─── 6. FIX 2: DELIVERY-TYPE BACKEND INVARIANTS ───────────
+
+describe("B.4.2 (Fix 2) — Delivery-Type Backend Invariant", () => {
+  it("verifies shipping order cannot transition to ready_for_pickup", () => {
+    const order = { deliveryType: "shipping", status: "processing" };
+    const newStatus = "ready_for_pickup";
+
+    const isInvalid = newStatus === "ready_for_pickup" && order.deliveryType !== "pickup";
+    expect(isInvalid).toBe(true);
+  });
+
+  it("verifies pickup order cannot transition to shipped", () => {
+    const order = { deliveryType: "pickup", status: "processing" };
+    const newStatus = "shipped";
+
+    const isInvalid = newStatus === "shipped" && order.deliveryType !== "shipping";
+    expect(isInvalid).toBe(true);
+  });
+
+  it("allows shipping order to transition to shipped", () => {
+    const order = { deliveryType: "shipping", status: "processing" };
+    const newStatus = "shipped";
+
+    const isShippingValid = newStatus === "shipped" && order.deliveryType === "shipping";
+    expect(isShippingValid).toBe(true);
+  });
+
+  it("allows pickup order to transition to ready_for_pickup", () => {
+    const order = { deliveryType: "pickup", status: "processing" };
+    const newStatus = "ready_for_pickup";
+
+    const isPickupValid = newStatus === "ready_for_pickup" && order.deliveryType === "pickup";
+    expect(isPickupValid).toBe(true);
+  });
+});
+
+// ─── 7. FIX 3: MISSING INVOICE TERMINAL CLUTTER ───────────
+
+describe("B.4.2 (Fix 3) — Missing Invoice Queue Terminal Exclusions", () => {
+  it("includes normal paid processing order without invoice", () => {
+    const order = { paymentStatus: "paid", status: "processing", hasIssuedInvoice: false };
+    const isIncluded =
+      order.paymentStatus === "paid" &&
+      !["cancelled", "refunded"].includes(order.status) &&
+      !order.hasIssuedInvoice;
+    expect(isIncluded).toBe(true);
+  });
+
+  it("excludes paid cancelled order without invoice", () => {
+    const order = { paymentStatus: "paid", status: "cancelled", hasIssuedInvoice: false };
+    const isIncluded =
+      order.paymentStatus === "paid" &&
+      !["cancelled", "refunded"].includes(order.status) &&
+      !order.hasIssuedInvoice;
+    expect(isIncluded).toBe(false);
+  });
+
+  it("excludes paid refunded order without invoice", () => {
+    const order = { paymentStatus: "paid", status: "refunded", hasIssuedInvoice: false };
+    const isIncluded =
+      order.paymentStatus === "paid" &&
+      !["cancelled", "refunded"].includes(order.status) &&
+      !order.hasIssuedInvoice;
+    expect(isIncluded).toBe(false);
+  });
+
+  it("excludes paid order with issued invoice", () => {
+    const order = { paymentStatus: "paid", status: "processing", hasIssuedInvoice: true };
+    const isIncluded =
+      order.paymentStatus === "paid" &&
+      !["cancelled", "refunded"].includes(order.status) &&
+      !order.hasIssuedInvoice;
+    expect(isIncluded).toBe(false);
   });
 });

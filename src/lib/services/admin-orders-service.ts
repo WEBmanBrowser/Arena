@@ -15,6 +15,7 @@ import {
   paymentAttempts,
   payments,
   products,
+  providerWebhookEvents,
   reconciliationObservations,
   refundAttempts,
   users,
@@ -23,7 +24,7 @@ import {
   PAYMENT_STATUSES,
   DELIVERY_TYPES,
 } from "@/db/schema";
-import { and, asc, desc, eq, gte, ilike, inArray, lte, notInArray, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, ilike, inArray, lte, notInArray, or, sql, type SQL } from "drizzle-orm";
 import { createAuditLog } from "@/lib/audit";
 import { transitionOrderStatus } from "@/lib/orders";
 import type { OrderRefundState } from "@/lib/refunds";
@@ -46,6 +47,10 @@ export const ADMIN_ORDER_QUEUES = [
   "exceptions",
 ] as const;
 export type AdminOrderQueue = (typeof ADMIN_ORDER_QUEUES)[number];
+
+/** Operational webhook anomaly filter allowlist (B.4.2). */
+export const ADMIN_WEBHOOK_FILTERS = ["all", "failed", "ignored_payment", "ignored_refund"] as const;
+export type AdminWebhookFilter = (typeof ADMIN_WEBHOOK_FILTERS)[number];
 
 /** Sorting whitelist (anything else → newest). */
 export const ADMIN_ORDER_SORTS = ["newest", "oldest", "total_desc", "total_asc"] as const;
@@ -92,10 +97,34 @@ export type AdminOrderQueueCounts = {
   exceptions: number;
 };
 
+export type AdminWebhookAnomalyRow = {
+  id: number;
+  provider: string;
+  providerEventId: string | null;
+  eventType: string | null;
+  kind: "payment" | "refund" | "other";
+  status: string;
+  attempts: number;
+  lastError: string | null;
+  receivedAt: Date;
+  processedAt: Date | null;
+  failedAt: Date | null;
+  createdAt: Date;
+};
+
+export interface AdminWebhookAnomalyParams {
+  filter?: AdminWebhookFilter;
+  limit?: number;
+}
+
 export type AdminOrderListResult = {
   orders: AdminOrderListRow[];
   pagination: AdminOrderListPagination;
   queueCounts?: AdminOrderQueueCounts;
+  webhookAnomalies?: {
+    anomalies: AdminWebhookAnomalyRow[];
+    total: number;
+  };
 };
 
 export type AdminOrderRow = typeof orders.$inferSelect;
@@ -180,6 +209,7 @@ export interface AdminOrderListParams {
   paymentStatus?: string;
   deliveryType?: string;
   queue?: string;
+  webhookFilter?: string;
   /** ISO date YYYY-MM-DD (start of day, inclusive) */
   dateFrom?: string;
   /** ISO date YYYY-MM-DD (whole final day included, up to 23:59:59.999) */
@@ -229,6 +259,9 @@ function validateEnumFilters(params: AdminOrderListParams) {
   if (params.queue && !ADMIN_ORDER_QUEUES.includes(params.queue as AdminOrderQueue)) {
     throw new AdminOrderValidationError("INVALID_QUEUE");
   }
+  if (params.webhookFilter && !ADMIN_WEBHOOK_FILTERS.includes(params.webhookFilter as AdminWebhookFilter)) {
+    throw new AdminOrderValidationError("INVALID_WEBHOOK_FILTER");
+  }
   if (params.status && !ORDER_STATUSES.includes(params.status as typeof ORDER_STATUSES[number])) {
     throw new AdminOrderValidationError("INVALID_STATUS");
   }
@@ -266,6 +299,7 @@ function buildQueueCondition(queue: AdminOrderQueue) {
     case "missing_invoice":
       return and(
         eq(orders.paymentStatus, "paid"),
+        notInArray(orders.status, ["cancelled", "refunded"]),
         sql`NOT EXISTS (
           SELECT 1 FROM ${invoiceDocuments}
           WHERE ${invoiceDocuments.orderId} = ${orders.id}
@@ -333,7 +367,7 @@ export async function getAdminOrderQueueCounts(): Promise<AdminOrderQueueCounts>
       WHERE ${refundAttempts.orderId} = ${orders.id}
         AND ${refundAttempts.status} IN ('pending', 'processing', 'failed')
     ))::int`,
-    missing_invoice: sql<number>`count(*) FILTER (WHERE ${orders.paymentStatus} = 'paid' AND NOT EXISTS (
+    missing_invoice: sql<number>`count(*) FILTER (WHERE ${orders.paymentStatus} = 'paid' AND ${orders.status} NOT IN ('cancelled', 'refunded') AND NOT EXISTS (
       SELECT 1 FROM ${invoiceDocuments}
       WHERE ${invoiceDocuments.orderId} = ${orders.id}
         AND ${invoiceDocuments.documentType} = 'invoice'
@@ -369,9 +403,96 @@ export async function getAdminOrderQueueCounts(): Promise<AdminOrderQueueCounts>
   };
 }
 
+// ─── READ-ONLY WEBHOOK ANOMALIES (Fix 1 / B.4.2) ──────────
+
+export async function listAdminWebhookAnomalies(
+  params: AdminWebhookAnomalyParams = {}
+): Promise<{ anomalies: AdminWebhookAnomalyRow[]; total: number }> {
+  const limit = Math.min(100, Math.max(1, params.limit || 50));
+  const filter = params.filter || "all";
+
+  const conditions: SQL[] = [
+    inArray(providerWebhookEvents.status, ["failed", "ignored"]),
+  ];
+
+  if (filter === "failed") {
+    conditions.push(eq(providerWebhookEvents.status, "failed"));
+  } else if (filter === "ignored_payment") {
+    conditions.push(
+      eq(providerWebhookEvents.status, "ignored"),
+      sql`(${providerWebhookEvents.metadata}->>'kind' = 'payment' OR ${providerWebhookEvents.eventType} LIKE 'payment%')`
+    );
+  } else if (filter === "ignored_refund") {
+    conditions.push(
+      eq(providerWebhookEvents.status, "ignored"),
+      sql`(${providerWebhookEvents.metadata}->>'kind' = 'refund' OR ${providerWebhookEvents.eventType} LIKE 'refund%' OR ${providerWebhookEvents.lastError} = 'REFUND_ATTEMPT_NOT_FOUND')`
+    );
+  }
+
+  const whereClause = and(...conditions);
+
+  const [countRow, rows] = await Promise.all([
+    db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(providerWebhookEvents)
+      .where(whereClause!)
+      .then(([r]) => r),
+    db
+      .select({
+        id: providerWebhookEvents.id,
+        provider: providerWebhookEvents.provider,
+        providerEventId: providerWebhookEvents.providerEventId,
+        eventType: providerWebhookEvents.eventType,
+        metadata: providerWebhookEvents.metadata,
+        status: providerWebhookEvents.status,
+        attempts: providerWebhookEvents.attempts,
+        lastError: providerWebhookEvents.lastError,
+        receivedAt: providerWebhookEvents.receivedAt,
+        processedAt: providerWebhookEvents.processedAt,
+        failedAt: providerWebhookEvents.failedAt,
+        createdAt: providerWebhookEvents.createdAt,
+      })
+      .from(providerWebhookEvents)
+      .where(whereClause!)
+      .orderBy(desc(providerWebhookEvents.receivedAt))
+      .limit(limit),
+  ]);
+
+  const anomalies: AdminWebhookAnomalyRow[] = (rows || []).map((r) => {
+    const metaKind = (r.metadata as { kind?: string } | null)?.kind;
+    const eventType = r.eventType ?? null;
+    const kind: "payment" | "refund" | "other" =
+      metaKind === "refund" || eventType?.startsWith("refund") || r.lastError === "REFUND_ATTEMPT_NOT_FOUND"
+        ? "refund"
+        : metaKind === "payment" || eventType?.startsWith("payment")
+          ? "payment"
+          : "other";
+
+    return {
+      id: r.id,
+      provider: r.provider,
+      providerEventId: r.providerEventId,
+      eventType: r.eventType,
+      kind,
+      status: r.status,
+      attempts: r.attempts,
+      lastError: r.lastError,
+      receivedAt: r.receivedAt,
+      processedAt: r.processedAt,
+      failedAt: r.failedAt,
+      createdAt: r.createdAt,
+    };
+  });
+
+  return {
+    anomalies,
+    total: Number(countRow?.count || 0),
+  };
+}
+
 // ─── LIST ────────────────────────────────────────────────
 
-export async function listAdminOrders(params: AdminOrderListParams): Promise<AdminOrderListResult> {
+export async function listAdminOrders(params: AdminOrderListParams = {}): Promise<AdminOrderListResult> {
   // Server-side validation first (routes also validate via Zod — defense in depth)
   validateEnumFilters(params);
   const range = resolveAdminOrderDateRange(params.dateFrom, params.dateTo);
@@ -386,7 +507,9 @@ export async function listAdminOrders(params: AdminOrderListParams): Promise<Adm
   if (params.sort === "total_desc") orderBy = desc(orders.total);
   if (params.sort === "total_asc") orderBy = asc(orders.total);
 
-  const [countRow, queueCounts, rows] = await Promise.all([
+  const shouldFetchWebhookAnomalies = params.queue === "exceptions" || Boolean(params.webhookFilter);
+
+  const [countRow, queueCounts, rows, webhookAnomalies] = await Promise.all([
     db.select({ count: sql<number>`count(DISTINCT ${orders.id})` })
       .from(orders)
       .leftJoin(users, eq(orders.userId, users.id))
@@ -411,6 +534,12 @@ export async function listAdminOrders(params: AdminOrderListParams): Promise<Adm
       .orderBy(orderBy)
       .limit(pageSize)
       .offset(offset),
+    shouldFetchWebhookAnomalies
+      ? listAdminWebhookAnomalies({
+          filter: (params.webhookFilter as AdminWebhookFilter) || "all",
+          limit: 50,
+        })
+      : Promise.resolve(undefined),
   ]);
 
   const total = Number(countRow?.count || 0);
@@ -418,6 +547,7 @@ export async function listAdminOrders(params: AdminOrderListParams): Promise<Adm
     orders: rows,
     pagination: { page, pageSize, total, totalPages: Math.max(1, Math.ceil(total / pageSize)) },
     queueCounts,
+    webhookAnomalies,
   };
 }
 

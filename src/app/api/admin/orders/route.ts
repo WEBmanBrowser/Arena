@@ -8,6 +8,7 @@ import {
   updateOrderTracking,
   AdminOrderValidationError,
   ADMIN_ORDER_QUEUES,
+  ADMIN_WEBHOOK_FILTERS,
   ADMIN_ORDER_SORTS,
   ADMIN_ORDER_DATE_REGEX,
 } from "@/lib/services/admin-orders-service";
@@ -22,6 +23,7 @@ const querySchema = z.object({
   pageSize: z.coerce.number().int().min(1).max(100).optional(),
   search: z.string().optional(),
   queue: z.enum(ADMIN_ORDER_QUEUES).optional(),
+  webhookFilter: z.enum(ADMIN_WEBHOOK_FILTERS).optional(),
   status: z.enum(ORDER_STATUSES).optional(),
   paymentStatus: z.enum(PAYMENT_STATUSES).optional(),
   deliveryType: z.enum(DELIVERY_TYPES).optional(),

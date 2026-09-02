@@ -6,6 +6,7 @@ import type {
   AdminOrderListRow,
   AdminOrderQueueCounts,
   AdminOrderQueue,
+  AdminWebhookAnomalyRow,
 } from "@/lib/services/admin-orders-service";
 
 const STATUS_LABELS: Record<string, string> = {
@@ -121,6 +122,7 @@ function AddressBlock({ addr }: { addr: unknown }) {
 
 type Filters = {
   queue: string;
+  webhookFilter: string;
   search: string;
   status: string;
   paymentStatus: string;
@@ -134,12 +136,14 @@ export default function AdminOrdersPage() {
   const [orders, setOrders] = useState<AdminOrderListRow[]>([]);
   const [pagination, setPagination] = useState<AdminOrderListPagination>({ page: 1, pageSize: 25, total: 0, totalPages: 1 });
   const [queueCounts, setQueueCounts] = useState<AdminOrderQueueCounts | null>(null);
+  const [webhookAnomalies, setWebhookAnomalies] = useState<{ anomalies: AdminWebhookAnomalyRow[]; total: number } | null>(null);
   const [pageSize, setPageSize] = useState(25);
   const [filters, setFilters] = useState<Filters>(() => {
     if (typeof window !== "undefined") {
       const urlParams = new URLSearchParams(window.location.search);
       return {
         queue: urlParams.get("queue") || "",
+        webhookFilter: urlParams.get("webhookFilter") || "all",
         search: urlParams.get("search") || "",
         status: urlParams.get("status") || "",
         paymentStatus: urlParams.get("paymentStatus") || "",
@@ -151,6 +155,7 @@ export default function AdminOrdersPage() {
     }
     return {
       queue: "",
+      webhookFilter: "all",
       search: "",
       status: "",
       paymentStatus: "",
@@ -186,7 +191,12 @@ export default function AdminOrdersPage() {
   const load = useCallback(async (page = 1) => {
     setLoading(true); setError("");
     const params = new URLSearchParams({ page: String(page), pageSize: String(pageSize), sort: filters.sort || "newest" });
-    (Object.entries(filters) as [keyof Filters, string][]).forEach(([k, v]) => { if (v && k !== "sort") params.set(k, v); });
+    (Object.entries(filters) as [keyof Filters, string][]).forEach(([k, v]) => {
+      if (v && k !== "sort") {
+        if (k === "webhookFilter" && filters.queue !== "exceptions") return;
+        params.set(k, v);
+      }
+    });
     try {
       const res = await fetch(`/api/admin/orders?${params}`);
       const data = await res.json();
@@ -194,6 +204,7 @@ export default function AdminOrdersPage() {
       setOrders(data.orders || []);
       setPagination(data.pagination || { page: 1, pageSize, total: 0, totalPages: 1 });
       if (data.queueCounts) setQueueCounts(data.queueCounts);
+      setWebhookAnomalies(data.webhookAnomalies || null);
     } catch (e) { setError((e as Error).message); }
     setLoading(false);
   }, [filters, pageSize]);
@@ -473,7 +484,7 @@ export default function AdminOrdersPage() {
             {SORT_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
           </select>
           <button
-            onClick={() => setFilters({ queue: "", search: "", status: "", paymentStatus: "", deliveryType: "", sort: "newest", dateFrom: "", dateTo: "" })}
+            onClick={() => setFilters({ queue: "", webhookFilter: "all", search: "", status: "", paymentStatus: "", deliveryType: "", sort: "newest", dateFrom: "", dateTo: "" })}
             className="px-2.5 py-1.5 text-xs text-slate-500 hover:text-slate-800"
           >
             Limpar
@@ -506,6 +517,97 @@ export default function AdminOrdersPage() {
             >
               Cancelar seleção
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* Fix 1: Read-Only Webhook Anomalies Section (Shown when queue=exceptions or webhookFilter is active) */}
+      {filters.queue === "exceptions" && (
+        <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b pb-3">
+            <div>
+              <h3 className="text-sm font-bold text-slate-800">Anomalias de Webhooks & Fornecedores (Somente Leitura)</h3>
+              <p className="text-xs text-slate-500">
+                Eventos recebidos de fornecedores (Eupago, etc.) que falharam ou foram ignorados por falta de correlação com encomenda/reembolso.
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-1.5 text-xs">
+              {[
+                { id: "all", label: "Todos" },
+                { id: "failed", label: "Falhados" },
+                { id: "ignored_payment", label: "Pagamentos Desconhecidos" },
+                { id: "ignored_refund", label: "Reembolsos Não Correlacionados" },
+              ].map((tab) => {
+                const active = (filters.webhookFilter || "all") === tab.id;
+                return (
+                  <button
+                    key={tab.id}
+                    onClick={() => setFilters((prev) => ({ ...prev, webhookFilter: tab.id }))}
+                    className={`px-2.5 py-1 rounded font-medium transition ${
+                      active
+                        ? "bg-slate-900 text-white shadow-sm"
+                        : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+                    }`}
+                  >
+                    {tab.label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs text-left">
+              <thead className="bg-slate-50 text-slate-600 uppercase text-[10px] tracking-wider border-b">
+                <tr>
+                  <th className="p-2.5">ID Evento</th>
+                  <th className="p-2.5">Fornecedor</th>
+                  <th className="p-2.5">Ref Externa</th>
+                  <th className="p-2.5">Classificação</th>
+                  <th className="p-2.5">Estado</th>
+                  <th className="p-2.5 text-center">Tentativas</th>
+                  <th className="p-2.5">Motivo / Erro Sanitizado</th>
+                  <th className="p-2.5">Recebido em</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {!webhookAnomalies || webhookAnomalies.anomalies.length === 0 ? (
+                  <tr>
+                    <td colSpan={8} className="p-6 text-center text-slate-400">
+                      Sem anomalias de webhooks no filtro selecionado.
+                    </td>
+                  </tr>
+                ) : (
+                  webhookAnomalies.anomalies.map((a) => (
+                    <tr key={a.id} className="hover:bg-slate-50">
+                      <td className="p-2.5 font-mono font-semibold text-slate-700">#{a.id}</td>
+                      <td className="p-2.5 uppercase font-medium text-slate-600">{a.provider}</td>
+                      <td className="p-2.5 font-mono text-slate-600">{a.providerEventId || "—"}</td>
+                      <td className="p-2.5">
+                        <span className={`px-2 py-0.5 rounded text-[11px] font-semibold ${
+                          a.kind === "refund" ? "bg-purple-100 text-purple-700" :
+                          a.kind === "payment" ? "bg-sky-100 text-sky-700" : "bg-slate-100 text-slate-700"
+                        }`}>
+                          {a.kind === "refund" ? "Reembolso" : a.kind === "payment" ? "Pagamento" : a.eventType || "Outro"}
+                        </span>
+                      </td>
+                      <td className="p-2.5">
+                        <span className={`px-2 py-0.5 rounded text-[11px] font-bold ${
+                          a.status === "failed" ? "bg-red-100 text-red-700" : "bg-amber-100 text-amber-800"
+                        }`}>
+                          {a.status === "failed" ? "FALHOU" : "IGNORADO"}
+                        </span>
+                      </td>
+                      <td className="p-2.5 text-center font-mono">{a.attempts}</td>
+                      <td className="p-2.5 font-mono text-[11px] text-red-600 max-w-xs truncate" title={a.lastError || ""}>
+                        {a.lastError || "—"}
+                      </td>
+                      <td className="p-2.5 text-slate-500 whitespace-nowrap">{fmtDate(a.receivedAt)}</td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
           </div>
         </div>
       )}
