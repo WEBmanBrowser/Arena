@@ -194,6 +194,17 @@ export async function transitionOrderStatus(orderId: number, newStatus: string, 
       if (order.status === newStatus) return;
       const allowed = ORDER_TRANSITIONS[order.status] || [];
       if (!allowed.includes(newStatus)) throw new Error(`VALIDATION:Transição inválida: ${order.status} → ${newStatus}. Permitidas: ${allowed.join(", ")}`);
+
+      // Delivery-type backend invariant:
+      // deliveryType = shipping MUST NOT transition to ready_for_pickup
+      // deliveryType = pickup MUST NOT transition to shipped
+      if (newStatus === "ready_for_pickup" && order.deliveryType !== "pickup") {
+        throw new Error(`VALIDATION:Transição inválida para tipo de entrega ${order.deliveryType}: apenas encomendas de levantamento em loja podem ficar prontas para levantamento`);
+      }
+      if (newStatus === "shipped" && order.deliveryType !== "shipping") {
+        throw new Error(`VALIDATION:Transição inválida para tipo de entrega ${order.deliveryType}: apenas encomendas com envio ao domicílio podem ser expedidas`);
+      }
+
       await tx.update(orders).set({ status: newStatus, updatedAt: new Date() }).where(eq(orders.id, orderId));
       await tx.insert(orderStatusHistory).values({ orderId, fromStatus: order.status, toStatus: newStatus, changedBy: actorId, comment: comment || null });
     });
