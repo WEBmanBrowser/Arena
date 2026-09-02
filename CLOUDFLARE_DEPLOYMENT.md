@@ -161,7 +161,7 @@ The `custom-worker.ts` file wraps the OpenNext-generated worker and adds the `sc
 |---|---|---|
 | Reservation duration | 60 minutes | Set `ORDER_RESERVATION_MINUTES` env var |
 | Cron frequency | Every 10 min | Edit `triggers.crons` in `wrangler.jsonc` |
-| Cron secret | Falls back to `JWT_SECRET` | Set `CRON_SECRET` via `wrangler secret put` |
+| Cron secret | **Required** — `CRON_SECRET` only (no `JWT_SECRET` fallback; cron fails closed without it) | Set `CRON_SECRET` via `wrangler secret put` |
 
 ### Cron expression
 
@@ -187,7 +187,7 @@ curl "http://localhost:8787/cdn-cgi/handler/scheduled"
 ### Testing the endpoint manually
 
 ```bash
-# Call the protected API route directly (requires CRON_SECRET or JWT_SECRET)
+# Call the protected API route directly (requires CRON_SECRET — JWT_SECRET never authorizes cron)
 curl -X POST https://loja.mdtech.pt/api/cron/expire-reservations \
   -H "x-cron-secret: YOUR_SECRET"
 ```

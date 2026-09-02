@@ -56,6 +56,6 @@
 
   // SECRETS (set via `wrangler secret put`):
   // - JWT_SECRET
-  // - CRON_SECRET (optional, defaults to JWT_SECRET)
+  // - CRON_SECRET (REQUIRED for cron; there is no JWT_SECRET fallback)
   // These are NOT placed in this file for security.
 }
