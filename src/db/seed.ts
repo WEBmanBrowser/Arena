@@ -3,7 +3,26 @@ import { users, categories, brands, products, banners, settings, smartShoppingPr
 import * as bcryptjs from "bcryptjs";
 import { eq } from "drizzle-orm";
 
+/**
+ * B.5.2 — Production seed guard.
+ *
+ * The demo seed inserts fixture users (with well-known passwords), demo
+ * catalog data and demo pages. Running it against a production database is
+ * never acceptable, so we refuse BEFORE any database mutation happens.
+ * Development/test behaviour is unchanged.
+ */
+export function assertSeedAllowed(nodeEnv: string | undefined = process.env.NODE_ENV): void {
+  if (nodeEnv === "production") {
+    throw new Error(
+      "Refusing to seed: NODE_ENV=production. The demo seed is for development/test only.",
+    );
+  }
+}
+
 async function seed() {
+  // FIRST statement — must run before any DB mutation.
+  assertSeedAllowed();
+
   console.log("🌱 Seeding database...");
 
   // Admin user
@@ -489,7 +508,12 @@ async function seed() {
   process.exit(0);
 }
 
-seed().catch((e) => {
-  console.error("❌ Seed failed:", e);
-  process.exit(1);
-});
+// Only run when this file is executed directly (npm run db:seed / tsx),
+// never when imported (e.g. by tests importing `assertSeedAllowed`).
+const invokedDirectly = (process.argv[1] ?? "").replace(/\\/g, "/").endsWith("src/db/seed.ts");
+if (invokedDirectly) {
+  seed().catch((e) => {
+    console.error("❌ Seed failed:", e);
+    process.exit(1);
+  });
+}

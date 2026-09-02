@@ -24,7 +24,15 @@ const worker: Record<string, unknown> = {
     env: Record<string, string>,
     ctx: { waitUntil: (p: Promise<unknown>) => void }
   ) {
-    const cronSecret = env.CRON_SECRET || env.JWT_SECRET || "";
+    // B.5.3 — CRON_SECRET is the only cron secret. No JWT_SECRET fallback.
+    // Without it we do NOT self-call the route with an empty secret.
+    const cronSecret = env.CRON_SECRET;
+    if (!cronSecret) {
+      console.error(
+        `[CRON ${controller.cron}] CRON_SECRET is not configured — skipping expire-reservations`
+      );
+      return;
+    }
 
     ctx.waitUntil(
       (async () => {

@@ -7,9 +7,42 @@ import { generateOrderNumber } from "@/lib/utils";
 import { toCents, toEuros, calcVatFromGross, lineTotal as calcLineTotal, allocateDiscount, unitPriceNet as calcUnitPriceNet, getReservationMinutes } from "@/lib/money";
 import { sendEmail, orderCreatedEmail } from "@/lib/email";
 import { calculateShippingForCart, ShippingRateError } from "@/lib/shipping-rates";
+import { checkRateLimit, clientIp, rateLimitResponse } from "@/lib/rate-limit";
+
+/**
+ * B.5.4 — POST /api/orders abuse protection (existing Postgres rate-limit
+ * infrastructure, no new tables and no new forwarded-header trust model).
+ *
+ * Layered buckets:
+ *  - every caller (guest or authenticated): 5 attempts / 60s / IP
+ *  - authenticated callers additionally:   10 attempts / 60min / user.id
+ *
+ * The layering is intentional: an authenticated user can hit the 5/min IP
+ * protection before reaching the 10/hour user protection. The IP bucket is
+ * burst protection; the user bucket is sustained-abuse protection.
+ *
+ * The `clientIp()` "unknown" fallback (no cf-connecting-ip and no
+ * x-forwarded-for) makes all such callers share a single bucket. Behind
+ * Cloudflare/OpenNext cf-connecting-ip is always present, so in production
+ * this only affects direct-to-origin traffic, which fails closed into a more
+ * restrictive shared bucket. clientIp is deliberately NOT redesigned here.
+ */
+const ORDERS_IP_LIMIT = { limit: 5, windowSeconds: 60 } as const;
+const ORDERS_USER_LIMIT = { limit: 10, windowSeconds: 60 * 60 } as const;
 
 export async function POST(req: NextRequest) {
   try {
+    // ── 0. Rate limit — BEFORE any order transaction, stock reservation,
+    //       coupon mutation, payment/provider creation or email. ─────────
+    const ipLimit = await checkRateLimit(`orders:create:ip:${clientIp(req)}`, ORDERS_IP_LIMIT);
+    if (!ipLimit.allowed) return rateLimitResponse(ipLimit.retryAfterSeconds);
+
+    const rateLimitedUser = await getCurrentUser();
+    if (rateLimitedUser) {
+      const userLimit = await checkRateLimit(`orders:create:user:${rateLimitedUser.id}`, ORDERS_USER_LIMIT);
+      if (!userLimit.allowed) return rateLimitResponse(userLimit.retryAfterSeconds);
+    }
+
     const body = await req.json();
     const { items, billingAddress, shippingAddress, paymentMethod, shippingMethod,
             deliveryType, couponCode, nif, companyName, guestEmail, guestName, guestPhone, notes } = body;
@@ -18,7 +51,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Carrinho vazio" }, { status: 400 });
     }
 
-    const user = await getCurrentUser();
+    const user = rateLimitedUser;
 
     const result = await db.transaction(async (tx) => {
       // ── 1. Validate products ────────────────────────────────
