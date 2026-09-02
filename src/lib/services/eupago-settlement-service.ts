@@ -62,6 +62,50 @@ export interface ProcessWebhookInput {
 }
 
 /**
+ * B.3.5.2 — Build the MINIMUM trusted metadata required for future refund
+ * recovery. Every value comes from a field that has already passed signature
+ * verification, structural normalization and amount decoding — it is the
+ * provider's own statement, not anything reconstructed from the application.
+ *
+ *   PERSISTED:
+ *     - kind            (payment | refund)
+ *     - status          (Paid | Refund | Error | Cancel | Expired)
+ *     - originalTrid    (refund movement's link back to the payment movement)
+ *     - amountCents     (canonical integer cents; positive for refund recovery)
+ *     - currency        (ISO-4217 three-letter code, uppercase)
+ *     - method          (normalized payment method)
+ *
+ *   NOT persisted (intentionally — the metadata is the MINIMUM that future
+ *   recovery needs, and the local-correlation fields are NOT safe to expose
+ *   in a provider-event row that may be surfaced in the B.4.2 anomaly view):
+ *     - identifier      (local-correlation id)
+ *     - reference       (Multibanco reference)
+ *     - entity          (Multibanco entity code)
+ *
+ *   NEVER persisted here:
+ *     - trid                  (already stored in provider_webhook_events.providerEventId)
+ *     - raw body, headers, signature, secrets, credentials, PAN/CVV/OTP
+ *     - the full provider payload
+ *
+ * The existing `sanitizeWebhookMetadata` enforces the final cap (10 keys,
+ * 200-char string values, no secret-like keys) and is the single source of
+ * truth for what may reach the database.
+ */
+function buildTrustedMetadata(event: NormalizedEupagoEvent): Record<string, string | number | boolean> {
+  const meta: Record<string, string | number | boolean> = {
+    kind: event.kind,
+    status: event.status,
+  };
+  if (event.originalTrid) meta.originalTrid = event.originalTrid;
+  if (typeof event.amountCents === "number" && Number.isSafeInteger(event.amountCents) && event.amountCents > 0) {
+    meta.amountCents = event.amountCents;
+  }
+  if (event.currency) meta.currency = event.currency;
+  if (event.method) meta.method = event.method;
+  return meta;
+}
+
+/**
  * Full inbound webhook pipeline: verify → normalize → dedupe → settle.
  *
  * Any verification failure throws ProviderError(WEBHOOK_INVALID) so the route
@@ -87,12 +131,21 @@ export async function processEupagoWebhook(
 
   // 3. Dedupe on trid via the existing B.3.1 ledger (never a second ledger).
   //    The raw body is hashed, never stored.
+  //
+  //    B.3.5.2 — Persist the MINIMUM trusted settlement data the recovery
+  //    service needs to re-derive correlation from a verified refund webhook
+  //    when the local refund_attempt is created AFTER the delivery. Only
+  //    fields that were already trusted (verified, normalized, structurally
+  //    valid) are written, and only after the existing `sanitizeWebhookMetadata`
+  //    pass drops any secret-like keys. The provider refund trid itself
+  //    continues to live in `provider_webhook_events.providerEventId` — it is
+  //    NEVER duplicated into metadata.
   const registration = await registerWebhookEvent({
     provider: EUPAGO_PROVIDER_ID,
     providerEventId: event.trid,
     rawBody: input.rawBody,
     eventType: `${event.kind}.${event.status.toLowerCase()}`,
-    metadata: { kind: event.kind, status: event.status },
+    metadata: buildTrustedMetadata(event),
   });
 
   if (registration.duplicate && registration.event.status === "processed") {
