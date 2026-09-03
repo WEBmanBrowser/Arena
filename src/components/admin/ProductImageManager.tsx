@@ -3,7 +3,11 @@ import { useState, useEffect, useCallback } from "react";
 
 interface Img { id: number; storageKey: string; publicUrl: string | null; altText: string | null; sortOrder: number; isPrimary: boolean; mimeType: string | null; fileSize: number | null; }
 
-export default function ProductImageManager({ productId }: { productId: number }) {
+/**
+ * `onChanged` lets the parent list refresh immediately after a mutation:
+ * uploading or deleting an image changes what the products table shows.
+ */
+export default function ProductImageManager({ productId, onChanged }: { productId: number; onChanged?: () => void | Promise<void> }) {
   const [images, setImages] = useState<Img[]>([]);
   const [uploading, setUploading] = useState(false);
   const [uploadResults, setUploadResults] = useState<Array<{ name: string; ok: boolean; error?: string }>>([]);
@@ -30,11 +34,13 @@ export default function ProductImageManager({ productId }: { productId: number }
     setUploadResults(results);
     setUploading(false);
     load();
+    if (results.some(r => r.ok)) await onChanged?.();
   };
 
   const setPrimary = async (imageId: number) => {
     await fetch(`/api/admin/products/${productId}/images`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "setPrimary", imageId }) });
     load();
+    await onChanged?.();
   };
 
   const saveAlt = async (imageId: number) => {
@@ -60,6 +66,7 @@ export default function ProductImageManager({ productId }: { productId: number }
     const res = await fetch(`/api/admin/products/${productId}/images`, { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ imageId }) });
     if (!res.ok) { const d = await res.json(); alert(d.error || d.message || "Erro"); }
     load();
+    await onChanged?.();
   };
 
   if (!productId) return null;
