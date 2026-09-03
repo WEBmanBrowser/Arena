@@ -59,6 +59,7 @@ export default function AdminProductsPage() {
   const [shippingClasses, setShippingClasses] = useState<any[]>([]);
   const [selected, setSelected] = useState<number[]>([]);
   const [error, setError] = useState("");
+  const [listError, setListError] = useState("");
   const [form, setForm] = useState({
     name: "", sku: "", ean: "", price: "", comparePrice: "", costPrice: "", stock: "0",
     minStock: "0", categoryId: "", brandId: "", shortDescription: "", description: "",
@@ -80,12 +81,39 @@ export default function AdminProductsPage() {
     if (categoryFilter) params.set("categoryId", categoryFilter);
     if (activeFilter) params.set("isActive", activeFilter);
     if (stockFilter) params.set("stockStatus", stockFilter);
-    const res = await fetch(`/api/admin/products?${params}`, { cache: "no-store" });
-    const d = await res.json();
-    setProducts(d.products || []);
-    setTotal(d.total || 0);
-    setPages(d.pages || 1);
-    setShippingClasses(d.shippingClasses || []);
+    /**
+     * A failed request must never be rendered as an empty catalogue.
+     *
+     * This previously did `d.products || []` unconditionally, so a 500 from the
+     * API produced a confident "0 produto(s)" — indistinguishable from a store
+     * with no products. That is how an unapplied migration looked like an empty
+     * catalogue instead of an outage. On failure we surface the error and keep
+     * the previous rows on screen rather than inventing an empty list.
+     */
+    try {
+      const res = await fetch(`/api/admin/products?${params}`, { cache: "no-store" });
+      if (!res.ok) {
+        let detail = `HTTP ${res.status}`;
+        try {
+          const body = await res.json();
+          if (body?.error) detail = String(body.error);
+        } catch { /* non-JSON error body: keep the status code */ }
+        setListError(
+          res.status === 403
+            ? "Sem permissões para ver os produtos."
+            : `Não foi possível carregar os produtos (${detail}).`
+        );
+        return;
+      }
+      const d = await res.json();
+      setListError("");
+      setProducts(d.products || []);
+      setTotal(d.total || 0);
+      setPages(d.pages || 1);
+      setShippingClasses(d.shippingClasses || []);
+    } catch {
+      setListError("Não foi possível contactar o servidor. Verifique a ligação e tente novamente.");
+    }
   }, [page, limit, sort, search, brandFilter, categoryFilter, activeFilter, stockFilter]);
 
   /**
@@ -196,7 +224,7 @@ export default function AdminProductsPage() {
           <option value="newest">Mais recentes</option><option value="oldest">Mais antigos</option><option value="name">Nome A-Z</option><option value="price_asc">Preço ↑</option><option value="price_desc">Preço ↓</option><option value="stock">Stock ↑</option>
         </select>
         <span className="text-xs text-slate-500 self-center">
-          {refreshing ? "A atualizar…" : `${total} produto(s)`}
+          {refreshing ? "A atualizar…" : listError ? "—" : `${total} produto(s)`}
         </span>
         <button
           type="button"
@@ -368,6 +396,20 @@ export default function AdminProductsPage() {
               </div>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Backend failure is shown as a failure, never as an empty catalogue. */}
+      {listError && (
+        <div className="mb-4 p-3 rounded-lg border border-red-200 bg-red-50 flex items-center justify-between gap-3">
+          <div>
+            <p className="text-sm font-medium text-red-700">{listError}</p>
+            <p className="text-xs text-red-600 mt-0.5">A lista abaixo pode estar desatualizada. Isto não significa que o catálogo esteja vazio.</p>
+          </div>
+          <button type="button" onClick={() => void refreshNow()} disabled={refreshing}
+            className="px-3 py-1.5 text-xs rounded border border-red-300 text-red-700 bg-white hover:bg-red-100 disabled:opacity-50 whitespace-nowrap">
+            {refreshing ? "A tentar…" : "Tentar novamente"}
+          </button>
         </div>
       )}
 
