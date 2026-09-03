@@ -19,7 +19,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync, readdirSync, existsSync } from "node:fs";
 import path from "node:path";
 import { db } from "@/db";
 import { users, products, pricingRules } from "@/db/schema";
@@ -194,13 +194,24 @@ describe("schema/migration coherence", () => {
     expect(sqlText).toContain("pricing_rules");
   });
 
-  it("the migration journal lists 0009 and no 0010 was introduced", () => {
+  it("the migration journal lists 0009 and 0010, and stops there", () => {
+    const dir = path.join(process.cwd(), "drizzle");
     const journal = JSON.parse(
-      readFileSync(path.join(process.cwd(), "drizzle", "meta", "_journal.json"), "utf8")
+      readFileSync(path.join(dir, "meta", "_journal.json"), "utf8")
     ) as { entries: { idx: number; tag: string }[] };
 
     const tags = journal.entries.map(e => e.tag);
     expect(tags).toContain("0009_c1_pricing_engine");
-    expect(journal.entries.some(e => e.idx >= 10)).toBe(false);
+    // C.3.1 (supplier import) is exactly ONE new migration, 0010. Nothing after
+    // it may exist yet — that would mean a phase shipped without a decision.
+    expect(tags).toContain("0010_c31_supplier_import");
+    expect(journal.entries.filter(e => e.idx >= 11)).toHaveLength(0);
+
+    // Every entry must resolve to a real file: drizzle-kit's migrator opens
+    // `${tag}.sql`, so a tag that does not match a file name fails the whole
+    // `drizzle-kit migrate` with no useful message.
+    for (const e of journal.entries) {
+      expect(existsSync(path.join(dir, `${e.tag}.sql`)), `journal: ${e.tag}.sql em falta`).toBe(true);
+    }
   });
 });

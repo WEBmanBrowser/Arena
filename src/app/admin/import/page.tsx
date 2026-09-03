@@ -1,5 +1,6 @@
 "use client";
 import { useState } from "react";
+import SupplierImportPanel from "@/components/admin/SupplierImportPanel";
 
 export default function AdminImportPage() {
   const [csvText, setCsvText] = useState("");
@@ -42,6 +43,8 @@ export default function AdminImportPage() {
         <button onClick={doExport} className="px-4 py-2 border rounded-lg text-sm text-slate-600 hover:bg-slate-50">📥 Exportar CSV</button>
       </div>
 
+      <SupplierImportPanel />
+
       <div className="bg-white border rounded-xl p-6 mb-6">
         <h3 className="font-medium text-slate-800 mb-4">Importar Catálogo CSV</h3>
         <div className="grid grid-cols-2 gap-4 mb-4">
@@ -58,7 +61,11 @@ export default function AdminImportPage() {
             </select>
           </div>
         </div>
-        <p className="text-xs text-slate-400 mb-2">Colunas suportadas: SKU (obrigatório), EAN, Nome, Marca, Categoria, Preço, IVA, Stock, Stock Mínimo</p>
+        <p className="text-xs text-slate-400 mb-2">
+          Colunas suportadas: SKU (obrigatório), EAN, Nome, Marca, Categoria, IVA, Stock, Stock Mínimo.
+          O preço de venda não é definido a partir do ficheiro: os produtos automáticos são recalculados pelo motor de pricing
+          e os de preço manual mantêm o preço atual.
+        </p>
         <textarea value={csvText} onChange={e => setCsvText(e.target.value)} placeholder="SKU,Nome,Preço,Stock&#10;ABC-001,Produto Teste,29.99,10" className="w-full border rounded px-3 py-2 text-xs font-mono h-32 mb-3" />
         <div className="flex gap-3">
           <button onClick={doPreview} disabled={loading || !csvText.trim()} className="px-4 py-2 bg-sky-600 text-white rounded-lg text-sm font-medium hover:bg-sky-700 disabled:opacity-50">
