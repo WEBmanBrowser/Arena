@@ -40,6 +40,7 @@ export default function PricingAdminPage() {
   const [coverage, setCoverage] = useState<Coverage | null>(null);
   const [policy, setPolicy] = useState<Policy | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState<RuleFormValue>(EMPTY_RULE);
@@ -59,16 +60,46 @@ export default function PricingAdminPage() {
   const [flash, setFlash] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    const [rulesRes, roundRes] = await Promise.all([
-      fetch("/api/admin/pricing/rules", { cache: "no-store" }),
-      fetch("/api/admin/pricing/rounding", { cache: "no-store" }),
-    ]);
-    const rulesData = await rulesRes.json();
-    const roundData = await roundRes.json();
-    setRules(rulesData.rules || []);
-    setCoverage(rulesData.coverage || null);
-    setPolicy(roundData.policy || null);
-    setLoading(false);
+    /**
+     * The loader must always terminate.
+     *
+     * The first version awaited .json() with no guard, so a failing endpoint
+     * threw before `setLoading(false)` was ever reached and the page span for
+     * ever. Loading now ends in `finally`, and a non-OK response becomes a
+     * readable message instead of a spinner.
+     */
+    setLoadError(null);
+    try {
+      const [rulesRes, roundRes] = await Promise.all([
+        fetch("/api/admin/pricing/rules", { cache: "no-store" }),
+        fetch("/api/admin/pricing/rounding", { cache: "no-store" }),
+      ]);
+
+      const failed = [
+        !rulesRes.ok ? `regras (HTTP ${rulesRes.status})` : null,
+        !roundRes.ok ? `arredondamento (HTTP ${roundRes.status})` : null,
+      ].filter(Boolean);
+
+      if (failed.length) {
+        const forbidden = rulesRes.status === 403 || roundRes.status === 403;
+        setLoadError(
+          forbidden
+            ? "Sem permissões para aceder à administração de preços."
+            : `Não foi possível carregar: ${failed.join(" e ")}. Se o problema persistir, confirme que as migrações da base de dados estão aplicadas.`
+        );
+        return;
+      }
+
+      const rulesData = await rulesRes.json();
+      const roundData = await roundRes.json();
+      setRules(rulesData.rules || []);
+      setCoverage(rulesData.coverage || null);
+      setPolicy(roundData.policy || null);
+    } catch {
+      setLoadError("Não foi possível contactar o servidor. Verifique a ligação e tente novamente.");
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
   useEffect(() => {
@@ -213,6 +244,23 @@ export default function PricingAdminPage() {
   };
 
   if (loading) return <div className="p-6 text-slate-500">A carregar…</div>;
+
+  // Terminal error state: the operator gets a reason and a way out, not a spinner.
+  if (loadError) {
+    return (
+      <div className="p-6">
+        <h1 className="text-xl font-semibold mb-4">Preços automáticos</h1>
+        <div className="p-4 rounded-lg border border-red-200 bg-red-50">
+          <p className="text-sm font-medium text-red-700">{loadError}</p>
+          <button type="button"
+            onClick={() => { setLoading(true); void load(); }}
+            className="mt-3 px-3 py-1.5 text-xs rounded border border-red-300 text-red-700 bg-white hover:bg-red-100">
+            Tentar novamente
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="p-4 sm:p-6 space-y-5">
