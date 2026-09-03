@@ -100,6 +100,29 @@ function parseNumber(value: number | string | null | undefined): number | null {
 }
 
 /**
+ * Ceil to whole cents, tolerating binary floating point noise.
+ *
+ * Plain Math.ceil would turn an exact 12000.0000000001 into 12001; the epsilon
+ * keeps exact results exact while still rounding genuine fractions up.
+ */
+function ceilCents(value: number): number {
+  const rounded = Math.round(value);
+  return Math.abs(value - rounded) < 1e-6 ? rounded : Math.ceil(value);
+}
+
+/**
+ * Parse a money value into integer cents, or null when absent/invalid.
+ *
+ * Unlike `toCents` this never throws, so the automatic engine can treat a
+ * missing or malformed cost as "cannot price" instead of crashing a batch.
+ */
+export function toCentsSafe(value: number | string | null | undefined): number | null {
+  const n = parseNumber(value);
+  if (n === null || n < 0) return null;
+  return toCents(n);
+}
+
+/**
  * Net price (cents) required to reach `ratePercent` under `method`.
  *
  * Rounds half-up to the nearest cent; the caller applies VAT afterwards.
@@ -110,7 +133,10 @@ export function netPriceFromCost(costCents: number, method: PricingMethod, rateP
 
   if (method === "markup_on_cost") {
     if (ratePercent < 0) throw new PricingError("INVALID_RATE", "O markup não pode ser negativo");
-    return Math.round(costCents * (1 + ratePercent / 100));
+    // CEIL, not round: rounding the net price down would shave a fraction of a
+    // cent off the requested rate (cost 59,62 € at 20% gave 19,993%). The
+    // engine's contract is that the result never falls below the target.
+    return ceilCents(costCents * (1 + ratePercent / 100));
   }
 
   // margin_on_sale
@@ -118,7 +144,7 @@ export function netPriceFromCost(costCents: number, method: PricingMethod, rateP
   if (ratePercent > MAX_MARGIN_ON_SALE) {
     throw new PricingError("MARGIN_TOO_HIGH", "A margem sobre venda tem de ser inferior a 100%");
   }
-  return Math.round(costCents / (1 - ratePercent / 100));
+  return ceilCents(costCents / (1 - ratePercent / 100));
 }
 
 /** Add VAT to a net amount in cents. */
@@ -155,6 +181,76 @@ export function applyCommercialRounding(grossCents: number, mode: RoundingMode):
   return candidate >= grossCents ? candidate : (euros + 1) * 100 + ending;
 }
 
+// ── C.1: configurable rounding band policy ────────────────
+// The automatic engine must not ask the operator to pick ,90 or ,99 per
+// product. Instead a policy maps a gross price to an ending. The bands are
+// CONFIGURABLE (stored in settings, see src/lib/rounding-policy.ts); nothing
+// here is hardcoded except the fallback default.
+
+/** One band: applies to gross prices >= fromCents (ordered, first match from the top). */
+export interface RoundingBand {
+  fromCents: number;
+  mode: RoundingMode;
+}
+
+export interface RoundingPolicy {
+  enabled: boolean;
+  bands: RoundingBand[];
+}
+
+/**
+ * Default policy agreed for MDTech retail:
+ *   < 200 €        → ,99
+ *   200 – 999,99 € → ,90
+ *   >= 1.000 €     → ,90
+ *
+ * The two upper bands are kept SEPARATE on purpose even though they currently
+ * share ,90: the 1.000 € boundary is the one most likely to be retuned later
+ * (e.g. to ,00), and keeping the band avoids a schema/config change to do it.
+ */
+export const DEFAULT_ROUNDING_POLICY: RoundingPolicy = {
+  enabled: true,
+  bands: [
+    { fromCents: 0, mode: "end_99" },
+    { fromCents: 20000, mode: "end_90" },
+    { fromCents: 100000, mode: "end_90" },
+  ],
+};
+
+/**
+ * Pick the ending for a given gross price.
+ *
+ * Bands are matched on the MATHEMATICAL gross price (before rounding), so the
+ * choice is stable and does not depend on the rounding it is about to apply.
+ */
+export function resolveRoundingMode(grossCents: number, policy: RoundingPolicy): RoundingMode {
+  if (!policy.enabled || policy.bands.length === 0) return "none";
+  const ordered = [...policy.bands].sort((a, b) => a.fromCents - b.fromCents);
+  let mode: RoundingMode = "none";
+  for (const band of ordered) {
+    if (grossCents >= band.fromCents) mode = band.mode;
+    else break;
+  }
+  return mode;
+}
+
+/** Validate a policy coming from configuration. Throws PricingError. */
+export function validateRoundingPolicy(policy: RoundingPolicy): void {
+  if (!Array.isArray(policy.bands)) throw new PricingError("INVALID_RATE", "Faixas inválidas");
+  const seen = new Set<number>();
+  for (const b of policy.bands) {
+    if (!Number.isInteger(b.fromCents) || b.fromCents < 0) {
+      throw new PricingError("INVALID_RATE", "Início de faixa inválido");
+    }
+    if (seen.has(b.fromCents)) throw new PricingError("INVALID_RATE", "Faixas duplicadas");
+    seen.add(b.fromCents);
+    if (!ROUNDING_MODES.includes(b.mode)) throw new PricingError("INVALID_RATE", "Terminação inválida");
+  }
+  if (policy.enabled && policy.bands.length > 0 && !seen.has(0)) {
+    throw new PricingError("INVALID_RATE", "É necessária uma faixa a começar em 0");
+  }
+}
+
 /**
  * Full calculation: cost + rate → net → VAT → commercial rounding → real margin.
  *
@@ -166,7 +262,10 @@ export function calculatePrice(input: {
   method: PricingMethod;
   ratePercent: number | string;
   vatPercent: number | string;
+  /** Fixed ending. Ignored when `roundingPolicy` is supplied. */
   rounding?: RoundingMode;
+  /** Band policy — the automatic engine passes this instead of `rounding`. */
+  roundingPolicy?: RoundingPolicy;
 }): PricingBreakdown {
   const costEuros = parseNumber(input.cost) ?? 0;
   if (costEuros < 0) throw new PricingError("INVALID_COST", "O custo não pode ser negativo");
@@ -177,11 +276,14 @@ export function calculatePrice(input: {
   const vat = parseNumber(input.vatPercent);
   if (vat === null || vat < 0) throw new PricingError("INVALID_VAT", "Taxa de IVA inválida");
 
-  const rounding = input.rounding ?? "none";
   const costCents = toCents(costEuros);
 
   const netBeforeRoundingCents = netPriceFromCost(costCents, input.method, rate);
   const grossBeforeRoundingCents = applyVat(netBeforeRoundingCents, vat);
+  // A band policy wins over a fixed ending: that is the automatic path.
+  const rounding = input.roundingPolicy
+    ? resolveRoundingMode(grossBeforeRoundingCents, input.roundingPolicy)
+    : (input.rounding ?? "none");
   const finalGrossCents = applyCommercialRounding(grossBeforeRoundingCents, rounding);
 
   return buildBreakdown({

@@ -5,6 +5,7 @@ import { eq, desc, asc, ilike, and, or, sql, ne } from "drizzle-orm";
 import { getCurrentUser, isStaff, isManager } from "@/lib/auth";
 import { slugify } from "@/lib/utils";
 import { createAuditLog } from "@/lib/audit";
+import { recalculateProductPrice, auditRecalculation, type PriceComputation } from "@/lib/services/pricing-engine-service";
 import { isValidGTIN, createProductSchema, updateProductSchema, validate } from "@/lib/validation";
 import { buildAdminProductConditions } from "@/lib/product-filters";
 import { ensureDefaultShippingConfiguration } from "@/lib/shipping-rates";
@@ -113,6 +114,17 @@ export async function POST(req: NextRequest) {
     }).returning();
 
     await createAuditLog({ userId: user.id, action: "product.created", entity: "product", entityId: product.id, details: { sku: product.sku } });
+
+    // C.1: a new product starts in automatic mode. If it already has a cost and
+    // a rule applies, derive the price straight away — that is the whole point
+    // of the engine. Without a cost the typed price simply stands.
+    if (product.costPrice) {
+      const priceResult = await recalculateProductPrice(product.id, { userId: user.id, reason: "product_created" });
+      await auditRecalculation(priceResult, user.id, "product_created");
+      if (priceResult.changed && priceResult.newPrice) {
+        return NextResponse.json({ product: { ...product, price: priceResult.newPrice }, priceRecalculated: priceResult.newPrice }, { status: 201 });
+      }
+    }
     return NextResponse.json({ product }, { status: 201 });
   } catch (e) {
     const mapped = catchUniqueViolation(e);
@@ -182,8 +194,19 @@ export async function PUT(req: NextRequest) {
   if (d.metaDescription !== undefined) updateData.metaDescription = d.metaDescription;
   updateData.updatedAt = new Date();
 
+  // C.1: a manual price edit implies the operator owns this price from now on,
+  // otherwise the next cost change would silently overwrite what they typed.
+  if (d.price !== undefined && d.price !== existing.price) updateData.priceMode = "manual";
+
   try {
     const [updated] = await db.update(products).set(updateData).where(eq(products.id, d.id)).returning();
+    // C.1: a cost change on an automatic product reprices it immediately.
+    let priceResult: PriceComputation | null = null;
+    const costChanged = d.costPrice !== undefined && d.costPrice !== existing.costPrice;
+    if (costChanged && updated.priceMode === "auto") {
+      priceResult = await recalculateProductPrice(d.id, { userId: user.id, reason: "cost_edited" });
+      await auditRecalculation(priceResult, user.id, "cost_edited");
+    }
     const priceChanged = d.price !== undefined && d.price !== existing.price;
     const shippingChanged = newShippingClassId !== undefined && newShippingClassId !== existing.shippingClassId;
     await createAuditLog({ userId: user.id, action: "product.updated", entity: "product", entityId: d.id,
@@ -191,6 +214,10 @@ export async function PUT(req: NextRequest) {
     if (shippingChanged) {
       await createAuditLog({ userId: user.id, action: "product.shipping_class_changed", entity: "product", entityId: d.id,
         details: { from: existing.shippingClassId, to: newShippingClassId } });
+    }
+    // Return the repriced row when the engine changed it.
+    if (priceResult?.changed && priceResult.newPrice) {
+      return NextResponse.json({ product: { ...updated, price: priceResult.newPrice }, priceRecalculated: priceResult.newPrice });
     }
     return NextResponse.json({ product: updated });
   } catch (e) {

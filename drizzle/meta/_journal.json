@@ -64,6 +64,13 @@
       "when": 1788287618600,
       "tag": "0008_b32_eupago_payments",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1788443083475,
+      "tag": "0009_c1_pricing_engine",
+      "breakpoints": true
     }
   ]
 }
