@@ -304,6 +304,11 @@ export default function SupplierImportPanel() {
 
   const running = progress?.status === "applying";
   const shownLines = preview?.lines ?? [];
+  // Which CSV column was read as which reference. Worth showing: the supplier's
+  // code and MDTech's internal SKU are different concepts and only an explicit
+  // internal column may fill the second one.
+  const headersFor = (field: string) =>
+    Object.entries(preview?.mapping ?? {}).filter(([, f]) => f === field).map(([header]) => header).join(", ");
   const total = progress?.total ?? preview?.summary.total ?? 0;
   const appliedCount = progress?.applied ?? 0;
   const percent = total > 0 ? Math.round((appliedCount / total) * 100) : 0;
@@ -392,6 +397,12 @@ export default function SupplierImportPanel() {
             <Chip label="conflitos" value={preview.summary.conflicts} tone={preview.summary.conflicts ? "amber" : "slate"} />
             <Chip label="erros" value={preview.summary.errors} tone={preview.summary.errors ? "red" : "slate"} />
           </div>
+
+          <p className="text-[11px] text-slate-500 mb-2">
+            SKU do fornecedor: <span className="font-medium">{headersFor("supplierSku") || "nenhuma coluna"}</span>
+            {" · "}SKU interno MDTech: <span className="font-medium">{headersFor("internalSku") || "nenhuma coluna"}</span>
+            {!headersFor("internalSku") && " — produtos novos recebem um SKU interno próprio (MD-…)"}
+          </p>
 
           {preview.ignoredColumns.length > 0 && (
             <p className="text-[11px] text-slate-500 mb-2">
