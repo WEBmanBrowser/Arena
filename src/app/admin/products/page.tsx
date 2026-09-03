@@ -3,6 +3,7 @@ import { useState, useEffect, useCallback } from "react";
 import BulkPriceModal from "@/components/admin/BulkPriceModal";
 import ProductImageManager from "@/components/admin/ProductImageManager";
 import ProductSupplierManager from "@/components/admin/ProductSupplierManager";
+import PriceCalculator from "@/components/admin/PriceCalculator";
 
 const TABS = [
   { id: "geral" as const, label: "Geral", requiresSaved: false },
@@ -52,6 +53,7 @@ export default function AdminProductsPage() {
   const [showBulkPrice, setShowBulkPrice] = useState(false);
   const [tab, setTab] = useState<"geral" | "precos" | "stock" | "conteudo" | "imagens" | "fornecedores">("geral");
   const [saving, setSaving] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [categories, setCategories] = useState<any[]>([]);
   const [brands, setBrands] = useState<any[]>([]);
   const [shippingClasses, setShippingClasses] = useState<any[]>([]);
@@ -64,20 +66,45 @@ export default function AdminProductsPage() {
     attributes: "{}", tags: "[]", vatRate: "23.00", shippingClassId: "",
   });
 
-  const fetchProducts = useCallback(() => {
+  /**
+   * Single source of truth for loading the list.
+   *
+   * `cache: "no-store"` stops the browser from replaying a previous response
+   * after a mutation. Awaitable so callers can refresh *before* closing a
+   * modal, instead of firing a request and hoping.
+   */
+  const fetchProducts = useCallback(async () => {
     const params = new URLSearchParams({ page: String(page), limit: String(limit), sort });
     if (search) params.set("q", search);
     if (brandFilter) params.set("brandId", brandFilter);
     if (categoryFilter) params.set("categoryId", categoryFilter);
     if (activeFilter) params.set("isActive", activeFilter);
     if (stockFilter) params.set("stockStatus", stockFilter);
-    fetch(`/api/admin/products?${params}`).then(r => r.json()).then(d => {
-      setProducts(d.products || []);
-      setTotal(d.total || 0);
-      setPages(d.pages || 1);
-      setShippingClasses(d.shippingClasses || []);
-    });
+    const res = await fetch(`/api/admin/products?${params}`, { cache: "no-store" });
+    const d = await res.json();
+    setProducts(d.products || []);
+    setTotal(d.total || 0);
+    setPages(d.pages || 1);
+    setShippingClasses(d.shippingClasses || []);
   }, [page, limit, sort, search, brandFilter, categoryFilter, activeFilter, stockFilter]);
+
+  /**
+   * Immediate reload after a mutation.
+   *
+   * The debounced effect below exists for typing in the search box. Reusing it
+   * after a write added ~300ms of staleness and, because the callback identity
+   * changes on every render, the pending timer could be cancelled and
+   * restarted — which is why saved products appeared in the list only seconds
+   * later. Mutations therefore bypass the debounce entirely.
+   */
+  const refreshNow = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      await fetchProducts();
+    } finally {
+      setRefreshing(false);
+    }
+  }, [fetchProducts]);
 
   useEffect(() => {
     fetch("/api/admin/categories").then(r => r.json()).then(d => setCategories(d.categories || []));
@@ -104,19 +131,20 @@ export default function AdminProductsPage() {
     if (editingProduct) body.id = editingProduct.id;
     const res = await fetch("/api/admin/products", { method: editingProduct ? "PUT" : "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
     const data = await res.json();
+    if (!res.ok) { setSaving(false); setError(data.error || data.message || "Erro"); return; }
+    // Refresh BEFORE closing so the table already shows the new state.
+    await refreshNow();
     setSaving(false);
-    if (!res.ok) { setError(data.error || data.message || "Erro"); return; }
     // Keep the modal open on create so the user can jump to Images/Suppliers,
     // which need a persisted product id.
     if (editingProduct) { setShowForm(false); } else if (data.product) { setEditingProduct(data.product); setTab("imagens"); }
-    fetchProducts();
   };
 
   const deleteProduct = async (id: number) => {
     if (!confirm("Eliminar produto?")) return;
     const res = await fetch("/api/admin/products", { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id }) });
     if (!res.ok) { const d = await res.json(); alert(d.error || "Erro"); }
-    fetchProducts();
+    await refreshNow();
   };
 
   const toggleSelect = (id: number) => setSelected(s => s.includes(id) ? s.filter(x => x !== id) : [...s, id]);
@@ -126,7 +154,7 @@ export default function AdminProductsPage() {
     if (selected.length === 0) return;
     if (!confirm(`${action} ${selected.length} produto(s)?`)) return;
     await fetch("/api/admin/bulk", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids: selected, action }) });
-    setSelected([]); fetchProducts();
+    setSelected([]); await refreshNow();
   };
 
   const margin = computeMargin(form.price, form.costPrice, form.vatRate);
@@ -167,7 +195,18 @@ export default function AdminProductsPage() {
         <select value={sort} onChange={e => { setSort(e.target.value); setPage(1); }} className="border rounded-lg px-2 py-1.5 text-sm">
           <option value="newest">Mais recentes</option><option value="oldest">Mais antigos</option><option value="name">Nome A-Z</option><option value="price_asc">Preço ↑</option><option value="price_desc">Preço ↓</option><option value="stock">Stock ↑</option>
         </select>
-        <span className="text-xs text-slate-500 self-center">{total} produto(s)</span>
+        <span className="text-xs text-slate-500 self-center">
+          {refreshing ? "A atualizar…" : `${total} produto(s)`}
+        </span>
+        <button
+          type="button"
+          onClick={() => void refreshNow()}
+          disabled={refreshing}
+          title="Atualizar listagem"
+          className="text-xs text-slate-500 hover:text-sky-600 self-center disabled:opacity-50"
+        >
+          ↻ Atualizar
+        </button>
       </div>
 
       {/* Bulk actions */}
@@ -263,38 +302,13 @@ export default function AdminProductsPage() {
 
               {/* ─── PREÇOS ─── */}
               {tab === "precos" && (
-                <div className="space-y-4">
-                  <div className="grid sm:grid-cols-2 gap-3">
-                    <div><label className="text-xs text-slate-500">Preço de venda c/ IVA (€) *</label><input value={form.price} onChange={e => u("price", e.target.value)} inputMode="decimal" className="w-full border rounded px-3 py-1.5 text-sm" /></div>
-                    <div><label className="text-xs text-slate-500">Preço anterior (€)</label><input value={form.comparePrice} onChange={e => u("comparePrice", e.target.value)} inputMode="decimal" className="w-full border rounded px-3 py-1.5 text-sm" placeholder="Opcional" /></div>
-                    <div><label className="text-xs text-slate-500">Preço de custo (€)</label><input value={form.costPrice} onChange={e => u("costPrice", e.target.value)} inputMode="decimal" className="w-full border rounded px-3 py-1.5 text-sm" placeholder="Opcional" /></div>
-                    <div><label className="text-xs text-slate-500">Taxa de IVA (%)</label><input value={form.vatRate} onChange={e => u("vatRate", e.target.value)} inputMode="decimal" className="w-full border rounded px-3 py-1.5 text-sm" /></div>
-                  </div>
-
-                  {/* Margin — display only */}
-                  <div className="border rounded-lg p-4 bg-slate-50">
-                    <div className="flex items-center justify-between mb-2">
-                      <h4 className="text-sm font-medium text-slate-800">Margem estimada</h4>
-                      <span className="text-[10px] text-slate-500 uppercase tracking-wide">Apenas indicativo</span>
-                    </div>
-                    {margin === null ? (
-                      <p className="text-sm text-slate-400">Preencha o preço de venda e o preço de custo para calcular a margem.</p>
-                    ) : (
-                      <>
-                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                          <div><p className="text-[11px] text-slate-500">Venda s/ IVA</p><p className="text-sm font-medium text-slate-800">{eur(margin.netPrice)}</p></div>
-                          <div><p className="text-[11px] text-slate-500">Custo</p><p className="text-sm font-medium text-slate-800">{eur(margin.cost)}</p></div>
-                          <div><p className="text-[11px] text-slate-500">Margem (€)</p><p className={`text-sm font-bold ${margin.value >= 0 ? "text-green-600" : "text-red-600"}`}>{eur(margin.value)}</p></div>
-                          <div><p className="text-[11px] text-slate-500">Margem (%)</p><p className={`text-sm font-bold ${margin.value >= 0 ? "text-green-600" : "text-red-600"}`}>{margin.percent.toFixed(1)}%</p></div>
-                        </div>
-                        {margin.value < 0 && <p className="text-xs text-red-600 mt-2">⚠️ O preço de custo é superior ao preço de venda sem IVA.</p>}
-                      </>
-                    )}
-                    <p className="text-[11px] text-slate-500 mt-3">
-                      Cálculo de interface: margem = (preço c/ IVA ÷ (1 + IVA/100)) − custo. Não altera regras financeiras nem valores gravados.
-                    </p>
-                  </div>
-                </div>
+                <PriceCalculator
+                  price={form.price}
+                  comparePrice={form.comparePrice}
+                  costPrice={form.costPrice}
+                  vatRate={form.vatRate}
+                  onChange={(field, value) => u(field, value)}
+                />
               )}
 
               {/* ─── STOCK ─── */}
@@ -335,10 +349,10 @@ export default function AdminProductsPage() {
               )}
 
               {/* ─── IMAGENS ─── */}
-              {tab === "imagens" && editingProduct && <ProductImageManager productId={editingProduct.id} />}
+              {tab === "imagens" && editingProduct && <ProductImageManager productId={editingProduct.id} onChanged={refreshNow} />}
 
               {/* ─── FORNECEDORES ─── */}
-              {tab === "fornecedores" && editingProduct && <ProductSupplierManager productId={editingProduct.id} />}
+              {tab === "fornecedores" && editingProduct && <ProductSupplierManager productId={editingProduct.id} onChanged={refreshNow} />}
             </div>
 
             {/* Footer */}
@@ -418,7 +432,7 @@ export default function AdminProductsPage() {
           filterMode={selected.length === 0}
           filters={{ q: search, brandId: brandFilter, categoryId: categoryFilter, isActive: activeFilter }}
           onClose={() => setShowBulkPrice(false)}
-          onDone={() => { setSelected([]); fetchProducts(); }}
+          onDone={() => { setSelected([]); void refreshNow(); }}
         />
       )}
     </div>

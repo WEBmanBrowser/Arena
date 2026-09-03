@@ -55,7 +55,12 @@ function errorMessage(code: string | undefined): string {
   }
 }
 
-export default function ProductSupplierManager({ productId }: { productId: number }) {
+/**
+ * `onChanged` refreshes the parent list: linking or editing the preferred
+ * supplier syncs products.costPrice server-side, so the table would otherwise
+ * keep showing a stale cost.
+ */
+export default function ProductSupplierManager({ productId, onChanged }: { productId: number; onChanged?: () => void | Promise<void> }) {
   const [rows, setRows] = useState<ProductSupplierRow[]>([]);
   const [allSuppliers, setAllSuppliers] = useState<SupplierOption[]>([]);
   const [loading, setLoading] = useState(true);
@@ -164,6 +169,7 @@ export default function ProductSupplierManager({ productId }: { productId: numbe
       flash(editingId ? "Fornecedor atualizado." : "Fornecedor associado.");
       resetForm();
       await load();
+      await onChanged?.();
     } catch {
       setError("Erro de rede ao guardar.");
     }
@@ -184,6 +190,7 @@ export default function ProductSupplierManager({ productId }: { productId: numbe
       else {
         flash("Fornecedor preferencial atualizado. O preço de custo do produto foi sincronizado.");
         await load();
+        await onChanged?.();
       }
     } catch {
       setError("Erro de rede.");
@@ -209,6 +216,7 @@ export default function ProductSupplierManager({ productId }: { productId: numbe
       else {
         flash("Associação removida.");
         await load();
+        await onChanged?.();
       }
     } catch {
       setError("Erro de rede.");
