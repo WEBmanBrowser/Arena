@@ -3,6 +3,7 @@ import { banners, products, categories, smartShoppingProfiles } from "@/db/schem
 import { eq, and, desc, asc, isNull } from "drizzle-orm";
 import Link from "next/link";
 import ProductCard from "@/components/ProductCard";
+import Logo from "@/components/Logo";
 
 export const dynamic = "force-dynamic";
 
@@ -176,8 +177,9 @@ export default async function HomePage() {
                 </div>
               </div>
               <div className="bg-gradient-to-br from-sky-50 to-lime-50 rounded-xl p-8 text-center">
-                <div className="w-20 h-20 mx-auto mb-4 rounded-2xl bg-gradient-to-br from-lime-400 to-sky-500 flex items-center justify-center font-black text-white text-2xl">MD</div>
-                <h3 className="font-bold text-slate-800 mb-2">MDTech Solutions</h3>
+                <div className="mx-auto mb-4 inline-flex justify-center rounded-2xl bg-slate-900 px-5 py-4">
+                  <Logo height={52} className="max-w-full" />
+                </div>
                 <p className="text-sm text-slate-500 mb-4">Reparação Rápida. Soluções Completas.</p>
                 <p className="text-xs text-slate-500">Esposende, Braga, Portugal</p>
                 <p className="text-xs text-slate-500">Seg-Sex: 9:00 - 18:30 | Sáb: 9:00 - 13:00</p>

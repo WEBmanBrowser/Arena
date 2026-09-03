@@ -1,4 +1,5 @@
 import Link from "next/link";
+import Logo from "@/components/Logo";
 
 export default function Footer() {
   return (
@@ -6,12 +7,8 @@ export default function Footer() {
       <div className="max-w-7xl mx-auto px-4 py-12">
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-8">
           <div>
-            <div className="flex items-center gap-2 mb-4">
-              <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-lime-400 to-sky-500 flex items-center justify-center font-black text-white text-lg">MD</div>
-              <div>
-                <div className="text-white font-bold text-sm">MDTech Solutions</div>
-                <div className="text-[10px] text-slate-500">Reparação Rápida. Soluções Completas.</div>
-              </div>
+            <div className="mb-4">
+              <Logo height={44} />
             </div>
             <p className="text-sm mb-3">Marco Duarte Tech Solutions, Unipessoal Lda.</p>
             <p className="text-sm">📍 Esposende, Braga, Portugal</p>
