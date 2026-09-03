@@ -1,6 +1,6 @@
 import {
   pgTable, serial, varchar, text, integer, boolean, timestamp, decimal,
-  jsonb, index, uniqueIndex, check
+  jsonb, index, uniqueIndex, check, pgSequence
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 
@@ -905,3 +905,142 @@ export const reconciliationObservations = pgTable("reconciliation_observations",
   check("reconciliation_observed_non_negative", sql`${t.observedPaidCents} >= 0 AND ${t.observedRefundedCents} >= 0`),
   check("reconciliation_currency_format", sql`${t.currency} ~ '^[A-Z]{3}$'`),
 ]);
+
+// ─── C.3.1: SUPPLIER IMPORT ENGINE ───────────────────────
+// A supplier price/stock list is imported in two steps against ONE persisted
+// record: `preview` writes only supplier_imports + supplier_import_rows (the
+// snapshot the operator was shown), `apply` reads the snapshot back and never
+// trusts the browser again.
+//
+// supplier_imports also works as the crash-recovery state machine:
+//   preview → applying → completed
+//   applying → partial → applying → completed        (resume, no CSV resend)
+// An `applying` row whose heartbeat_at is older than IMPORT_HEARTBEAT_TTL_MS
+// is considered abandoned and can be reclaimed atomically by another request.
+export const SUPPLIER_IMPORT_STATUSES = ["preview", "applying", "completed", "failed", "partial"] as const;
+export type SupplierImportStatus = (typeof SUPPLIER_IMPORT_STATUSES)[number];
+
+/** Which matching level resolved the row (order: supplier SKU → EAN → internal SKU). */
+export const SUPPLIER_IMPORT_MATCH_TYPES = ["supplier_sku", "ean", "internal_sku", "none"] as const;
+export type SupplierImportMatchType = (typeof SUPPLIER_IMPORT_MATCH_TYPES)[number];
+
+/**
+ * ready        → matched an existing product, safe to apply
+ * new_product  → no match on any level; apply creates the product
+ * conflict     → ambiguous (key resolves to several products, or the levels
+ *                disagree, or the same key/target repeats inside the file)
+ * error        → the row itself is invalid (bad EAN, unparseable money…)
+ * `conflict` and `error` rows are NEVER applied — they are reported instead of
+ * being resolved silently.
+ */
+export const SUPPLIER_IMPORT_ROW_STATUSES = ["ready", "new_product", "conflict", "error"] as const;
+export type SupplierImportRowStatus = (typeof SUPPLIER_IMPORT_ROW_STATUSES)[number];
+
+export const supplierImports = pgTable("supplier_imports", {
+  id: serial("id").primaryKey(),
+  // A supplier deletion must not break on import history: the audit trail of
+  // the operation itself lives in audit_logs, not here.
+  supplierId: integer("supplier_id").notNull().references(() => suppliers.id, { onDelete: "cascade" }),
+  fileName: varchar("file_name", { length: 255 }).notNull(),
+  /** SHA-256 (hex) of the exact bytes that produced this snapshot. */
+  fileHash: varchar("file_hash", { length: 64 }).notNull(),
+  fileSizeBytes: integer("file_size_bytes").notNull(),
+  rowCount: integer("row_count").notNull(),
+  status: varchar("status", { length: 20 }).notNull().default("preview"),
+  /** CSV header → canonical field, as used to build the snapshot. */
+  mapping: jsonb("mapping").$type<Record<string, string>>(),
+  summary: jsonb("summary").$type<Record<string, unknown>>(),
+  errorSummary: jsonb("error_summary").$type<Record<string, unknown>>(),
+  batchesTotal: integer("batches_total").notNull().default(0),
+  batchesDone: integer("batches_done").notNull().default(0),
+  userId: integer("user_id").notNull().references(() => users.id),
+  /** Set on the first apply claim; NOT used to detect abandonment. */
+  startedAt: timestamp("started_at"),
+  /** Liveness signal: refreshed on claim and after every committed batch. */
+  heartbeatAt: timestamp("heartbeat_at"),
+  finishedAt: timestamp("finished_at"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+}, (t) => [
+  index("supplier_imports_supplier_idx").on(t.supplierId, t.createdAt),
+  index("supplier_imports_status_idx").on(t.status),
+  // Same file re-uploaded for the same supplier must be findable.
+  index("supplier_imports_hash_idx").on(t.supplierId, t.fileHash),
+  check("supplier_imports_status_valid", sql`${t.status} IN ('preview','applying','completed','failed','partial')`),
+  check("supplier_imports_row_count_non_negative", sql`${t.rowCount} >= 0`),
+  check("supplier_imports_file_size_non_negative", sql`${t.fileSizeBytes} >= 0`),
+  check("supplier_imports_batches_non_negative", sql`${t.batchesTotal} >= 0 AND ${t.batchesDone} >= 0`),
+  check("supplier_imports_batches_done_le_total", sql`${t.batchesDone} <= ${t.batchesTotal}`),
+  check("supplier_imports_file_hash_format", sql`${t.fileHash} ~ '^[0-9a-f]{64}$'`),
+]);
+
+/**
+ * One row per CSV line: the immutable snapshot previewed by the operator AND
+ * the idempotency ledger of apply. `applied` is flipped inside the very same
+ * transaction as the product changes it describes, so a committed line can
+ * never produce a second effect (no re-create, no second stock movement).
+ */
+export const supplierImportRows = pgTable("supplier_import_rows", {
+  id: serial("id").primaryKey(),
+  importId: integer("import_id").notNull().references(() => supplierImports.id, { onDelete: "cascade" }),
+  /** Line number in the source file (header = 1), unique per import. */
+  rowNumber: integer("row_number").notNull(),
+  supplierSku: varchar("supplier_sku", { length: 100 }),
+  ean: varchar("ean", { length: 50 }),
+  /** Snapshot of the third matching level; not a foreign key by design. */
+  internalSku: varchar("internal_sku", { length: 100 }),
+  /** Snapshot of the designation as it came in the file. */
+  name: varchar("name", { length: 255 }),
+  productId: integer("product_id").references(() => products.id, { onDelete: "set null" }),
+  matchType: varchar("match_type", { length: 20 }).notNull().default("none"),
+  status: varchar("status", { length: 20 }).notNull(),
+  costPrice: decimal("cost_price", { precision: 10, scale: 2 }),
+  stock: integer("stock"),
+  /** Snapshot of the supplier lead time, so apply can write what was previewed. */
+  leadTimeDays: integer("lead_time_days"),
+  applied: boolean("applied").notNull().default(false),
+  message: varchar("message", { length: 500 }),
+  // ── Price snapshot (read-only for the operator; apply never takes prices
+  //    from the browser, and never writes products.price for manual products)
+  currentPrice: decimal("current_price", { precision: 10, scale: 2 }),
+  computedPrice: decimal("computed_price", { precision: 10, scale: 2 }),
+  priceMode: varchar("price_mode", { length: 10 }),
+  priceMessage: varchar("price_message", { length: 255 }),
+  /** Preferred state observed at preview time (display/audit only). */
+  isPreferredSupplier: boolean("is_preferred_supplier").notNull().default(false),
+  appliedAt: timestamp("applied_at"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex("supplier_import_rows_line_unique").on(t.importId, t.rowNumber),
+  // The claim scan: pending rows of one import, in file order.
+  index("supplier_import_rows_claim_idx").on(t.importId, t.applied),
+  index("supplier_import_rows_status_idx").on(t.importId, t.status),
+  index("supplier_import_rows_product_idx").on(t.productId),
+  check("supplier_import_rows_match_type_valid", sql`${t.matchType} IN ('supplier_sku','ean','internal_sku','none')`),
+  check("supplier_import_rows_status_valid", sql`${t.status} IN ('ready','new_product','conflict','error')`),
+  check("supplier_import_rows_row_number_positive", sql`${t.rowNumber} > 0`),
+  check("supplier_import_rows_cost_non_negative", sql`${t.costPrice} IS NULL OR ${t.costPrice} >= 0`),
+  check("supplier_import_rows_stock_non_negative", sql`${t.stock} IS NULL OR ${t.stock} >= 0`),
+  check("supplier_import_rows_price_mode_valid", sql`${t.priceMode} IS NULL OR ${t.priceMode} IN ('auto','manual')`),
+  // A row that still has to create a product must not already point at one.
+  // The reverse (a resolved row whose product was later hard-deleted) is
+  // deliberately NOT constrained: the product_id FK is ON DELETE SET NULL, and
+  // a check requiring a target would make deleting an imported product fail.
+  check("supplier_import_rows_target_matches_status", sql`${t.status} <> 'new_product' OR ${t.productId} IS NULL`),
+]);
+
+/**
+ * MDTech's own catalogue reference numbers (products.sku = MD-000001, MD-000002…).
+ *
+ * products.sku is MDTech's global key and product_suppliers.supplier_sku is the
+ * supplier's own reference: the two are separate concepts, so a product created
+ * by a supplier import is never allowed to inherit the supplier's code as its
+ * internal SKU. A sequence is used instead of `SELECT max(…) + 1` because
+ * nextval() is atomic — two concurrent imports can never be handed the same
+ * number — and because it is not transactional, a rolled-back batch only leaves
+ * a gap, never a duplicate.
+ */
+export const productInternalSkuSeq = pgSequence("product_internal_sku_seq", {
+  startWith: 1,
+  increment: 1,
+  cache: 1,
+});

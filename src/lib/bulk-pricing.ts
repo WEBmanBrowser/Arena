@@ -46,6 +46,15 @@ interface TokenPayload {
 }
 
 function getSecret(): string {
+  return getPreviewSecret();
+}
+
+/**
+ * Shared HMAC secret for every signed preview token (bulk prices, C.2 recalc,
+ * C.3.1 supplier import). Exported so new preview/apply flows reuse this exact
+ * scheme instead of introducing a second one.
+ */
+export function getPreviewSecret(): string {
   const s = process.env.BULK_PREVIEW_SECRET;
   if (!s || s.length < 32) throw new Error("BULK_PREVIEW_SECRET_NOT_CONFIGURED");
   return s;

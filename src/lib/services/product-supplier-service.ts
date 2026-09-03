@@ -12,8 +12,13 @@ import { recalculateProductPrice, type PriceComputation } from "@/lib/services/p
  * selling price in the same transaction (C.1). Removing the preferred
  * supplier clears the cost, which the engine reports as "no cost" rather than
  * pricing the product at zero.
+ *
+ * Exported because it is the single authoritative path from "a supplier cost
+ * changed" to "the catalogue's cost and automatic price are up to date" — the
+ * product UI, the legacy importer and the C.3.1 supplier import all go through
+ * it, which is what keeps price_mode manual protected in one place only.
  */
-async function syncProductCost(txDb: NodePgDatabase, productId: number): Promise<PriceComputation | null> {
+export async function syncProductCost(txDb: NodePgDatabase, productId: number): Promise<PriceComputation | null> {
   const [preferred] = await txDb.select({ costPrice: productSuppliers.costPrice })
     .from(productSuppliers)
     .where(and(eq(productSuppliers.productId, productId), eq(productSuppliers.isPreferred, true)))

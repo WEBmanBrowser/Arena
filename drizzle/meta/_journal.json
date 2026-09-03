@@ -71,6 +71,13 @@
       "when": 1788443083475,
       "tag": "0009_c1_pricing_engine",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1788467124232,
+      "tag": "0010_c31_supplier_import",
+      "breakpoints": true
     }
   ]
 }
