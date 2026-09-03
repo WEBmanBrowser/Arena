@@ -108,13 +108,37 @@ async function progress(importId: number) {
   return { status: res.status, json: await res.json() as any };
 }
 
+/**
+ * Products an import of THIS suite created are numbered by the catalogue itself
+ * (MD-…), so they carry no fixture TAG: the snapshot rows that point at them are
+ * the only way to find them again.
+ */
+async function importedProductIds(): Promise<number[]> {
+  const rows = await db
+    .select({ productId: supplierImportRows.productId })
+    .from(supplierImportRows)
+    .innerJoin(supplierImports, eq(supplierImports.id, supplierImportRows.importId))
+    .where(and(inArray(supplierImports.userId, [MANAGER.id, STAFF.id]), sql`${supplierImportRows.productId} IS NOT NULL`));
+  return [...new Set(rows.map((r) => r.productId).filter((v): v is number => typeof v === "number"))];
+}
+
 async function cleanup() {
+  const ids = await importedProductIds();
+  const list = ids.length ? sql.join(ids.map((id) => sql`${id}`), sql`,`) : null;
+  if (list) {
+    await db.execute(sql`DELETE FROM stock_movements WHERE product_id IN (${list})`);
+    await db.execute(sql`DELETE FROM product_suppliers WHERE product_id IN (${list})`);
+  }
   await db.execute(sql`DELETE FROM supplier_import_rows WHERE import_id IN (SELECT id FROM supplier_imports WHERE user_id IN (${MANAGER.id}, ${STAFF.id}))`);
   await db.execute(sql`DELETE FROM supplier_imports WHERE user_id IN (${MANAGER.id}, ${STAFF.id})`);
   await db.execute(sql`DELETE FROM pricing_rules WHERE notes LIKE ${`${TAG}%`}`);
-  await db.execute(sql`DELETE FROM stock_movements WHERE product_id IN (SELECT id FROM products WHERE sku LIKE ${`${TAG}-%`})`);
-  await db.execute(sql`DELETE FROM product_suppliers WHERE product_id IN (SELECT id FROM products WHERE sku LIKE ${`${TAG}-%`})`);
-  await db.execute(sql`DELETE FROM products WHERE sku LIKE ${`${TAG}-%`}`);
+  // One predicate for links, movements and products: a test may plant a row whose
+  // SKU was minted (MD-…) while its slug still carries the TAG.
+  const tagged = sql`SELECT id FROM products WHERE sku LIKE ${`${TAG}-%`} OR lower(slug) LIKE ${`${TAG.toLowerCase()}%`}`;
+  await db.execute(sql`DELETE FROM stock_movements WHERE product_id IN (${tagged})`);
+  await db.execute(sql`DELETE FROM product_suppliers WHERE product_id IN (${tagged})`);
+  await db.execute(sql`DELETE FROM products WHERE id IN (${tagged})`);
+  if (list) await db.execute(sql`DELETE FROM products WHERE id IN (${list})`);
 }
 
 beforeAll(async () => {
@@ -668,5 +692,157 @@ describe("C.3.1 — disappeared products are detected, never acted on", () => {
   it("skips detection when the file has no supplier SKU column at all", async () => {
     const { json } = await preview(["internalSku;nome;custo", `${TAG}-X;x;1,00`].join("\n"));
     expect(json.missingProducts).toMatchObject({ action: "none", count: 0, skippedReason: "NO_SUPPLIER_SKU_IN_FILE" });
+  });
+});
+
+// ─── C.3.1 audit fix: the internal SKU of a new product is MDTech's own ───
+//
+// products.sku is the catalogue's global reference and product_suppliers.supplier_sku
+// is one supplier's code for the same article. A supplier list may never write the
+// second into the first: a minted MD-… number is used instead, allocated by a
+// PostgreSQL sequence so concurrent imports cannot collide, and so a collision can
+// never roll back the 500-row batch it happened in.
+describe("C.3.1 — new products get an internal MDTech SKU", () => {
+  /** Raw rows from db.execute (drizzle keeps the PG result shape here). */
+  async function raw(query: ReturnType<typeof sql>) {
+    const r = await db.execute(query) as unknown;
+    return (Array.isArray(r) ? r : (r as { rows?: unknown[] }).rows ?? []) as Record<string, unknown>[];
+  }
+
+  const mdSku = (value: number) => `MD-${String(value).padStart(6, "0")}`;
+
+  async function productFor(supplierSku: string) {
+    const [row] = await db.select().from(products).where(eq(products.sku, supplierSku)).limit(1);
+    return row ?? null;
+  }
+
+  it("mints MD-… for a line without an internal SKU, and never copies the supplier's code", async () => {
+    const { json } = await preview(csvFile(line({ sku: "SUP-MD-1", name: "Cabo Minton", cost: "10,00", stock: "3" })));
+    expect(json.lines[0]).toMatchObject({ status: "new_product", matchType: "none" });
+
+    const applied = await apply(json.importId, json.previewToken);
+    expect(applied.json).toMatchObject({ status: "completed", created: 1, pending: 0 });
+    expect(applied.json.error).toBeUndefined();
+
+    // The supplier's code is NOT the product's internal SKU.
+    expect(await productFor("SUP-MD-1")).toBeNull();
+    const [stored] = await db.select().from(supplierImportRows).where(eq(supplierImportRows.importId, json.importId));
+    const [created] = await db.select().from(products).where(eq(products.id, stored.productId as number));
+    expect(created.sku).toMatch(/^MD-\d{6}$/);
+    expect(created.name).toBe("Cabo Minton");
+    expect(created.priceMode).toBe("auto");
+    // …and it is recorded on the row, so the operator can find the product.
+    expect(stored.message).toContain(created.sku as string);
+
+    const [linkRow] = await db.select().from(productSuppliers).where(eq(productSuppliers.productId, created.id));
+    expect(linkRow).toMatchObject({ supplierId, supplierSku: "SUP-MD-1", isPreferred: true, costPrice: "10.00" });
+  });
+
+  it("honours an internal SKU the operator mapped explicitly, untouched", async () => {
+    const explicit = `${TAG}-EXPLICIT-9`;
+    const { json } = await preview(csvFile(line({ sku: "SUP-MD-2", name: "Cabo Explícito", cost: "10,00", internalSku: explicit })));
+    const applied = await apply(json.importId, json.previewToken);
+    expect(applied.json).toMatchObject({ status: "completed", created: 1 });
+
+    const [created] = await db.select().from(products).where(eq(products.sku, explicit));
+    expect(created).toBeTruthy();
+    expect(created.sku).toBe(explicit); // never replaced by a minted number
+    expect(created.priceMode).toBe("auto");
+    const [linkRow] = await db.select().from(productSuppliers).where(eq(productSuppliers.productId, created.id));
+    expect(linkRow.supplierSku).toBe("SUP-MD-2");
+  });
+
+  it("lets two suppliers use the same code: no merge, no unique violation, no stalled import", async () => {
+    await globalRule(20);
+    // Supplier A's product was once created from its own file, so its internal
+    // SKU literally is A's article code. That is exactly the state a supplier B
+    // file used to abort on.
+    const aSku = "SHARED-CODE";
+    const [a] = await db.insert(products).values({
+      name: "Produto de A", slug: `${TAG}-shared-a`, sku: aSku, price: "100.00",
+      vatRate: "23.00", priceMode: "auto", costPrice: "40.00", stock: 1,
+    }).returning();
+    await link(a.id, supplierId, "40.00", true, aSku);
+
+    // B sends the same string as its own code: level 1 is scoped to B, so it must
+    // not match A's product; the preview says so instead of deciding silently.
+    const [other] = await db.select({ id: suppliers.id }).from(suppliers).where(eq(suppliers.name, `${TAG} Fornecedor B`));
+    const bPreview = await preview(csvFile(line({ sku: aSku, name: "Cabo de B", cost: "10,00", stock: "4" })), { supplierId: other?.id });
+    expect(bPreview.json.lines[0]).toMatchObject({ status: "new_product", matchType: "none" });
+    expect(bPreview.json.lines[0].codes).toEqual([]);
+    expect(bPreview.json.lines[0].issues.map((i: { code: string }) => i.code)).toContain("SUPPLIER_SKU_IS_FOREIGN_INTERNAL_SKU");
+
+    const applied = await apply(bPreview.json.importId, bPreview.json.previewToken);
+    expect(applied.json).toMatchObject({ status: "completed", created: 1, pending: 0 });
+    expect(applied.json.error).toBeUndefined();
+
+    // A's product is untouched: its own cost and price stay as they were.
+    const [afterA] = await db.select().from(products).where(eq(products.id, a.id));
+    expect(afterA.costPrice).toBe("40.00");
+    expect(afterA.price).toBe("100.00");
+    expect(afterA.stock).toBe(1);
+
+    // B got a separate product with a minted SKU, and its own link.
+    const [bRow] = await db.select().from(supplierImportRows).where(eq(supplierImportRows.importId, bPreview.json.importId));
+    const [bProduct] = await db.select().from(products).where(eq(products.id, bRow.productId as number));
+    expect(bProduct.id).not.toBe(a.id);
+    expect(bProduct.sku).toMatch(/^MD-\d{6}$/);
+    const [bLink] = await db.select().from(productSuppliers)
+      .where(and(eq(productSuppliers.productId, bProduct.id), eq(productSuppliers.supplierId, other?.id as number)));
+    expect(bLink).toMatchObject({ supplierSku: aSku, costPrice: "10.00" });
+  });
+
+  it("skips a minted number already taken by hand-written data instead of failing the batch", async () => {
+    // Occupy the value the import is about to be handed, then rewind the
+    // sequence so the collision really happens on the first attempt.
+    const before = await raw(sql`SELECT nextval('product_internal_sku_seq') AS n`);
+    const taken = Number(before[0]?.n);
+    expect(Number.isFinite(taken)).toBe(true);
+    await db.insert(products).values({
+      name: "Ocupado à mão", slug: `${TAG}-occupied`, sku: mdSku(taken),
+      price: "100.00", vatRate: "23.00", priceMode: "auto", stock: 0,
+    });
+    // is_called = false: the import is handed `taken` again, so the collision
+    // really happens on its first allocation attempt instead of being pretended.
+    await raw(sql`SELECT setval('product_internal_sku_seq', ${taken}::bigint, false)`);
+
+    const { json } = await preview(csvFile(line({ sku: "SUP-MD-3", name: "Cabo Riscado", cost: "10,00" })));
+    const applied = await apply(json.importId, json.previewToken);
+    expect(applied.json).toMatchObject({ status: "completed", created: 1, pending: 0 });
+    expect(applied.json.error).toBeUndefined();
+
+    const [row] = await db.select().from(supplierImportRows).where(eq(supplierImportRows.importId, json.importId));
+    const [created] = await db.select().from(products).where(eq(products.id, row.productId as number));
+    expect(created.sku).not.toBe(mdSku(taken)); // the occupied value was refused
+    expect(created.sku).toMatch(/^MD-\d{6}$/); // and a fresh one took its place
+    expect((await db.select().from(products).where(eq(products.slug, `${TAG}-occupied`)))[0].name).toBe("Ocupado à mão");
+  });
+
+  it("gives concurrent imports distinct SKUs, and both imports finish", async () => {
+    const first = await preview(csvFile(line({ sku: "SUP-RACE-A", name: "Cabo corrida A", cost: "10,00" })));
+    const [other] = await db.select({ id: suppliers.id }).from(suppliers).where(eq(suppliers.name, `${TAG} Fornecedor B`));
+    const second = await preview(csvFile(line({ sku: "SUP-RACE-B", name: "Cabo corrida B", cost: "11,00" })), { supplierId: other?.id });
+
+    const results = await Promise.all([
+      apply(first.json.importId, first.json.previewToken),
+      apply(second.json.importId, second.json.previewToken),
+    ]);
+    for (const res of results) {
+      expect(res.status).toBe(200);
+      expect(res.json).toMatchObject({ status: "completed", created: 1, pending: 0 });
+      expect(res.json.error).toBeUndefined();
+    }
+
+    const rows = await db
+      .select({ sku: products.sku, supplierSku: productSuppliers.supplierSku })
+      .from(supplierImportRows)
+      .innerJoin(products, eq(products.id, supplierImportRows.productId))
+      .innerJoin(productSuppliers, eq(productSuppliers.productId, products.id))
+      .where(inArray(supplierImportRows.importId, [first.json.importId, second.json.importId]));
+    const skus = rows.map((r) => r.sku);
+    expect(skus).toHaveLength(2);
+    expect(new Set(skus).size).toBe(2); // nextval() never handed out the same number twice
+    expect(skus.every((s) => /^MD-\d{6}$/.test(String(s)))).toBe(true);
+    expect(rows.map((r) => r.supplierSku).sort()).toEqual(["SUP-RACE-A", "SUP-RACE-B"]);
   });
 });

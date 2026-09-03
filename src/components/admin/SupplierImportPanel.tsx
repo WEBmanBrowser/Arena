@@ -242,6 +242,9 @@ export default function SupplierImportPanel() {
   };
 
   const reset = () => {
+    // The poller must stop with the card: otherwise the next tick repopulates
+    // `progress` for an import the operator has just cleared.
+    setWatchId(null);
     setPreview(null);
     setProgress(null);
     setOutcome(null);

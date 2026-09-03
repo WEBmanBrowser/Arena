@@ -1,3 +1,5 @@
+CREATE SEQUENCE "public"."product_internal_sku_seq" INCREMENT BY 1 MINVALUE 1 MAXVALUE 9223372036854775807 START WITH 1 CACHE 1;
+--> statement-breakpoint
 CREATE TABLE "supplier_import_rows" (
 	"id" serial PRIMARY KEY NOT NULL,
 	"import_id" integer NOT NULL,

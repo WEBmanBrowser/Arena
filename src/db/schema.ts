@@ -1,6 +1,6 @@
 import {
   pgTable, serial, varchar, text, integer, boolean, timestamp, decimal,
-  jsonb, index, uniqueIndex, check
+  jsonb, index, uniqueIndex, check, pgSequence
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 
@@ -1027,3 +1027,20 @@ export const supplierImportRows = pgTable("supplier_import_rows", {
   // a check requiring a target would make deleting an imported product fail.
   check("supplier_import_rows_target_matches_status", sql`${t.status} <> 'new_product' OR ${t.productId} IS NULL`),
 ]);
+
+/**
+ * MDTech's own catalogue reference numbers (products.sku = MD-000001, MD-000002…).
+ *
+ * products.sku is MDTech's global key and product_suppliers.supplier_sku is the
+ * supplier's own reference: the two are separate concepts, so a product created
+ * by a supplier import is never allowed to inherit the supplier's code as its
+ * internal SKU. A sequence is used instead of `SELECT max(…) + 1` because
+ * nextval() is atomic — two concurrent imports can never be handed the same
+ * number — and because it is not transactional, a rolled-back batch only leaves
+ * a gap, never a duplicate.
+ */
+export const productInternalSkuSeq = pgSequence("product_internal_sku_seq", {
+  startWith: 1,
+  increment: 1,
+  cache: 1,
+});

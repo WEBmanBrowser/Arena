@@ -39,26 +39,25 @@ export const SNAPSHOT_LIMITS = { sku: 100, ean: 50, name: 255 } as const;
 
 /**
  * Supplier-file header aliases, layered on top of csv.ts's generic table.
- * Keys are compareHeader() values. Note that a supplier list's own "SKU"
- * column is the catalogue (internal) SKU — the third matching level — while
- * the supplier's own reference is `skuFornecedor`.
+ * Keys are compareHeader() values.
+ *
+ * ── A bare code column is the SUPPLIER's code, never our internal SKU ──
+ * A supplier list labels its own article number "SKU", "Código", "Ref",
+ * "Referência" or "RefSAP". Those words describe the file, not MDTech's
+ * catalogue, so they map to `supplierSku` — level 1, scoped to the supplier
+ * being imported. `internalSku` is products.sku, MDTech's global reference, and
+ * is only ever filled by a header that says it is internal (or by the operator's
+ * explicit mapping). Reading a supplier's code as a global internal SKU would
+ * let supplier B match, and write cost/stock into, supplier A's product.
  */
 const SUPPLIER_HEADER_ALIASES: Record<string, string> = {
-  sku: "internalSku",
-  codigo: "internalSku",
-  codigointerno: "internalSku",
-  internalsku: "internalSku",
-  internalid: "internalSku",
-  ref: "internalSku",
-  referencia: "internalSku",
-  refinterna: "internalSku",
-  refsap: "internalSku",
-  ean: "ean",
-  ean13: "ean",
-  ean8: "ean",
-  gtin: "ean",
-  codigobarras: "ean",
-  cpv: "ean",
+  // the supplier's own article number (generic words belong to the file)
+  sku: "supplierSku",
+  codigo: "supplierSku",
+  ref: "supplierSku",
+  referencia: "supplierSku",
+  refsap: "supplierSku",
+  artigo: "supplierSku",
   skufornecedor: "supplierSku",
   suppliersku: "supplierSku",
   refsupplier: "supplierSku",
@@ -69,7 +68,21 @@ const SUPPLIER_HEADER_ALIASES: Record<string, string> = {
   codigodofornecedor: "supplierSku",
   skudofornecedor: "supplierSku",
   referenciadofornecedor: "supplierSku",
-  artigo: "supplierSku",
+  // MDTech's catalogue SKU: only when the header says so explicitly
+  internalsku: "internalSku",
+  internalid: "internalSku",
+  codigointerno: "internalSku",
+  refinterna: "internalSku",
+  referenciainterna: "internalSku",
+  skuinterno: "internalSku",
+  skumdtech: "internalSku",
+  codigomdtech: "internalSku",
+  ean: "ean",
+  ean13: "ean",
+  ean8: "ean",
+  gtin: "ean",
+  codigobarras: "ean",
+  cpv: "ean",
   name: "name",
   nome: "name",
   designacao: "name",
@@ -319,6 +332,19 @@ function snapshotText(raw: string, max: number): { value: string; truncated: boo
 }
 
 /**
+ * A matching key is NEVER cut to fit the column: truncating would fold two
+ * different codes into one invisible key, and that key would then match (or
+ * create) the wrong product. An over-long key is refused and the row is
+ * reported — the same treatment an invalid EAN already gets.
+ */
+function snapshotKey(raw: string, limit: number): { value: string | null; tooLong: boolean } {
+  const trimmed = raw.trim();
+  if (!trimmed) return { value: null, tooLong: false };
+  if (trimmed.length > limit) return { value: null, tooLong: true };
+  return { value: trimmed, tooLong: false };
+}
+
+/**
  * One mapped CSV row → NormalizedSupplierRow. Pure: no database, no I/O.
  * `mapped` comes from applyMapping(), so it only holds canonical fields; the
  * `price` key is carried through solely to warn about it.
@@ -331,8 +357,18 @@ export function normalizeSupplierRow(rowNumber: number, mapped: Record<string, s
     issues.push({ field, value, code, message, severity: "warning" });
   const raw = (key: string) => (mapped[key] ?? "").trim();
 
-  const supplierSku = snapshotText(raw("supplierSku"), SNAPSHOT_LIMITS.sku);
-  const internalSku = snapshotText(raw("internalSku"), SNAPSHOT_LIMITS.sku);
+  const supplierKey = snapshotKey(raw("supplierSku"), SNAPSHOT_LIMITS.sku);
+  const internalKey = snapshotKey(raw("internalSku"), SNAPSHOT_LIMITS.sku);
+  const supplierSku = supplierKey.value;
+  const internalSku = internalKey.value;
+  if (supplierKey.tooLong) {
+    error("supplierSku", raw("supplierSku").slice(0, 120), "SUPPLIER_SKU_TOO_LONG",
+      `SKU do fornecedor com mais de ${SNAPSHOT_LIMITS.sku} caracteres — não é cortado; a linha não é aplicada`);
+  }
+  if (internalKey.tooLong) {
+    error("internalSku", raw("internalSku").slice(0, 120), "INTERNAL_SKU_TOO_LONG",
+      `SKU interno com mais de ${SNAPSHOT_LIMITS.sku} caracteres — não é cortado; a linha não é aplicada`);
+  }
   const name = snapshotText(raw("name"), SNAPSHOT_LIMITS.name);
   if (name?.truncated) {
     warning("name", raw("name"), "NAME_TRUNCATED", `Designação limitada a ${SNAPSHOT_LIMITS.name} caracteres no snapshot`);
@@ -377,7 +413,7 @@ export function normalizeSupplierRow(rowNumber: number, mapped: Record<string, s
     else leadTimeDays = parsed.value;
   }
 
-  if (!supplierSku && !internalSku && !ean) {
+  if (!supplierSku && !internalSku && !ean && !supplierKey.tooLong && !internalKey.tooLong) {
     error("row", "", "MISSING_IDENTIFIER_KEY", "Linha sem SKU do fornecedor, EAN ou SKU interno — impossível de identificar");
   }
 
@@ -389,9 +425,9 @@ export function normalizeSupplierRow(rowNumber: number, mapped: Record<string, s
 
   return {
     rowNumber,
-    supplierSku: supplierSku?.value ?? null,
+    supplierSku,
     ean,
-    internalSku: internalSku?.value ?? null,
+    internalSku,
     name: name?.value ?? null,
     costPrice,
     stock,

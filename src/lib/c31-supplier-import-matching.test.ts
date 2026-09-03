@@ -59,6 +59,17 @@ describe("C.3.1 — matching order", () => {
     expect(p).toMatchObject({ status: "new_product", matchType: "none", productId: null });
   });
 
+  it("a supplier code equal to another product's internal SKU is never a match", () => {
+    // "INT-1" is product 1's MDTech reference, not this supplier's. Level 3 only
+    // ever consumes the internalSku column, so supplier B cannot be pointed at
+    // supplier A's product just because the strings happen to match.
+    const [p] = plan([row(2, { supplierSku: "INT-1", name: "Cabo de outro fornecedor" })]);
+    expect(p).toMatchObject({ status: "new_product", matchType: "none", productId: null });
+    expect(p.codes).toEqual([]);
+    // while the same value mapped as an internal SKU does match, explicitly
+    expect(plan([row(3, { internalSku: "INT-1" })])[0]).toMatchObject({ status: "ready", productId: 1 });
+  });
+
   it("never matches on the name, even when it is identical", () => {
     const [p] = plan([row(2, { name: "SUP-1" })], index([{ id: 9, sku: "INT-9" }]));
     // Only the absent keys can match; the name is not even looked at.

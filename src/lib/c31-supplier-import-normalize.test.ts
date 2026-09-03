@@ -121,6 +121,33 @@ describe("C.3.1 — normalization of one row", () => {
     expect(row.issues.find((i) => i.code === "NAME_TRUNCATED")?.severity).toBe("warning");
   });
 
+  it("refuses an over-long supplier code instead of cutting it to a 100-char key", () => {
+    const row = normalizeSupplierRow(2, { supplierSku: "S".repeat(120), name: "Cabo" });
+    expect(row.supplierSku).toBeNull();
+    const issue = row.issues.find((i) => i.code === "SUPPLIER_SKU_TOO_LONG");
+    expect(issue?.severity).toBe("error");
+    // The length error already explains the row: no second, misleading complaint.
+    expect(codes(row)).not.toContain("MISSING_IDENTIFIER_KEY");
+    // A key at the documented limit is kept whole.
+    expect(normalizeSupplierRow(3, { supplierSku: "S".repeat(100) }).supplierSku).toHaveLength(100);
+  });
+
+  it("never folds two different over-long codes into one truncated key", () => {
+    const base = "X".repeat(110);
+    const a = normalizeSupplierRow(2, { supplierSku: `${base}AAA` });
+    const b = normalizeSupplierRow(3, { supplierSku: `${base}BBB` });
+    expect([a.supplierSku, b.supplierSku]).toEqual([null, null]);
+    expect(codes(a)).toContain("SUPPLIER_SKU_TOO_LONG");
+    expect(codes(b)).toContain("SUPPLIER_SKU_TOO_LONG");
+    expect(a.supplierSku).toEqual(b.supplierSku); // no invisible "S…S" collision
+  });
+
+  it("refuses an over-long internal SKU too — a global key is never invented from a cut", () => {
+    const row = normalizeSupplierRow(2, { supplierSku: "S1", internalSku: "I".repeat(101) });
+    expect(row.internalSku).toBeNull();
+    expect(row.issues.find((i) => i.code === "INTERNAL_SKU_TOO_LONG")?.severity).toBe("error");
+  });
+
   it("warns that a price column is ignored, instead of treating it as cost or PVP", () => {
     const row = normalizeSupplierRow(2, { supplierSku: "S1", price: "29,99" });
     const issue = row.issues.find((i) => i.code === "PRICE_COLUMN_IGNORED");
@@ -147,8 +174,21 @@ describe("C.3.1 — header mapping", () => {
     });
   });
 
-  it("treats a bare SKU column as the internal (level 3) key", () => {
-    expect(buildSupplierMapping(["SKU"]).mapping).toEqual({ SKU: "internalSku" });
+  it("treats a bare SKU/Código/Ref column as the SUPPLIER's code, never as our internal SKU", () => {
+    // A supplier list calls its own article number "SKU". products.sku is
+    // MDTech's global reference, so the generic word belongs to the file.
+    expect(buildSupplierMapping(["SKU"]).mapping).toEqual({ SKU: "supplierSku" });
+    for (const header of ["Código", "Ref", "Referência", "RefSAP", "Artigo"]) {
+      expect(buildSupplierMapping([header]).mapping[header]).toBe("supplierSku");
+    }
+  });
+
+  it("only reads internalSku from a header that says it is internal", () => {
+    for (const header of ["internalSku", "Código Interno", "Ref Interna", "Referência Interna", "SKU MDTech"]) {
+      expect(buildSupplierMapping([header]).mapping[header]).toBe("internalSku");
+    }
+    // and the operator can always map it explicitly
+    expect(buildSupplierMapping(["Código"], { Código: "internalSku" }).mapping).toEqual({ Código: "internalSku" });
   });
 
   it("lets the operator's own mapping win, and drops unknown targets", () => {
@@ -160,7 +200,7 @@ describe("C.3.1 — header mapping", () => {
   it("reports a catalogue price column as ignored rather than mapping it", () => {
     const { mapping, ignoredColumns } = buildSupplierMapping(["SKU", "Preço"]);
     expect(ignoredColumns).toContain("Preço");
-    expect(mapping.SKU).toBe("internalSku");
+    expect(mapping.SKU).toBe("supplierSku");
     // Carried through only so each row can warn about it.
     expect(mapping["Preço"]).toBe("price");
   });

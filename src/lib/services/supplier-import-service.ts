@@ -50,6 +50,10 @@ import { slugify } from "@/lib/utils";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
   IMPORT_HEARTBEAT_TTL_MS,
+  MDTECH_SKU_ALLOC_ATTEMPTS,
+  MDTECH_SKU_DIGITS,
+  MDTECH_SKU_PREFIX,
+  MDTECH_SKU_SEQUENCE,
   SUPPLIER_IMPORT_BATCH_SIZE,
   SUPPLIER_IMPORT_KEY_CHUNK,
   SUPPLIER_IMPORT_MISSING_LIMIT,
@@ -153,6 +157,26 @@ async function buildIndexForRows(rows: NormalizedSupplierRow[], supplierId: numb
   return buildMatchIndex([...merged.values()]);
 }
 
+/**
+ * Products whose internal SKU (`products.sku`) equals a code the supplier's file
+ * uses for itself.
+ *
+ * These are never matches: level 3 only ever consumes the `internalSku` column
+ * the operator mapped explicitly. The collision is reported in the preview so a
+ * new product is created knowingly instead of a supplier's code quietly becoming
+ * MDTech's global reference.
+ */
+async function findInternalSkuOwners(supplierSkus: (string | null)[]): Promise<Map<string, number>> {
+  const owners = new Map<string, number>();
+  const keys = [...new Set(supplierSkus.filter((v): v is string => !!v))];
+  for (const group of chunk(keys, SUPPLIER_IMPORT_KEY_CHUNK)) {
+    const found = await db.select({ sku: products.sku, productId: products.id })
+      .from(products).where(inArray(products.sku, group));
+    for (const f of found) if (f.sku) owners.set(f.sku, f.productId);
+  }
+  return owners;
+}
+
 // ─── Preview types ───────────────────────────────────────
 
 export interface SupplierImportPreviewLine {
@@ -225,7 +249,7 @@ export interface SupplierImportPreview {
  */
 async function detectMissingProducts(
   supplierId: number,
-  rows: { supplierSku: string | null; status: string }[]
+  rows: { supplierSku: string | null }[]
 ): Promise<MissingProductsReport> {
   const empty: MissingProductsReport = {
     action: "none", comparedToImportId: null, comparedToFinishedAt: null,
@@ -241,9 +265,11 @@ async function detectMissingProducts(
     .limit(1);
   if (!previous) return { ...empty, skippedReason: "NO_PREVIOUS_COMPLETED_IMPORT" };
 
-  const seenHere = new Set(
-    rows.filter((r) => r.status !== "conflict" && r.status !== "error" && r.supplierSku).map((r) => r.supplierSku as string)
-  );
+  // Every key present in the new file counts as seen — including rows that ended
+  // in conflict or error. A duplicated reference still proves the supplier lists
+  // the article, so it must never be reported as a disappearance: ambiguity is
+  // reported as ambiguity, "gone" is reserved for keys that are really absent.
+  const seenHere = new Set(rows.map((r) => r.supplierSku).filter((v): v is string => !!v));
 
   const before = await db
     .select({ supplierSku: supplierImportRows.supplierSku, productId: supplierImportRows.productId, name: supplierImportRows.name })
@@ -314,6 +340,7 @@ export async function previewSupplierImport(input: PreviewInput): Promise<Suppli
 
   const index = await buildIndexForRows(parsed.rows, supplier.id);
   const plans = planSupplierRows(parsed.rows, index);
+  const skuOwners = await findInternalSkuOwners(parsed.rows.map((r) => r.supplierSku));
 
   const matchedIds = [...new Set(plans.filter((p) => p.productId !== null).map((p) => p.productId as number))];
   const productInfo = new Map<number, ProductInfo>();
@@ -347,6 +374,21 @@ export async function previewSupplierImport(input: PreviewInput): Promise<Suppli
     const plan = plans[i];
     const product = plan.productId !== null ? productInfo.get(plan.productId) : undefined;
     const isPreferred = product ? preferredByProduct.get(product.id) === supplier.id : false;
+
+    // A supplier's code that happens to equal another product's internal SKU is
+    // reported, never used as a match: the two references are separate concepts.
+    const skuClash = plan.status === "new_product" && row.supplierSku
+      ? skuOwners.get(row.supplierSku) ?? null
+      : null;
+    const clashIssue: SupplierImportIssue | null = skuClash !== null && row.supplierSku
+      ? {
+          field: "supplierSku",
+          value: row.supplierSku,
+          code: "SUPPLIER_SKU_IS_FOREIGN_INTERNAL_SKU",
+          message: `O código do fornecedor "${row.supplierSku}" já é o SKU interno do produto #${skuClash}; não é usado para o identificar — será criado um produto novo com SKU interno próprio`,
+          severity: "warning",
+        }
+      : null;
 
     // The cost the engine would see after this import. A non-preferred
     // supplier's cost never becomes authoritative for products.costPrice.
@@ -390,8 +432,8 @@ export async function previewSupplierImport(input: PreviewInput): Promise<Suppli
       status: plan.status,
       matchType: plan.matchType,
       codes: plan.codes,
-      message: [plan.message, priceMessage].filter(Boolean).join(" · ") || null,
-      issues: row.issues,
+      message: [clashIssue?.message, plan.message, priceMessage].filter(Boolean).join(" · ") || null,
+      issues: clashIssue ? [...row.issues, clashIssue] : row.issues,
       costPrice: row.costPrice,
       costBefore: product ? linkCost.get(product.id) ?? null : null,
       stock: row.stock,
@@ -414,43 +456,49 @@ export async function previewSupplierImport(input: PreviewInput): Promise<Suppli
   const batchesTotal = Math.ceil(actionable / SUPPLIER_IMPORT_BATCH_SIZE);
   const missing = await detectMissingProducts(supplier.id, lines);
 
-  const [importRow] = await db.insert(supplierImports).values({
-    supplierId: supplier.id,
-    fileName: input.fileName.slice(0, 255),
-    fileHash,
-    fileSizeBytes,
-    rowCount: parsed.rows.length,
-    status: "preview",
-    mapping: parsed.mapping,
-    summary: { ...planSummary, actionable, batchesTotal, ignoredColumns: parsed.ignoredColumns, missingProducts: missing },
-    batchesTotal,
-    batchesDone: 0,
-    userId: input.userId,
-  }).returning();
+  // ── The snapshot is persisted atomically ──
+  // Header and rows commit together or not at all: a preview that died halfway
+  // must not leave a `preview` import whose rows are a subset of the file,
+  // because that subset is exactly what apply would otherwise consume.
+  const importRow = await db.transaction(async (tx) => {
+    const [created] = await tx.insert(supplierImports).values({
+      supplierId: supplier.id,
+      fileName: input.fileName.slice(0, 255),
+      fileHash,
+      fileSizeBytes,
+      rowCount: parsed.rows.length,
+      status: "preview",
+      mapping: parsed.mapping,
+      summary: { ...planSummary, actionable, batchesTotal, ignoredColumns: parsed.ignoredColumns, missingProducts: missing },
+      batchesTotal,
+      batchesDone: 0,
+      userId: input.userId,
+    }).returning();
 
-  // Persist the snapshot — this is exactly what apply consumes.
-  for (const group of chunk(lines, SUPPLIER_IMPORT_BATCH_SIZE)) {
-    await db.insert(supplierImportRows).values(group.map((line) => ({
-      importId: importRow.id,
-      rowNumber: line.rowNumber,
-      supplierSku: line.supplierSku,
-      ean: line.ean,
-      internalSku: line.internalSku,
-      name: line.name,
-      productId: line.productId,
-      matchType: line.matchType,
-      status: line.status,
-      costPrice: line.costPrice,
-      stock: line.stock,
-      leadTimeDays: line.leadTimeDays,
-      message: line.message,
-      currentPrice: line.currentPrice,
-      computedPrice: line.computedPrice,
-      priceMode: line.priceMode,
-      priceMessage: line.priceMessage,
-      isPreferredSupplier: line.isPreferredSupplier,
-    })));
-  }
+    for (const group of chunk(lines, SUPPLIER_IMPORT_BATCH_SIZE)) {
+      await tx.insert(supplierImportRows).values(group.map((line) => ({
+        importId: created.id,
+        rowNumber: line.rowNumber,
+        supplierSku: line.supplierSku,
+        ean: line.ean,
+        internalSku: line.internalSku,
+        name: line.name,
+        productId: line.productId,
+        matchType: line.matchType,
+        status: line.status,
+        costPrice: line.costPrice,
+        stock: line.stock,
+        leadTimeDays: line.leadTimeDays,
+        message: line.message ? line.message.slice(0, 500) : null,
+        currentPrice: line.currentPrice,
+        computedPrice: line.computedPrice,
+        priceMode: line.priceMode,
+        priceMessage: line.priceMessage,
+        isPreferredSupplier: line.isPreferredSupplier,
+      })));
+    }
+    return created;
+  });
 
   await createAuditLog({
     userId: input.userId,
@@ -647,25 +695,95 @@ async function upsertSupplierLink(
   });
 }
 
-/** Create the product the file describes. The engine owns its price. */
-async function createProductFromRow(tx: NodePgDatabase, row: ClaimedRow, context: ApplyContext): Promise<number | null> {
-  const sku = row.internal_sku ?? row.supplier_sku;
-  const label = (row.name ?? sku ?? `Produto importado ${context.importId}-${row.row_number}`).slice(0, 500);
-  const [created] = await tx.insert(products).values({
-    name: label,
-    // Deterministic slug: no Date.now(), so a resumed batch cannot fork names.
-    slug: `${slugify(label)}-${context.importId}-${row.row_number}`.slice(0, 500),
-    sku,
-    ean: row.ean,
-    // Placeholder only: never taken from the file, and replaced by the engine
-    // below whenever a rule applies.
-    price: "0.00",
-    vatRate: "23.00",
-    priceMode: "auto",
-    stock: row.stock ?? 0,
-    isActive: true,
-  }).returning({ id: products.id });
-  return created?.id ?? null;
+/**
+ * MDTech's next catalogue reference: `MD-000001`, `MD-000002`, …
+ *
+ * The number comes from `nextval()`, so it is handed out atomically — two
+ * concurrent imports (two batches, two requests, two workers) can never receive
+ * the same one. A sequence is deliberately not transactional: a batch that rolls
+ * back leaves a gap in the numbering, never a reused value.
+ */
+async function nextInternalSku(tx: NodePgDatabase): Promise<string | null> {
+  const [row] = rowsOf<{ nextval: string | number | null }>(
+    await tx.execute(sql`SELECT nextval(${sql.raw(`'${MDTECH_SKU_SEQUENCE}'::regclass`)}) AS nextval`)
+  );
+  const value = Number(row?.nextval);
+  if (!Number.isSafeInteger(value) || value < 1) return null;
+  return `${MDTECH_SKU_PREFIX}${String(value).padStart(MDTECH_SKU_DIGITS, "0")}`;
+}
+
+interface CreatedProduct {
+  productId: number | null;
+  /** The SKU the product was created with, for the row message. */
+  sku: string | null;
+  /** Set instead of throwing: a collision is a row outcome, never a batch one. */
+  failure: { code: string; message: string } | null;
+}
+
+/**
+ * Create the product the file describes. The engine owns its price.
+ *
+ * ── The internal SKU is MDTech's, never the supplier's ──
+ * `products.sku` is the catalogue's global reference; `product_suppliers.supplier_sku`
+ * is one supplier's code for the same article. Copying a supplier's code into
+ * products.sku would let a second supplier's file collide with it (the unique
+ * index aborting the whole 500-row batch, permanently) or, worse, match against
+ * the first supplier's product and write cost/stock into it. So:
+ *  - an explicit `internal_sku` column is honoured — the operator mapped it as
+ *    MDTech's own reference — and is never rewritten;
+ *  - otherwise the SKU is minted from the sequence.
+ * Every attempt is `ON CONFLICT (sku) DO NOTHING`: a value already taken by
+ * hand-written data costs a fresh sequence number, not a rolled back batch.
+ */
+async function createProductFromRow(tx: NodePgDatabase, row: ClaimedRow, context: ApplyContext): Promise<CreatedProduct> {
+  const label = (row.name ?? row.supplier_sku ?? `Produto importado ${context.importId}-${row.row_number}`).slice(0, 500);
+  // Deterministic slug: no Date.now(), so a resumed batch cannot fork names.
+  const slug = `${slugify(label)}-${context.importId}-${row.row_number}`.slice(0, 500);
+
+  const insertWith = async (sku: string): Promise<number | null> => {
+    const [created] = await tx.insert(products).values({
+      name: label,
+      slug,
+      sku,
+      ean: row.ean,
+      // Placeholder only: never taken from the file, and replaced by the engine
+      // below whenever a rule applies.
+      price: "0.00",
+      vatRate: "23.00",
+      priceMode: "auto",
+      stock: row.stock ?? 0,
+      isActive: true,
+    }).onConflictDoNothing({ target: products.sku }).returning({ id: products.id });
+    return created?.id ?? null;
+  };
+
+  // An explicitly mapped internal SKU is the operator's own statement about the
+  // catalogue: it is used as given. If it is already taken, the row reports it —
+  // products.sku is never silently renamed to make room.
+  if (row.internal_sku) {
+    const productId = await insertWith(row.internal_sku);
+    return productId === null
+      ? {
+          productId: null, sku: row.internal_sku,
+          failure: { code: "INTERNAL_SKU_TAKEN", message: `O SKU interno "${row.internal_sku}" já pertence a outro produto — a linha não foi aplicada` },
+        }
+      : { productId, sku: row.internal_sku, failure: null };
+  }
+
+  for (let attempt = 0; attempt < MDTECH_SKU_ALLOC_ATTEMPTS; attempt += 1) {
+    const sku = await nextInternalSku(tx);
+    if (sku === null) break;
+    const productId = await insertWith(sku);
+    if (productId !== null) return { productId, sku, failure: null };
+  }
+
+  return {
+    productId: null, sku: null,
+    failure: {
+      code: "SKU_GENERATION_FAILED",
+      message: `Não foi possível atribuir um SKU interno em ${MDTECH_SKU_ALLOC_ATTEMPTS} tentativas — a linha não foi aplicada`,
+    },
+  };
 }
 
 /**
@@ -683,14 +801,20 @@ async function applyRow(tx: NodePgDatabase, row: ClaimedRow, context: ApplyConte
       return "skipped";
     }
     if (resolved.productId === null) {
-      productId = await createProductFromRow(tx, row, context);
-      if (productId === null) {
-        await markRow(tx, row.id, "error", "Falha ao criar o produto");
+      const created = await createProductFromRow(tx, row, context);
+      if (created.productId === null) {
+        await markRow(tx, row.id, "error", created.failure?.message ?? "Falha ao criar o produto");
         return "skipped";
       }
+      productId = created.productId;
       createdProduct = true;
       // The row now points at a real product: record it (history + traceability).
-      await tx.update(supplierImportRows).set({ status: "ready", productId }).where(eq(supplierImportRows.id, row.id));
+      // When the internal SKU had to be minted, the number is written into the
+      // row's message so the operator can find it after the import.
+      await tx.update(supplierImportRows).set(row.internal_sku
+        ? { status: "ready", productId }
+        : { status: "ready", productId, message: `Produto criado com SKU interno ${created.sku}`.slice(0, 500) }
+      ).where(eq(supplierImportRows.id, row.id));
     } else {
       // Another import created it meanwhile → apply against it, never a copy.
       productId = resolved.productId;
@@ -938,14 +1062,44 @@ export async function applySupplierImport(input: ApplyInput): Promise<ApplyOutco
     return outcomeFor(snapshot.id, { ...totals, resumed: !fromPreview, error: lastError });
   }
 
-  await db.execute(sql`
+  // ── `completed` is only reachable with nothing pending ──
+  // `pending` is exactly what a claim would still take, so it is the honest
+  // definition of "nothing left to do". Closing an import that still has pending
+  // rows would strand them permanently (completed is not resumable), and a late
+  // worker resuming after a reclaim must not be able to do it. The NOT EXISTS
+  // re-checks the rows inside the UPDATE, so completion is never decided from a
+  // count that went stale between the two statements.
+  const closed = rowsOf(await db.execute(sql`
     UPDATE ${supplierImports}
        SET status = 'completed',
            finished_at = now(),
            heartbeat_at = now(),
            summary = COALESCE(summary, '{}'::jsonb) || ${JSON.stringify({ finished: counts, completedAt: new Date().toISOString() })}::jsonb
      WHERE id = ${snapshot.id} AND status = 'applying'
-  `);
+       AND NOT EXISTS (
+         SELECT 1 FROM ${supplierImportRows} pending_row
+          WHERE pending_row.import_id = ${snapshot.id}
+            AND pending_row.applied = false
+            AND pending_row.status IN ('ready','new_product')
+       )
+    RETURNING id
+  `));
+  if (closed.length === 0) {
+    const final = counts.pending > 0 ? counts : await countRows(snapshot.id);
+    if (final.pending > 0) {
+      const error = { code: "PENDING_ROWS_REMAIN", message: "Terminou com linhas por aplicar — retomar para concluir" };
+      await db.update(supplierImports).set({
+        status: "partial",
+        heartbeatAt: new Date(),
+        errorSummary: { ...error, at: new Date().toISOString(), applied: final.applied, pending: final.pending },
+      }).where(and(eq(supplierImports.id, snapshot.id), eq(supplierImports.status, "applying")));
+      return outcomeFor(snapshot.id, { ...totals, resumed: !fromPreview, error });
+    }
+    // Another worker closed the import while this run was finishing: nothing to
+    // report as an error, and nothing here may undo what it committed.
+    return outcomeFor(snapshot.id, { ...totals, resumed: !fromPreview, idempotent: true });
+  }
+
   await createAuditLog({
     userId: input.userId, action: "supplier_import.applied", entity: "supplier_import", entityId: snapshot.id,
     details: {

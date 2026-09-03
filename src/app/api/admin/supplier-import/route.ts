@@ -13,7 +13,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getCurrentUser, isManager, isStaff } from "@/lib/auth";
 import { csrfGuard } from "@/lib/csrf";
 import { CSV_MAX_SIZE } from "@/lib/csv";
-import { SupplierCsvError } from "@/lib/supplier-import/normalize";
+import { SupplierCsvError, byteLengthUtf8 } from "@/lib/supplier-import/normalize";
 import {
   SupplierImportError,
   listSupplierImports,
@@ -81,8 +81,15 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "SUPPLIER_ID_REQUIRED", message: "Fornecedor obrigatório" }, { status: 400 });
   }
   if (!data.trim()) return NextResponse.json({ error: "CSV_EMPTY", message: "CSV vazio" }, { status: 400 });
-  if (data.length > CSV_MAX_SIZE) {
-    return NextResponse.json({ error: "CSV_FILE_TOO_LARGE", message: "Ficheiro excede 5 MB" }, { status: 400 });
+  // Bytes, not characters: a pt-PT file full of "§" and accents is several times
+  // heavier than its string length claims, and the ceiling is a memory ceiling.
+  const sizeBytes = byteLengthUtf8(data);
+  if (sizeBytes > CSV_MAX_SIZE) {
+    const limitMb = Math.round(CSV_MAX_SIZE / (1024 * 1024));
+    return NextResponse.json({
+      error: "CSV_FILE_TOO_LARGE",
+      message: `Ficheiro com ${(sizeBytes / (1024 * 1024)).toFixed(1)} MB — o limite é ${limitMb} MB`,
+    }, { status: 400 });
   }
 
   try {

@@ -43,3 +43,26 @@ export const SUPPLIER_IMPORT_MISSING_LIMIT = 500;
 
 /** Chunk size for key lookups, so a 10 000-line file never builds one huge IN(). */
 export const SUPPLIER_IMPORT_KEY_CHUNK = 500;
+
+/**
+ * Prefix of an internal MDTech SKU minted for a product a supplier list introduces.
+ *
+ * products.sku is MDTech's own global reference; product_suppliers.supplier_sku is
+ * the supplier's reference for the same article. A supplier's code therefore never
+ * becomes products.sku — doing so let one supplier's file collide with (or silently
+ * retarget) another supplier's product.
+ */
+export const MDTECH_SKU_PREFIX = "MD-";
+
+/** PostgreSQL sequence behind MDTECH_SKU_PREFIX; nextval() is the concurrency guard. */
+export const MDTECH_SKU_SEQUENCE = "product_internal_sku_seq";
+
+/** Digits of the zero-padded number: MD-000001 … (longer values are simply wider). */
+export const MDTECH_SKU_DIGITS = 6;
+
+/**
+ * How many sequence values one row may burn when a value is already taken by
+ * hand-written data. Each attempt takes a FRESH nextval, so a collision costs a
+ * retry — never a rolled back batch of 500 rows.
+ */
+export const MDTECH_SKU_ALLOC_ATTEMPTS = 20;
