@@ -846,3 +846,79 @@ describe("C.3.1 — new products get an internal MDTech SKU", () => {
     expect(rows.map((r) => r.supplierSku).sort()).toEqual(["SUP-RACE-A", "SUP-RACE-B"]);
   });
 });
+
+// ─── C.3.1 audit fixes: persistence, disappearance and the size ceiling ───
+describe("C.3.1 — preview persistence, missing products and file size", () => {
+  it("rolls the whole preview back when a snapshot row cannot be written", async () => {
+    // 501 lines: the header and the first chunk are already in the database when
+    // the second chunk explodes (a cost beyond numeric(10,2)). A half-written
+    // snapshot must not survive, because that subset is exactly what apply would
+    // otherwise consume.
+    const rows = Array.from({ length: 501 }, (_, i) =>
+      line({ sku: `${TAG}-TX-${i}`, name: `linha ${i}`, cost: i === 500 ? "999999999,99" : "1,00" }));
+    const res = await preview(csvFile(...rows), { fileName: `${TAG}-tx.csv` });
+
+    expect(res.status).toBe(500);
+    expect(res.json.error).toBe("SUPPLIER_IMPORT_PREVIEW_FAILED");
+    expect(await db.select().from(supplierImports).where(eq(supplierImports.fileName, `${TAG}-tx.csv`))).toHaveLength(0);
+    // Nothing of this file exists either, and the user's history is untouched.
+    const orphans = await db.execute(sql`
+      SELECT count(*)::int AS count FROM supplier_import_rows r
+        JOIN supplier_imports i ON i.id = r.import_id
+       WHERE i.file_name = ${`${TAG}-tx.csv`}
+    `) as unknown as { rows?: { count: number }[] };
+    expect(orphans.rows?.[0]?.count ?? 0).toBe(0);
+  }, 120000);
+
+  it("counts a reference repeated in the new file as seen, not as disappeared", async () => {
+    await globalRule(20);
+    // A completed import establishes SUP-KEEP as this supplier's line…
+    const first = await preview(csvFile(line({ sku: "SUP-KEEP", name: "Cabo", cost: "10,00" })));
+    expect((await apply(first.json.importId, first.json.previewToken)).json).toMatchObject({ status: "completed", created: 1 });
+
+    // …and the next file still lists it, twice, so both rows are conflicts.
+    // Repetition is ambiguity; it is never proof that the product vanished.
+    const second = await preview(csvFile(
+      line({ sku: "SUP-KEEP", name: "Cabo a", cost: "11,00" }),
+      line({ sku: "SUP-KEEP", name: "Cabo b", cost: "12,00" }),
+    ));
+    expect(second.json.summary).toMatchObject({ conflicts: 2, actionable: 0 });
+    expect(second.json.missingProducts).toMatchObject({
+      action: "none", count: 0, ambiguous: 0, comparedToImportId: first.json.importId,
+    });
+    expect(second.json.missingProducts.items).toEqual([]);
+
+    // A reference that is genuinely absent is still reported — the fix must not
+    // turn the report into a no-op.
+    const third = await preview(csvFile(line({ sku: "SUP-OUTRA", name: "Outro", cost: "11,00" })));
+    expect(third.json.missingProducts).toMatchObject({ action: "none", count: 1 });
+    expect(third.json.missingProducts.items[0]).toMatchObject({ supplierSku: "SUP-KEEP" });
+  });
+
+  it("measures the file in UTF-8 bytes, not in characters", async () => {
+    // 2.1 million "€" are 6.3 MB: over the ceiling even though the string looks
+    // small. The guard must refuse it before parsing anything.
+    const heavy = `"${"€".repeat(2_100_000)}"`;
+    const data = `skuFornecedor;nome;custo\nSUP-BYTES;${heavy};1,00`;
+    expect(data.length).toBeLessThan(5 * 1024 * 1024);
+    const big = await preview(data);
+    expect(big.status).toBe(400);
+    expect(big.json.error).toBe("CSV_FILE_TOO_LARGE");
+    // 2.1 million "€" are 6 300 000 bytes: the message reports the real weight.
+    expect(big.json.message).toMatch(/^Ficheiro com 6\.0 MB — o limite é 5 MB$/);
+
+    // The same refusal by ASCII weight, so the rule is one number and not a
+    // coincidence of encoding: characters and bytes are only equal when they are.
+    const ascii = await preview(`skuFornecedor;nome;custo\nSUP-BYTES;${"x".repeat(5_300_000)};1,00`);
+    expect(ascii.json.error).toBe("CSV_FILE_TOO_LARGE");
+
+    // And a multi-byte file under the ceiling is accepted: the guard never counts
+    // characters, in either direction. The size that is recorded is the byte count.
+    const text = csvFile(...Array.from({ length: 200 }, (_, i) => line({ sku: `SUP-MB-${i}`, name: `cabo€${i}€`, cost: "1,00" })));
+    const ok = await preview(text);
+    expect(ok.status).toBe(200);
+    expect(ok.json.fileSizeBytes).toBe(Buffer.byteLength(text, "utf8"));
+    expect(ok.json.fileSizeBytes).toBeGreaterThan(text.length);
+    expect(ok.json.summary.total).toBe(200);
+  }, 120000);
+});

@@ -372,3 +372,85 @@ describe("C.3.1 — heartbeat owns the import", () => {
     expect(rows[0].applied).toBe(false);
   });
 });
+
+// ─── C.3.1 audit fix: `completed` is only reachable with nothing pending ───
+//
+// Ownership of an import is a heartbeat, not a lease, so a worker that stalls
+// past the TTL and then wakes up is still holding a valid-looking run: it can
+// write progress, and it can reach the end of its loop while a second worker is
+// still applying. Row effects stay safe (the claim is atomic per row), but the
+// header must never be closed with rows left behind — completed is not
+// resumable, so one such write would strand those rows for the life of the
+// import. That is decided by the database, in the same statement.
+describe("C.3.1 — completion cannot outrun the rows", () => {
+  it("leaves the import resumable when a line arrives after the worker's last batch", async () => {
+    await makeProduct("SUP-1");
+    const late = await makeProduct("SUP-2");
+    const { json } = await previewWith([{ sku: "SUP-1", cost: "10,00" }]);
+
+    let release!: () => void;
+    gate.hold = new Promise<void>((r) => { release = r; });
+    gate.holdAt = 1; // the worker is inside the only batch it will ever claim
+
+    const running = applySupplierImport({ importId: json.importId, previewToken: json.previewToken, userId: MANAGER.id });
+    for (let i = 0; i < 400 && gate.calls === 0; i += 1) await new Promise((r) => setTimeout(r, 10));
+    expect(gate.calls).toBe(1);
+
+    // The second line joins the snapshot now — pending, and invisible to the
+    // batch this worker already took.
+    await db.insert(supplierImportRows).values({
+      importId: json.importId,
+      // Line 1 is the header and line 2 is the previewed row, so the late line
+      // gets its own row number — the snapshot's unique key per import.
+      rowNumber: 3,
+      supplierSku: "SUP-2",
+      name: "linha chegada depois",
+      productId: late.id,
+      matchType: "supplier_sku",
+      status: "ready",
+      costPrice: "11.00",
+    });
+
+    release();
+    const done = await running;
+    expect(done.status).toBe("partial");
+    expect(done.error?.code).toBe("PENDING_ROWS_REMAIN");
+    expect(done).toMatchObject({ appliedNow: 1, pending: 1, resumed: false });
+
+    const mid = await getImportProgress(json.importId);
+    expect(mid).toMatchObject({ status: "partial", pending: 1, canResume: true });
+    // …and nothing about it looks finished.
+    const [header] = await db.select().from(supplierImports).where(eq(supplierImports.id, json.importId));
+    expect(header.finishedAt).toBeNull();
+    expect((await db.select().from(products).where(eq(products.id, late.id)))[0].costPrice).toBeNull();
+
+    // The resume applies the missing line and only then completes.
+    gate.holdAt = 0;
+    gate.hold = null;
+    const resumed = await apply(json.importId);
+    expect(resumed.json).toMatchObject({ status: "completed", appliedNow: 1, pending: 0, resumed: true });
+    expect(resumed.json.error).toBeUndefined();
+    expect((await db.select().from(products).where(eq(products.id, late.id)))[0].costPrice).toBe("11.00");
+    expect((await getImportProgress(json.importId))!.canResume).toBe(false);
+  }, 60000);
+
+  it("keeps the invariant globally: no completed import has pending rows", async () => {
+    await makeProduct("SUP-1");
+    const { json } = await previewWith([{ sku: "SUP-1", cost: "10,00" }]);
+    expect((await apply(json.importId, json.previewToken)).json.status).toBe("completed");
+
+    // A completed import whose snapshot still has claimable rows is, by
+    // definition, unreachable: the resume refuses it. So it must not exist.
+    const result = await db.execute(sql`
+      SELECT i.id
+        FROM supplier_imports i
+       WHERE i.status = 'completed'
+         AND EXISTS (
+           SELECT 1 FROM supplier_import_rows r
+            WHERE r.import_id = i.id AND r.applied = false AND r.status IN ('ready','new_product')
+         )
+       LIMIT 1
+    `) as unknown as { rows?: { id: number }[] };
+    expect(result.rows ?? []).toEqual([]);
+  });
+});
