@@ -1,6 +1,7 @@
 "use client";
 import { useState, useEffect, useRef } from "react";
 import Link from "next/link";
+import { isStaffRole } from "@/lib/roles";
 import { useRouter } from "next/navigation";
 import Logo from "@/components/Logo";
 
@@ -84,7 +85,7 @@ export default function Header() {
             <Link href="/pagina/sobre-nos" className="hover:text-white transition">Sobre Nós</Link>
             <Link href="/smart-shopping" className="hover:text-white transition">Smart Shopping</Link>
             <Link href="/configurador" className="hover:text-white transition">Configurador PC</Link>
-            {user?.role === "admin" && <Link href="/admin" className="text-brand-green hover:text-white transition">⚙️ Backoffice</Link>}
+            {isStaffRole(user?.role) && <Link href="/admin" className="text-brand-green hover:text-white transition">⚙️ Backoffice</Link>}
           </div>
         </div>
       </div>
@@ -166,6 +167,9 @@ export default function Header() {
                 {user ? (
                   <>
                     <div className="px-4 py-2 border-b text-sm text-slate-500">{user.name}</div>
+                    {isStaffRole(user.role) && (
+                      <Link href="/admin" className="block px-4 py-2 text-sm font-medium text-sky-700 hover:bg-sky-50 border-b" onClick={() => setShowUserMenu(false)}>⚙️ Backoffice</Link>
+                    )}
                     <Link href="/conta" className="block px-4 py-2 text-sm text-slate-700 hover:bg-slate-50" onClick={() => setShowUserMenu(false)}>A Minha Conta</Link>
                     <Link href="/conta?tab=orders" className="block px-4 py-2 text-sm text-slate-700 hover:bg-slate-50" onClick={() => setShowUserMenu(false)}>Encomendas</Link>
                     <Link href="/conta?tab=wishlist" className="block px-4 py-2 text-sm text-slate-700 hover:bg-slate-50" onClick={() => setShowUserMenu(false)}>Favoritos</Link>

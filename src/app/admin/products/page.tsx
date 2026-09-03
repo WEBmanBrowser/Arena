@@ -2,6 +2,38 @@
 import { useState, useEffect, useCallback } from "react";
 import BulkPriceModal from "@/components/admin/BulkPriceModal";
 import ProductImageManager from "@/components/admin/ProductImageManager";
+import ProductSupplierManager from "@/components/admin/ProductSupplierManager";
+
+const TABS = [
+  { id: "geral" as const, label: "Geral", requiresSaved: false },
+  { id: "precos" as const, label: "Preços", requiresSaved: false },
+  { id: "stock" as const, label: "Stock", requiresSaved: false },
+  { id: "conteudo" as const, label: "Conteúdo", requiresSaved: false },
+  { id: "imagens" as const, label: "Imagens", requiresSaved: true },
+  { id: "fornecedores" as const, label: "Fornecedores", requiresSaved: true },
+];
+
+/** Format a number as euros in pt-PT. */
+const eur = (v: number): string => v.toLocaleString("pt-PT", { style: "currency", currency: "EUR" });
+
+/**
+ * Display-only margin calculation.
+ *
+ * Prices are stored VAT-inclusive, so the net price is derived by removing the
+ * VAT rate before comparing against cost. This is presentation logic only: it
+ * never writes anything and does not touch the server-side financial model.
+ */
+function computeMargin(price: string, costPrice: string, vatRate: string) {
+  const gross = parseFloat(price);
+  const cost = parseFloat(costPrice);
+  const vat = parseFloat(vatRate);
+  if (!isFinite(gross) || !isFinite(cost) || gross <= 0 || costPrice.trim() === "") return null;
+  const rate = isFinite(vat) ? vat : 0;
+  const netPrice = gross / (1 + rate / 100);
+  const value = netPrice - cost;
+  const percent = netPrice > 0 ? (value / netPrice) * 100 : 0;
+  return { netPrice, cost, value, percent };
+}
 
 export default function AdminProductsPage() {
   const [products, setProducts] = useState<any[]>([]);
@@ -18,6 +50,8 @@ export default function AdminProductsPage() {
   const [editingProduct, setEditingProduct] = useState<any>(null);
   const [showForm, setShowForm] = useState(false);
   const [showBulkPrice, setShowBulkPrice] = useState(false);
+  const [tab, setTab] = useState<"geral" | "precos" | "stock" | "conteudo" | "imagens" | "fornecedores">("geral");
+  const [saving, setSaving] = useState(false);
   const [categories, setCategories] = useState<any[]>([]);
   const [brands, setBrands] = useState<any[]>([]);
   const [shippingClasses, setShippingClasses] = useState<any[]>([]);
@@ -55,23 +89,27 @@ export default function AdminProductsPage() {
   const openNew = () => {
     setEditingProduct(null);
     setForm({ name: "", sku: "", ean: "", price: "", comparePrice: "", costPrice: "", stock: "0", minStock: "0", categoryId: "", brandId: "", shortDescription: "", description: "", isActive: true, isFeatured: false, isService: false, allowPreorder: false, attributes: "{}", tags: "[]", vatRate: "23.00", shippingClassId: "" });
-    setShowForm(true); setError("");
+    setShowForm(true); setError(""); setTab("geral");
   };
 
   const openEdit = (p: any) => {
     setEditingProduct(p);
     setForm({ name: p.name, sku: p.sku || "", ean: p.ean || "", price: p.price, comparePrice: p.comparePrice || "", costPrice: p.costPrice || "", stock: String(p.stock), minStock: String(p.minStock), categoryId: p.categoryId ? String(p.categoryId) : "", brandId: p.brandId ? String(p.brandId) : "", shortDescription: p.shortDescription || "", description: p.description || "", isActive: p.isActive, isFeatured: p.isFeatured, isService: p.isService, allowPreorder: p.allowPreorder, attributes: JSON.stringify(p.attributes || {}), tags: JSON.stringify(p.tags || []), vatRate: p.vatRate || "23.00", shippingClassId: p.shippingClassId ? String(p.shippingClassId) : "" });
-    setShowForm(true); setError("");
+    setShowForm(true); setError(""); setTab("geral");
   };
 
   const saveProduct = async () => {
-    setError("");
+    setError(""); setSaving(true);
     const body: any = { ...form, stock: parseInt(form.stock), minStock: parseInt(form.minStock), categoryId: form.categoryId ? parseInt(form.categoryId) : null, brandId: form.brandId ? parseInt(form.brandId) : null, shippingClassId: form.shippingClassId ? parseInt(form.shippingClassId) : null, ean: form.ean || null, comparePrice: form.comparePrice || null, costPrice: form.costPrice || null, attributes: JSON.parse(form.attributes || "{}"), tags: JSON.parse(form.tags || "[]") };
     if (editingProduct) body.id = editingProduct.id;
     const res = await fetch("/api/admin/products", { method: editingProduct ? "PUT" : "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
     const data = await res.json();
+    setSaving(false);
     if (!res.ok) { setError(data.error || data.message || "Erro"); return; }
-    setShowForm(false); fetchProducts();
+    // Keep the modal open on create so the user can jump to Images/Suppliers,
+    // which need a persisted product id.
+    if (editingProduct) { setShowForm(false); } else if (data.product) { setEditingProduct(data.product); setTab("imagens"); }
+    fetchProducts();
   };
 
   const deleteProduct = async (id: number) => {
@@ -90,6 +128,17 @@ export default function AdminProductsPage() {
     await fetch("/api/admin/bulk", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids: selected, action }) });
     setSelected([]); fetchProducts();
   };
+
+  const margin = computeMargin(form.price, form.costPrice, form.vatRate);
+
+  // Stock status of the product currently being edited (server-authoritative values).
+  const stockState = (() => {
+    if (!editingProduct) return { available: 0, label: "—", tone: "text-slate-500", badge: "bg-slate-100 text-slate-600" };
+    const available = editingProduct.stock - editingProduct.reservedStock;
+    if (available <= 0) return { available, label: "Sem stock", tone: "text-red-600", badge: "bg-red-50 text-red-600" };
+    if (available <= editingProduct.minStock) return { available, label: "Stock baixo", tone: "text-amber-600", badge: "bg-amber-50 text-amber-700" };
+    return { available, label: "Disponível", tone: "text-green-600", badge: "bg-green-50 text-green-700" };
+  })();
 
   const u = (f: string, v: any) => setForm(o => ({ ...o, [f]: v }));
 
@@ -136,54 +185,173 @@ export default function AdminProductsPage() {
       {/* Product Form Modal */}
       {showForm && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-start justify-center overflow-y-auto py-8">
-          <div className="bg-white rounded-xl w-full max-w-2xl p-6 animate-fade-in mx-4">
-            <h3 className="font-bold text-slate-800 mb-4">{editingProduct ? "Editar Produto" : "Novo Produto"}</h3>
-            {error && <p className="text-sm text-red-500 mb-3 p-2 bg-red-50 rounded">{error}</p>}
-            <div className="space-y-3 max-h-[70vh] overflow-y-auto">
-              <div className="grid grid-cols-2 gap-3">
-                <div><label className="text-xs text-slate-500">Nome *</label><input value={form.name} onChange={e => u("name", e.target.value)} className="w-full border rounded px-3 py-1.5 text-sm" /></div>
-                <div><label className="text-xs text-slate-500">SKU *</label><input value={form.sku} onChange={e => u("sku", e.target.value)} className="w-full border rounded px-3 py-1.5 text-sm" /></div>
-                <div><label className="text-xs text-slate-500">EAN / GTIN</label><input value={form.ean} onChange={e => u("ean", e.target.value)} className="w-full border rounded px-3 py-1.5 text-sm" placeholder="Opcional" /></div>
-                <div><label className="text-xs text-slate-500">Preço c/ IVA *</label><input value={form.price} onChange={e => u("price", e.target.value)} className="w-full border rounded px-3 py-1.5 text-sm" /></div>
-                <div><label className="text-xs text-slate-500">Preço Anterior</label><input value={form.comparePrice} onChange={e => u("comparePrice", e.target.value)} className="w-full border rounded px-3 py-1.5 text-sm" /></div>
-                <div><label className="text-xs text-slate-500">Taxa IVA %</label><input value={form.vatRate} onChange={e => u("vatRate", e.target.value)} className="w-full border rounded px-3 py-1.5 text-sm" /></div>
-                <div><label className="text-xs text-slate-500">Preço Custo</label><input value={form.costPrice} onChange={e => u("costPrice", e.target.value)} className="w-full border rounded px-3 py-1.5 text-sm" /></div>
-                <div><label className="text-xs text-slate-500">Stock</label><input type="number" value={form.stock} onChange={e => u("stock", e.target.value)} className="w-full border rounded px-3 py-1.5 text-sm" /></div>
-                <div><label className="text-xs text-slate-500">Stock Mínimo</label><input type="number" value={form.minStock} onChange={e => u("minStock", e.target.value)} className="w-full border rounded px-3 py-1.5 text-sm" /></div>
-                <div>
-                  <label className="text-xs text-slate-500">Marca</label>
-                  <select value={form.brandId} onChange={e => u("brandId", e.target.value)} className="w-full border rounded px-3 py-1.5 text-sm">
-                    <option value="">Selecionar</option>
-                    {brands.map((b: any) => <option key={b.id} value={b.id}>{b.name}</option>)}
-                  </select>
-                </div>
-                <div>
-                  <label className="text-xs text-slate-500">Categoria</label>
-                  <select value={form.categoryId} onChange={e => u("categoryId", e.target.value)} className="w-full border rounded px-3 py-1.5 text-sm">
-                    <option value="">Selecionar</option>
-                    {categories.map((c: any) => <option key={c.id} value={c.id}>{c.parentId ? "— " : ""}{c.name}</option>)}
-                  </select>
-                </div>
-                <div>
-                  <label className="text-xs text-slate-500">Classe de envio</label>
-                  <select value={form.shippingClassId} onChange={e => u("shippingClassId", e.target.value)} className="w-full border rounded px-3 py-1.5 text-sm">
-                    <option value="">Pequeno (padrão)</option>
-                    {shippingClasses.map((c: any) => <option key={c.id} value={c.id} disabled={!c.isActive}>{c.displayName} — {(c.rateCents / 100).toFixed(2)} €{!c.isActive ? " (inativa)" : ""}</option>)}
-                  </select>
-                </div>
-              </div>
-              <div><label className="text-xs text-slate-500">Descrição Curta</label><input value={form.shortDescription} onChange={e => u("shortDescription", e.target.value)} className="w-full border rounded px-3 py-1.5 text-sm" /></div>
-              <div><label className="text-xs text-slate-500">Descrição</label><textarea value={form.description} onChange={e => u("description", e.target.value)} className="w-full border rounded px-3 py-1.5 text-sm" rows={3} /></div>
-              <div className="flex flex-wrap gap-4">
-                <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={form.isActive} onChange={e => u("isActive", e.target.checked)} /> Ativo</label>
-                <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={form.isFeatured} onChange={e => u("isFeatured", e.target.checked)} /> Destaque</label>
-                <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={form.isService} onChange={e => u("isService", e.target.checked)} /> Serviço</label>
+          <div className="bg-white rounded-xl w-full max-w-4xl mx-4 animate-fade-in flex flex-col max-h-[88vh]">
+            {/* Header */}
+            <div className="px-6 pt-5 pb-3 border-b">
+              <h3 className="font-bold text-slate-800 text-lg">{editingProduct ? "Editar Produto" : "Novo Produto"}</h3>
+              {editingProduct && <p className="text-xs text-slate-500 mt-0.5">{editingProduct.name}</p>}
+            </div>
+
+            {/* Tabs */}
+            <div className="px-6 border-b overflow-x-auto">
+              <div className="flex gap-1 -mb-px">
+                {TABS.map(t => {
+                  const locked = t.requiresSaved && !editingProduct;
+                  return (
+                    <button
+                      key={t.id}
+                      type="button"
+                      onClick={() => !locked && setTab(t.id)}
+                      disabled={locked}
+                      title={locked ? "Guarde o produto primeiro" : undefined}
+                      className={`px-3 py-2 text-sm whitespace-nowrap border-b-2 transition ${
+                        tab === t.id
+                          ? "border-sky-600 text-sky-700 font-medium"
+                          : locked
+                            ? "border-transparent text-slate-300 cursor-not-allowed"
+                            : "border-transparent text-slate-500 hover:text-slate-800"
+                      }`}
+                    >
+                      {t.label}
+                    </button>
+                  );
+                })}
               </div>
             </div>
-            <div className="flex gap-3 mt-4 pt-4 border-t">
-              <button onClick={() => setShowForm(false)} className="px-4 py-2 border rounded-lg text-sm text-slate-600 hover:bg-slate-50">Cancelar</button>
-              <button onClick={saveProduct} className="px-4 py-2 bg-sky-600 text-white rounded-lg text-sm font-medium hover:bg-sky-700">Guardar</button>
-            {editingProduct && <ProductImageManager productId={editingProduct.id} />}
+
+            {/* Body */}
+            <div className="px-6 py-4 overflow-y-auto flex-1">
+              {error && <p className="text-sm text-red-600 mb-3 p-2 bg-red-50 border border-red-200 rounded">{error}</p>}
+
+              {/* ─── GERAL ─── */}
+              {tab === "geral" && (
+                <div className="grid sm:grid-cols-2 gap-3">
+                  <div className="sm:col-span-2"><label className="text-xs text-slate-500">Nome *</label><input value={form.name} onChange={e => u("name", e.target.value)} className="w-full border rounded px-3 py-1.5 text-sm" /></div>
+                  <div><label className="text-xs text-slate-500">SKU *</label><input value={form.sku} onChange={e => u("sku", e.target.value)} className="w-full border rounded px-3 py-1.5 text-sm" /></div>
+                  <div><label className="text-xs text-slate-500">EAN / GTIN</label><input value={form.ean} onChange={e => u("ean", e.target.value)} className="w-full border rounded px-3 py-1.5 text-sm" placeholder="Opcional" /></div>
+                  <div>
+                    <label className="text-xs text-slate-500">Marca</label>
+                    <select value={form.brandId} onChange={e => u("brandId", e.target.value)} className="w-full border rounded px-3 py-1.5 text-sm">
+                      <option value="">Selecionar</option>
+                      {brands.map((b: any) => <option key={b.id} value={b.id}>{b.name}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-xs text-slate-500">Categoria</label>
+                    <select value={form.categoryId} onChange={e => u("categoryId", e.target.value)} className="w-full border rounded px-3 py-1.5 text-sm">
+                      <option value="">Selecionar</option>
+                      {categories.map((c: any) => <option key={c.id} value={c.id}>{c.parentId ? "— " : ""}{c.name}</option>)}
+                    </select>
+                  </div>
+                  <div className="sm:col-span-2">
+                    <label className="text-xs text-slate-500">Classe de envio</label>
+                    <select value={form.shippingClassId} onChange={e => u("shippingClassId", e.target.value)} className="w-full border rounded px-3 py-1.5 text-sm">
+                      <option value="">Pequeno (padrão)</option>
+                      {shippingClasses.map((c: any) => <option key={c.id} value={c.id} disabled={!c.isActive}>{c.displayName} — {(c.rateCents / 100).toFixed(2)} €{!c.isActive ? " (inativa)" : ""}</option>)}
+                    </select>
+                  </div>
+                  <div className="sm:col-span-2 border-t pt-3">
+                    <p className="text-xs text-slate-500 mb-2">Estado</p>
+                    <div className="flex flex-wrap gap-4">
+                      <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={form.isActive} onChange={e => u("isActive", e.target.checked)} /> Ativo</label>
+                      <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={form.isFeatured} onChange={e => u("isFeatured", e.target.checked)} /> Destaque</label>
+                      <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={form.isService} onChange={e => u("isService", e.target.checked)} /> Serviço</label>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* ─── PREÇOS ─── */}
+              {tab === "precos" && (
+                <div className="space-y-4">
+                  <div className="grid sm:grid-cols-2 gap-3">
+                    <div><label className="text-xs text-slate-500">Preço de venda c/ IVA (€) *</label><input value={form.price} onChange={e => u("price", e.target.value)} inputMode="decimal" className="w-full border rounded px-3 py-1.5 text-sm" /></div>
+                    <div><label className="text-xs text-slate-500">Preço anterior (€)</label><input value={form.comparePrice} onChange={e => u("comparePrice", e.target.value)} inputMode="decimal" className="w-full border rounded px-3 py-1.5 text-sm" placeholder="Opcional" /></div>
+                    <div><label className="text-xs text-slate-500">Preço de custo (€)</label><input value={form.costPrice} onChange={e => u("costPrice", e.target.value)} inputMode="decimal" className="w-full border rounded px-3 py-1.5 text-sm" placeholder="Opcional" /></div>
+                    <div><label className="text-xs text-slate-500">Taxa de IVA (%)</label><input value={form.vatRate} onChange={e => u("vatRate", e.target.value)} inputMode="decimal" className="w-full border rounded px-3 py-1.5 text-sm" /></div>
+                  </div>
+
+                  {/* Margin — display only */}
+                  <div className="border rounded-lg p-4 bg-slate-50">
+                    <div className="flex items-center justify-between mb-2">
+                      <h4 className="text-sm font-medium text-slate-800">Margem estimada</h4>
+                      <span className="text-[10px] text-slate-500 uppercase tracking-wide">Apenas indicativo</span>
+                    </div>
+                    {margin === null ? (
+                      <p className="text-sm text-slate-400">Preencha o preço de venda e o preço de custo para calcular a margem.</p>
+                    ) : (
+                      <>
+                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                          <div><p className="text-[11px] text-slate-500">Venda s/ IVA</p><p className="text-sm font-medium text-slate-800">{eur(margin.netPrice)}</p></div>
+                          <div><p className="text-[11px] text-slate-500">Custo</p><p className="text-sm font-medium text-slate-800">{eur(margin.cost)}</p></div>
+                          <div><p className="text-[11px] text-slate-500">Margem (€)</p><p className={`text-sm font-bold ${margin.value >= 0 ? "text-green-600" : "text-red-600"}`}>{eur(margin.value)}</p></div>
+                          <div><p className="text-[11px] text-slate-500">Margem (%)</p><p className={`text-sm font-bold ${margin.value >= 0 ? "text-green-600" : "text-red-600"}`}>{margin.percent.toFixed(1)}%</p></div>
+                        </div>
+                        {margin.value < 0 && <p className="text-xs text-red-600 mt-2">⚠️ O preço de custo é superior ao preço de venda sem IVA.</p>}
+                      </>
+                    )}
+                    <p className="text-[11px] text-slate-500 mt-3">
+                      Cálculo de interface: margem = (preço c/ IVA ÷ (1 + IVA/100)) − custo. Não altera regras financeiras nem valores gravados.
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {/* ─── STOCK ─── */}
+              {tab === "stock" && (
+                <div className="space-y-4">
+                  <div className="grid sm:grid-cols-2 gap-3">
+                    <div><label className="text-xs text-slate-500">Stock físico</label><input type="number" value={form.stock} onChange={e => u("stock", e.target.value)} className="w-full border rounded px-3 py-1.5 text-sm" /></div>
+                    <div><label className="text-xs text-slate-500">Stock mínimo</label><input type="number" value={form.minStock} onChange={e => u("minStock", e.target.value)} className="w-full border rounded px-3 py-1.5 text-sm" /></div>
+                  </div>
+                  {editingProduct ? (
+                    <div className="border rounded-lg p-4 bg-slate-50">
+                      <h4 className="text-sm font-medium text-slate-800 mb-3">Situação atual</h4>
+                      <div className="grid grid-cols-3 gap-3 mb-3">
+                        <div><p className="text-[11px] text-slate-500">Físico</p><p className="text-sm font-medium">{editingProduct.stock}</p></div>
+                        <div><p className="text-[11px] text-slate-500">Reservado</p><p className="text-sm font-medium text-amber-600">{editingProduct.reservedStock}</p></div>
+                        <div><p className="text-[11px] text-slate-500">Disponível</p><p className={`text-sm font-bold ${stockState.tone}`}>{stockState.available}</p></div>
+                      </div>
+                      <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${stockState.badge}`}>{stockState.label}</span>
+                      <p className="text-[11px] text-slate-500 mt-3">
+                        Reservado e disponível são calculados pelo servidor e não podem ser editados aqui.
+                      </p>
+                      <a href="/admin/inventory" className="inline-block mt-2 text-xs text-sky-600 hover:text-sky-800 font-medium">
+                        Ver movimentos de inventário →
+                      </a>
+                    </div>
+                  ) : (
+                    <p className="text-sm text-slate-400">O stock reservado e disponível fica visível após guardar o produto.</p>
+                  )}
+                </div>
+              )}
+
+              {/* ─── CONTEÚDO ─── */}
+              {tab === "conteudo" && (
+                <div className="space-y-3">
+                  <div><label className="text-xs text-slate-500">Descrição curta</label><input value={form.shortDescription} onChange={e => u("shortDescription", e.target.value)} className="w-full border rounded px-3 py-1.5 text-sm" /></div>
+                  <div><label className="text-xs text-slate-500">Descrição completa</label><textarea value={form.description} onChange={e => u("description", e.target.value)} className="w-full border rounded px-3 py-1.5 text-sm" rows={10} /></div>
+                </div>
+              )}
+
+              {/* ─── IMAGENS ─── */}
+              {tab === "imagens" && editingProduct && <ProductImageManager productId={editingProduct.id} />}
+
+              {/* ─── FORNECEDORES ─── */}
+              {tab === "fornecedores" && editingProduct && <ProductSupplierManager productId={editingProduct.id} />}
+            </div>
+
+            {/* Footer */}
+            <div className="px-6 py-4 border-t flex items-center justify-between gap-3">
+              <p className="text-xs text-slate-400">
+                {tab === "imagens" || tab === "fornecedores" ? "As alterações desta secção são guardadas automaticamente." : "Campos com * são obrigatórios."}
+              </p>
+              <div className="flex gap-3">
+                <button type="button" onClick={() => setShowForm(false)} className="px-4 py-2 border rounded-lg text-sm text-slate-600 hover:bg-slate-50">Fechar</button>
+                <button type="button" onClick={saveProduct} disabled={saving} className="px-4 py-2 bg-sky-600 text-white rounded-lg text-sm font-medium hover:bg-sky-700 disabled:opacity-50">
+                  {saving ? "A guardar…" : "Guardar"}
+                </button>
+              </div>
             </div>
           </div>
         </div>

@@ -27,7 +27,9 @@ export default function BulkPriceModal({ selectedIds, filterMode, filters, onClo
       body: JSON.stringify({ action: "price_update", mode: "preview", target, operation, value: numVal }) });
     const data = await res.json();
     if (!res.ok) { setError(data.error || data.message || "Erro"); setLoading(false); return; }
-    setPreview(data.preview); setToken(data.previewToken); setCount(data.productCount);
+    // The API returns { results, previewToken, productCount } — `results` is the
+    // authoritative server-side calculation. Never recompute prices in the browser.
+    setPreview(data.results || []); setToken(data.previewToken); setCount(data.productCount ?? (data.results || []).length);
     setStep(3); setLoading(false);
   };
 
@@ -37,6 +39,8 @@ export default function BulkPriceModal({ selectedIds, filterMode, filters, onClo
       body: JSON.stringify({ action: "price_update", mode: "apply", previewToken: token }) });
     const data = await res.json();
     if (!res.ok) { setError(data.error === "BULK_PREVIEW_STALE" ? "Alguns preços foram alterados desde a pré-visualização. Gere uma nova." : data.error === "BULK_PREVIEW_EXPIRED" ? "Esta pré-visualização expirou. Gere uma nova." : data.error || "Erro"); setStep(3); setLoading(false); return; }
+    // Trust the server's `updated` count rather than the preview count.
+    if (typeof data.updated === "number") setCount(data.updated);
     setStep(4); setLoading(false);
   };
 
@@ -55,6 +59,10 @@ export default function BulkPriceModal({ selectedIds, filterMode, filters, onClo
         {step === 1 && (
           <div className="space-y-4">
             <p className="text-sm text-slate-600">{filterMode ? `Aplicar aos resultados filtrados` : `${selectedIds.length} produto(s) selecionado(s)`}</p>
+            <div className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-3 space-y-1">
+              <p className="font-medium">Esta operação altera apenas o Preço de venda (c/ IVA).</p>
+              <p>Não altera o preço de custo, a margem, a taxa de IVA nem o preço anterior. Todos os valores são calculados no servidor.</p>
+            </div>
             <button onClick={() => setStep(2)} className="px-4 py-2 bg-sky-600 text-white rounded-lg text-sm font-medium">Continuar →</button>
           </div>
         )}
@@ -63,7 +71,7 @@ export default function BulkPriceModal({ selectedIds, filterMode, filters, onClo
         {step === 2 && (
           <div className="space-y-4">
             <div>
-              <label className="text-xs text-slate-500 block mb-1">Tipo de alteração</label>
+              <label className="text-xs text-slate-500 block mb-1">Tipo de alteração ao Preço de venda (c/ IVA)</label>
               <select value={operation} onChange={e => { setOperation(e.target.value); invalidatePreview(); }} className="w-full border rounded-lg px-3 py-2 text-sm">
                 <option value="percent_increase">Aumentar percentagem</option>
                 <option value="percent_decrease">Diminuir percentagem</option>
@@ -95,7 +103,7 @@ export default function BulkPriceModal({ selectedIds, filterMode, filters, onClo
             {error && <p className="text-sm text-red-500 p-2 bg-red-50 rounded">{error}</p>}
             <div className="max-h-64 overflow-y-auto border rounded-lg">
               <table className="w-full text-xs">
-                <thead className="bg-slate-50 sticky top-0"><tr><th className="p-2 text-left">Produto</th><th className="p-2 text-left">SKU</th><th className="p-2 text-right">Atual</th><th className="p-2 text-right">Novo</th><th className="p-2 text-right">Diferença</th></tr></thead>
+                <thead className="bg-slate-50 sticky top-0"><tr><th className="p-2 text-left">Produto</th><th className="p-2 text-left">SKU</th><th className="p-2 text-right">Preço atual</th><th className="p-2 text-right">Preço novo</th><th className="p-2 text-right">Diferença</th></tr></thead>
                 <tbody>
                   {preview.map((r: any) => (
                     <tr key={r.productId} className="border-t"><td className="p-2 truncate max-w-32">{r.name}</td><td className="p-2 text-slate-500">{r.sku}</td><td className="p-2 text-right">{fmt(r.currentPrice)}</td><td className="p-2 text-right font-medium">{fmt(r.newPrice)}</td><td className={`p-2 text-right ${r.diffCents >= 0 ? "text-green-600" : "text-red-600"}`}>{r.diffCents >= 0 ? "+" : ""}{(r.diffCents / 100).toFixed(2)}€</td></tr>
