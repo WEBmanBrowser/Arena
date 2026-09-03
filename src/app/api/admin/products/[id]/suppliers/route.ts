@@ -8,8 +8,26 @@ import { validate, createProductSupplierSchema, updateProductSupplierSchema } fr
 import { executeProductSupplierDelete } from "@/lib/services/admin-operations";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 
+/**
+ * Collect the message of an error and of its nested causes.
+ *
+ * The driver wraps constraint violations, so the PostgreSQL detail
+ * ("duplicate key value violates unique constraint ...") is only present on
+ * `error.cause`. Matching just `error.message` silently missed every unique
+ * violation and returned 500 instead of a 409.
+ */
+function errorMessageChain(e: unknown): string {
+  const parts: string[] = [];
+  let current: unknown = e;
+  for (let depth = 0; depth < 5 && current instanceof Error; depth += 1) {
+    parts.push(current.message);
+    current = (current as Error).cause;
+  }
+  return parts.join(" | ");
+}
+
 function catchPSViolation(e: unknown): NextResponse | null {
-  const msg = e instanceof Error ? e.message : "";
+  const msg = errorMessageChain(e);
   if (msg.includes("ps_product_supplier_unique")) return NextResponse.json({ error: "PRODUCT_SUPPLIER_ALREADY_EXISTS" }, { status: 409 });
   if (msg.includes("ps_preferred_unique")) return NextResponse.json({ error: "PREFERRED_SUPPLIER_CONFLICT" }, { status: 409 });
   return null;

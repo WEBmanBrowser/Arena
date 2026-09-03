@@ -2,6 +2,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import Link from "next/link";
+import { isStaffRole } from "@/lib/roles";
 
 interface UserInfo {
   id: number;
@@ -156,7 +157,13 @@ export default function ContaClient() {
     const res = await fetch("/api/auth/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(loginForm) });
     const data = await res.json();
     if (data.error) setAuthError(data.error);
-    else { setUser(data.user); router.push("/conta"); }
+    else {
+      setUser(data.user);
+      // Staff-level users (staff/manager/admin) go straight to the backoffice.
+      // Customers keep the existing behaviour. /conta stays reachable for
+      // everyone through the header menu.
+      router.push(isStaffRole(data.user?.role) ? "/admin" : "/conta");
+    }
   };
 
   const handleRegister = async (e: React.FormEvent) => {

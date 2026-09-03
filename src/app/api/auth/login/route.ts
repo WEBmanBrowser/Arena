@@ -18,7 +18,20 @@ export async function POST(req: NextRequest) {
     if (!email || !password) {
       return NextResponse.json({ error: "Email e password são obrigatórios" }, { status: 400 });
     }
-    const [user] = await db.select().from(users).where(eq(users.email, email)).limit(1);
+    // Normalize the email exactly like admin-bootstrap does (trim + lowercase),
+    // so an account created by the CLI can always be matched at login.
+    // Public error messages are unchanged and no guard is relaxed.
+    const normalizedEmail = typeof email === "string" ? email.trim().toLowerCase() : "";
+    if (!normalizedEmail) {
+      return NextResponse.json({ error: "Email e password são obrigatórios" }, { status: 400 });
+    }
+    let [user] = await db.select().from(users).where(eq(users.email, normalizedEmail)).limit(1);
+    // Backwards compatibility: historical rows may have been stored with the
+    // raw (non-normalized) casing by the register route. Fall back to an exact
+    // match so existing accounts keep working.
+    if (!user && email !== normalizedEmail) {
+      [user] = await db.select().from(users).where(eq(users.email, email)).limit(1);
+    }
     if (!user || !user.isActive) {
       return NextResponse.json({ error: "Credenciais inválidas" }, { status: 401 });
     }
