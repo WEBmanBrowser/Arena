@@ -10,6 +10,7 @@ const navItems = [
   { href: "/admin/categories", label: "Categorias", icon: "📁" },
   { href: "/admin/brands", label: "Marcas", icon: "🏷️" },
   { href: "/admin/inventory", label: "Inventário", icon: "📋" },
+  { href: "/admin/pricing", label: "Preços automáticos", icon: "💶" },
   { href: "/admin/suppliers", label: "Fornecedores", icon: "🏭" },
   { href: "/admin/import", label: "Importar/Exportar", icon: "📥" },
   { href: "/admin/orders", label: "Encomendas", icon: "🧾" },
