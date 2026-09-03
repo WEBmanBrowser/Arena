@@ -2,6 +2,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
+import Logo from "@/components/Logo";
 
 const navItems = [
   { href: "/admin", label: "Dashboard", icon: "📊" },
@@ -46,12 +47,9 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
       {/* Sidebar */}
       <aside className={`fixed lg:static inset-y-0 left-0 w-56 bg-slate-900 z-50 transform transition-transform lg:transform-none ${sidebarOpen ? "translate-x-0" : "-translate-x-full lg:translate-x-0"}`}>
         <div className="p-4 border-b border-slate-800">
-          <Link href="/" className="flex items-center gap-2">
-            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-lime-400 to-sky-500 flex items-center justify-center font-black text-white text-xs">MD</div>
-            <div>
-              <p className="text-white font-bold text-xs">Backoffice</p>
-              <p className="text-[10px] text-slate-500">MD Tech Solutions</p>
-            </div>
+          <Link href="/" className="block" aria-label="MDTech Solutions — página inicial">
+            <Logo height={30} />
+            <p className="text-white font-bold text-xs mt-2">Backoffice</p>
           </Link>
         </div>
         <nav className="p-2 space-y-0.5">

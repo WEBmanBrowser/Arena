@@ -2,6 +2,7 @@
 import { useState, useEffect, useRef } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import Logo from "@/components/Logo";
 
 interface CartItem {
   productId: number;
@@ -91,12 +92,10 @@ export default function Header() {
       {/* Main header */}
       <div className="max-w-7xl mx-auto px-4 flex items-center gap-4 h-16">
         {/* Logo */}
-        <Link href="/" className="shrink-0 flex items-center gap-2">
-          <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-lime-400 to-sky-500 flex items-center justify-center font-black text-white text-lg">MD</div>
-          <div className="hidden sm:block">
-            <div className="text-white font-bold text-sm leading-none">MD Tech Solutions</div>
-            <div className="text-[10px] text-slate-400 leading-none mt-0.5">Reparação Rápida. Soluções Completas.</div>
-          </div>
+        <Link href="/" className="shrink-0 flex items-center" aria-label="MDTech Solutions — página inicial">
+          {/* Logótipo oficial: pequeno em mobile, maior a partir de sm */}
+          <Logo height={28} priority className="sm:hidden" />
+          <Logo height={40} priority className="hidden sm:block" />
         </Link>
 
         {/* Search */}
