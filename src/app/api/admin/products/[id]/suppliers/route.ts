@@ -6,6 +6,7 @@ import { getCurrentUser, isStaff, isManager } from "@/lib/auth";
 import { createAuditLog } from "@/lib/audit";
 import { validate, createProductSupplierSchema, updateProductSupplierSchema } from "@/lib/validation";
 import { executeProductSupplierDelete } from "@/lib/services/admin-operations";
+import { recalculateProductPrice, auditRecalculation, type PriceComputation } from "@/lib/services/pricing-engine-service";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 
 /**
@@ -33,14 +34,21 @@ function catchPSViolation(e: unknown): NextResponse | null {
   return null;
 }
 
-/** Sync products.costPrice from current preferred supplier. Uses typed db parameter. */
-async function syncProductCost(txDb: NodePgDatabase, productId: number) {
+/**
+ * Sync products.costPrice from current preferred supplier, then let the C.1
+ * pricing engine recalculate the selling price IN THE SAME TRANSACTION, so a
+ * product is never left with a new cost and a stale price.
+ *
+ * The engine itself refuses to touch products in manual mode.
+ */
+async function syncProductCost(txDb: NodePgDatabase, productId: number): Promise<PriceComputation | null> {
   const [preferred] = await txDb.select({ costPrice: productSuppliers.costPrice })
     .from(productSuppliers)
     .where(and(eq(productSuppliers.productId, productId), eq(productSuppliers.isPreferred, true)))
     .limit(1);
   const newCost = preferred ? preferred.costPrice : null;
   await txDb.update(products).set({ costPrice: newCost, updatedAt: new Date() }).where(eq(products.id, productId));
+  return recalculateProductPrice(productId, { database: txDb });
 }
 
 export async function GET(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
@@ -74,6 +82,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     ? parseFloat(String(d.costPrice)).toFixed(2)
     : null;
 
+  let priceResult: PriceComputation | null = null;
   try {
     await db.transaction(async (tx) => {
       if (isPreferred) {
@@ -87,8 +96,9 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         leadTimeDays: d.leadTimeDays ?? null,
         isPreferred,
       });
-      await syncProductCost(tx as unknown as NodePgDatabase, productId);
+      priceResult = await syncProductCost(tx as unknown as NodePgDatabase, productId);
     });
+    if (priceResult) await auditRecalculation(priceResult, user.id, "supplier_cost_changed");
     await createAuditLog({ userId: user.id, action: "product_supplier.created", entity: "product_supplier", details: { productId, supplierId: d.supplierId, isPreferred } });
     return NextResponse.json({ ok: true }, { status: 201 });
   } catch (e) {
@@ -110,6 +120,7 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
   if (!v.success) return NextResponse.json({ error: "VALIDATION_ERROR", details: v.error }, { status: 400 });
   const d = v.data;
 
+  let priceResult: PriceComputation | null = null;
   try {
     await db.transaction(async (tx) => {
       const [current] = await tx.select().from(productSuppliers).where(eq(productSuppliers.id, d.psId)).limit(1);
@@ -139,8 +150,9 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
         isPreferred: newPreferred, updatedAt: new Date(),
       }).where(eq(productSuppliers.id, d.psId));
 
-      await syncProductCost(tx as unknown as NodePgDatabase, productId);
+      priceResult = await syncProductCost(tx as unknown as NodePgDatabase, productId);
     });
+    if (priceResult) await auditRecalculation(priceResult, user.id, "supplier_cost_changed");
     await createAuditLog({ userId: user.id, action: "product_supplier.updated", entity: "product_supplier", entityId: d.psId });
     return NextResponse.json({ ok: true });
   } catch (e) {

@@ -5,6 +5,7 @@
 import { applyBulkPricing } from "./bulk-pricing-service";
 import { updateAlt, deleteImage } from "./product-image-service";
 import { deleteProductSupplier } from "./product-supplier-service";
+import { auditRecalculation } from "./pricing-engine-service";
 import { createAuditLog } from "@/lib/audit";
 import type { StorageProvider } from "@/lib/storage/types";
 
@@ -57,5 +58,7 @@ export async function executeProductSupplierDelete(actorId: number, productId: n
     entityId: psId,
     details: { productId },
   });
+  // C.1: removing a supplier can change the cost and therefore the price.
+  if (result.priceResult) await auditRecalculation(result.priceResult, actorId, "supplier_removed");
   return result;
 }

@@ -122,9 +122,21 @@ export const products = pgTable("products", {
   metaDescription: text("meta_description"),
   viewCount: integer("view_count").notNull().default(0),
   soldCount: integer("sold_count").notNull().default(0),
+  // ── C.1: automatic pricing engine ──
+  // 'auto'   → price is derived from cost + the applicable pricing rule.
+  // 'manual' → price is owned by a human; the engine must never overwrite it
+  //            (cost/stock may still be synced by imports).
+  priceMode: varchar("price_mode", { length: 10 }).notNull().default("auto"),
+  // Diagnostics only: which rule produced the current automatic price and when.
+  // Nullable and ON DELETE SET NULL so deleting a rule never blocks or rewrites
+  // a price.
+  priceRuleId: integer("price_rule_id"),
+  priceCalculatedAt: timestamp("price_calculated_at"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
 }, (t) => [
+  index("products_price_mode_idx").on(t.priceMode),
+  check("products_price_mode_valid", sql`${t.priceMode} IN ('auto','manual')`),
   index("products_slug_idx").on(t.slug),
   index("products_category_idx").on(t.categoryId),
   index("products_brand_idx").on(t.brandId),
@@ -385,6 +397,63 @@ export const productSuppliers = pgTable("product_suppliers", {
   index("ps_supplier_idx").on(t.supplierId),
   uniqueIndex("ps_product_supplier_unique").on(t.productId, t.supplierId),
   uniqueIndex("ps_preferred_unique").on(t.productId).where(sql`is_preferred = true`),
+]);
+
+// ─── C.1: PRICING RULES (automatic pricing engine) ───────
+// One row = one commercial pricing rule. The scope column says which entity
+// the rule attaches to; exactly one of the *_id columns is filled (none for
+// 'global'), enforced by a CHECK so the table cannot hold ambiguous rows.
+//
+// Resolution order (most specific wins) is documented in src/lib/pricing-rules.ts.
+// `priority` is an explicit override so a supplier rule can outrank a broad
+// category rule without changing the model.
+export const pricingRules = pgTable("pricing_rules", {
+  id: serial("id").primaryKey(),
+  scope: varchar("scope", { length: 20 }).notNull(),
+  productId: integer("product_id").references(() => products.id, { onDelete: "cascade" }),
+  categoryId: integer("category_id").references(() => categories.id, { onDelete: "cascade" }),
+  brandId: integer("brand_id").references(() => brands.id, { onDelete: "cascade" }),
+  supplierId: integer("supplier_id").references(() => suppliers.id, { onDelete: "cascade" }),
+  // 'markup_on_cost' | 'margin_on_sale' — same semantics as pricing-calculator.ts
+  method: varchar("method", { length: 20 }).notNull(),
+  ratePercent: decimal("rate_percent", { precision: 6, scale: 3 }).notNull(),
+  // 'auto' uses the configurable band policy; the others force one ending.
+  roundingPolicy: varchar("rounding_policy", { length: 10 }).notNull().default("auto"),
+  // Safety floor: if the resulting margin on sale is below this, the engine
+  // flags the product instead of silently pricing it too low.
+  minMarginPercent: decimal("min_margin_percent", { precision: 6, scale: 3 }),
+  priority: integer("priority").notNull().default(0),
+  isActive: boolean("is_active").notNull().default(true),
+  notes: text("notes"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+}, (t) => [
+  index("pricing_rules_scope_idx").on(t.scope, t.isActive),
+  index("pricing_rules_product_idx").on(t.productId),
+  index("pricing_rules_category_idx").on(t.categoryId),
+  index("pricing_rules_brand_idx").on(t.brandId),
+  index("pricing_rules_supplier_idx").on(t.supplierId),
+  // At most one ACTIVE rule per concrete target, so resolution is deterministic.
+  uniqueIndex("pricing_rules_active_product_unique").on(t.productId).where(sql`scope = 'product' AND is_active = true`),
+  uniqueIndex("pricing_rules_active_category_unique").on(t.categoryId).where(sql`scope = 'category' AND is_active = true`),
+  uniqueIndex("pricing_rules_active_brand_unique").on(t.brandId).where(sql`scope = 'brand' AND is_active = true`),
+  uniqueIndex("pricing_rules_active_supplier_unique").on(t.supplierId).where(sql`scope = 'supplier' AND is_active = true`),
+  uniqueIndex("pricing_rules_active_global_unique").on(t.scope).where(sql`scope = 'global' AND is_active = true`),
+  check("pricing_rules_scope_valid", sql`${t.scope} IN ('product','category','brand','supplier','global')`),
+  check("pricing_rules_method_valid", sql`${t.method} IN ('markup_on_cost','margin_on_sale')`),
+  check("pricing_rules_rounding_valid", sql`${t.roundingPolicy} IN ('auto','none','end_90','end_99')`),
+  check("pricing_rules_rate_non_negative", sql`${t.ratePercent} >= 0`),
+  // margin_on_sale is mathematically undefined at 100% and absurd above it.
+  check("pricing_rules_margin_below_100", sql`${t.method} <> 'margin_on_sale' OR ${t.ratePercent} < 100`),
+  check("pricing_rules_priority_non_negative", sql`${t.priority} >= 0`),
+  // Exactly one target column filled, matching the declared scope.
+  check("pricing_rules_target_matches_scope", sql`
+    (${t.scope} = 'product'  AND ${t.productId} IS NOT NULL AND ${t.categoryId} IS NULL AND ${t.brandId} IS NULL AND ${t.supplierId} IS NULL) OR
+    (${t.scope} = 'category' AND ${t.categoryId} IS NOT NULL AND ${t.productId} IS NULL AND ${t.brandId} IS NULL AND ${t.supplierId} IS NULL) OR
+    (${t.scope} = 'brand'    AND ${t.brandId} IS NOT NULL AND ${t.productId} IS NULL AND ${t.categoryId} IS NULL AND ${t.supplierId} IS NULL) OR
+    (${t.scope} = 'supplier' AND ${t.supplierId} IS NOT NULL AND ${t.productId} IS NULL AND ${t.categoryId} IS NULL AND ${t.brandId} IS NULL) OR
+    (${t.scope} = 'global'   AND ${t.productId} IS NULL AND ${t.categoryId} IS NULL AND ${t.brandId} IS NULL AND ${t.supplierId} IS NULL)
+  `),
 ]);
 
 // ─── PRODUCT IMAGES ──────────────────────────────────────
