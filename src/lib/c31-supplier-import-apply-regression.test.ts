@@ -20,6 +20,7 @@ import {
   suppliers,
   supplierImports,
   supplierImportRows,
+  users,
 } from "@/db/schema";
 import { and, eq, sql } from "drizzle-orm";
 import { applySupplierImport, previewSupplierImport } from "@/lib/services/supplier-import-service";
