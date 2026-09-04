@@ -1,29 +1,95 @@
 "use client";
 import { useState } from "react";
 import SupplierImportPanel from "@/components/admin/SupplierImportPanel";
+import { formatImportErrors, formatImportValue } from "@/lib/import-error-text";
+
+/** Tolerant body reader: a non-JSON body (proxy error page…) must not crash the flow. */
+async function readBody(res: Response): Promise<any> {
+  try {
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Human message for a failed request: the server's safe `message` when present,
+ * with its `error` code appended so the operator can report it precisely.
+ */
+function serverErrorText(body: any, fallback: string): string {
+  const message = body && typeof body.message === "string" && body.message.trim()
+    ? body.message.trim()
+    : "";
+  const code = body && typeof body.error === "string" && body.error.trim()
+    ? body.error.trim()
+    : "";
+  if (message && code) return `${message} (${code})`;
+  if (message) return message;
+  if (code) return `${fallback} (${code})`;
+  return fallback;
+}
 
 export default function AdminImportPage() {
   const [csvText, setCsvText] = useState("");
   const [importMode, setImportMode] = useState("create_update");
   const [preview, setPreview] = useState<any>(null);
   const [result, setResult] = useState<any>(null);
+  const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
   const doPreview = async () => {
     if (!csvText.trim()) return;
-    setLoading(true); setResult(null);
-    const res = await fetch("/api/admin/import", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ data: csvText, mode: "preview", importMode }) });
-    setPreview(await res.json());
-    setLoading(false);
+    setLoading(true);
+    setResult(null);
+    setError("");
+    try {
+      const res = await fetch("/api/admin/import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ data: csvText, mode: "preview", importMode }),
+      });
+      const body = await readBody(res);
+      if (!res.ok || body?.error) {
+        setPreview(null);
+        setError(serverErrorText(body, "Não foi possível processar o ficheiro."));
+        return;
+      }
+      setPreview(body);
+    } catch {
+      setPreview(null);
+      setError("Não foi possível contactar o servidor. Tente novamente.");
+    } finally {
+      setLoading(false);
+    }
   };
 
   const doExecute = async () => {
-    if (!csvText.trim()) return;
+    if (!csvText.trim() || !preview) return;
     setLoading(true);
-    const res = await fetch("/api/admin/import", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ data: csvText, mode: "execute", importMode }) });
-    setResult(await res.json());
-    setPreview(null);
-    setLoading(false);
+    setResult(null);
+    setError("");
+    try {
+      const res = await fetch("/api/admin/import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ data: csvText, mode: "execute", importMode }),
+      });
+      const body = await readBody(res);
+      if (!res.ok) {
+        // A 400 here means the file still has errors; a 500 means the server
+        // refused the run. Never show "Importação concluída" for either.
+        setPreview(null);
+        setError(serverErrorText(body, "A importação não foi executada."));
+        return;
+      }
+      setPreview(null);
+      setResult(body);
+    } catch {
+      setPreview(null);
+      setError("Não foi possível contactar o servidor. Nada foi importado.");
+    } finally {
+      setLoading(false);
+    }
   };
 
   const doExport = () => { window.open("/api/admin/export", "_blank"); };
@@ -79,7 +145,9 @@ export default function AdminImportPage() {
         </div>
       </div>
 
-      {preview?.error && <div className="bg-red-50 border border-red-200 rounded-xl p-4 mb-4 text-sm text-red-700">{preview.error}</div>}
+      {error && (
+        <div className="bg-red-50 border border-red-200 rounded-xl p-4 mb-4 text-sm text-red-700 whitespace-pre-wrap">{error}</div>
+      )}
 
       {preview?.summary && (
         <div className="bg-white border rounded-xl p-4 mb-4">
@@ -95,13 +163,17 @@ export default function AdminImportPage() {
               <thead className="bg-slate-50"><tr><th className="p-2 text-left">Linha</th><th className="p-2 text-left">SKU</th><th className="p-2 text-left">Nome</th><th className="p-2 text-left">Ação</th><th className="p-2 text-left">Alterações</th><th className="p-2 text-left">Erros</th></tr></thead>
               <tbody>
                 {preview.results?.map((r: any) => (
-                  <tr key={r.line} className="border-t">
-                    <td className="p-2">{r.line}</td>
+                  <tr key={r.row} className="border-t align-top">
+                    <td className="p-2 text-slate-400">{r.row}</td>
                     <td className="p-2 font-mono">{r.sku}</td>
                     <td className="p-2 truncate max-w-32">{r.name}</td>
                     <td className="p-2"><span className={`px-1.5 py-0.5 rounded text-xs ${r.action === "create" ? "bg-green-50 text-green-700" : r.action === "update" ? "bg-blue-50 text-blue-700" : "bg-slate-50 text-slate-500"}`}>{r.action}</span></td>
-                    <td className="p-2 text-slate-500">{r.changes ? Object.entries(r.changes).map(([k, v]: any) => `${k}: ${v.from}→${v.to}`).join(", ") : "—"}</td>
-                    <td className="p-2 text-red-500">{r.errors?.join(", ") || ""}</td>
+                    <td className="p-2 text-slate-500">
+                      {r.changes
+                        ? Object.entries(r.changes).map(([k, v]) => `${k}: ${formatImportValue(v)}`).join("; ")
+                        : "—"}
+                    </td>
+                    <td className="p-2 text-red-500 whitespace-pre-wrap">{formatImportErrors(r.errors)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -110,7 +182,7 @@ export default function AdminImportPage() {
         </div>
       )}
 
-      {result?.summary && (
+      {result?.summary && !result.error && (
         <div className="bg-green-50 border border-green-200 rounded-xl p-4">
           <h3 className="font-medium text-sm text-green-800 mb-2">✓ Importação concluída</h3>
           <p className="text-sm text-green-700">{result.summary.created} criados · {result.summary.updated} atualizados · {result.summary.errors} erros</p>

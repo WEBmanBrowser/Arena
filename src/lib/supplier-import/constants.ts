@@ -66,3 +66,20 @@ export const MDTECH_SKU_DIGITS = 6;
  * retry — never a rolled back batch of 500 rows.
  */
 export const MDTECH_SKU_ALLOC_ATTEMPTS = 20;
+
+// ─── Snapshot column ceilings ─────────────────────────────
+// supplier_import_rows mirrors these types, and a supplier file must NEVER be
+// able to fail the whole preview because one line holds a value that the
+// snapshot column cannot store. normalize.ts rejects such values per row (the
+// row becomes an error, the preview continues) instead of letting the INSERT
+// throw. These are the single source of truth for the tests that lock the
+// exact limits: values at the ceiling are accepted, one past it are not.
+
+/** Upper bound of a PostgreSQL `integer` (int4): stock and lead time columns. */
+export const SNAPSHOT_INT4_MAX = 2147483647;
+
+/**
+ * Upper bound of a PostgreSQL `numeric(10,2)` (8 integer + 2 fraction digits):
+ * the snapshot cost column.
+ */
+export const SNAPSHOT_COST_MAX = "99999999.99";

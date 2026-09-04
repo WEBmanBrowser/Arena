@@ -13,6 +13,8 @@
  *    base no heartbeat). Aqui nunca se faz aritmética de tempo no browser.
  */
 import { useCallback, useEffect, useState } from "react";
+import { formatImportErrors } from "@/lib/import-error-text";
+import { supplierImportErrorMessage } from "@/lib/supplier-import/error-messages";
 
 type PreviewLine = {
   rowNumber: number;
@@ -24,7 +26,7 @@ type PreviewLine = {
   matchType: string;
   codes?: string[];
   message: string | null;
-  issues?: { field: string; code: string; value?: string }[];
+  issues?: { field: string; code: string; value?: string; message?: string; severity?: "error" | "warning" }[];
   costPrice: string | null;
   costBefore: string | null;
   stock: number | null;
@@ -97,38 +99,21 @@ const eur = (v: string | number | null | undefined) =>
 const dt = (iso: string | null | undefined) =>
   iso ? new Date(iso).toLocaleString("pt-PT", { dateStyle: "short", timeStyle: "short" }) : "—";
 
-const MESSAGES: Record<string, string> = {
-  SUPPLIER_ID_REQUIRED: "Escolha o fornecedor a que esta lista pertence.",
-  SUPPLIER_NOT_FOUND: "Fornecedor não encontrado.",
-  SUPPLIER_INACTIVE: "O fornecedor está inativo — reative-o antes de importar a lista.",
-  CSV_EMPTY: "Ficheiro vazio.",
-  CSV_NO_DATA: "O ficheiro só tem cabeçalhos.",
-  CSV_TOO_MANY_ROWS: "Demasiadas linhas (o limite é 10.000 por ficheiro).",
-  CSV_TOO_LARGE: "Ficheiro demasiado grande (máx. 5 MB).",
-  CSV_FILE_TOO_LARGE: "Ficheiro demasiado grande (máx. 5 MB).",
-  CSV_NO_COLUMNS_MAPPED: "Nenhuma coluna reconhecida. Use SKU do fornecedor, EAN ou SKU interno.",
-  CSV_MISSING_KEY_COLUMN: "Falta uma coluna de identificação (SKU do fornecedor, EAN ou SKU interno).",
-  DUPLICATE_MAPPING_supplierSku: "Duas colunas mapeadas para o SKU do fornecedor.",
-  DUPLICATE_MAPPING_ean: "Duas colunas mapeadas para o EAN.",
-  DUPLICATE_MAPPING_costPrice: "Duas colunas mapeadas para o custo.",
-  DUPLICATE_MAPPING_stock: "Duas colunas mapeadas para o stock.",
-  DUPLICATE_MAPPING_internalSku: "Duas colunas mapeadas para o SKU interno.",
-  DUPLICATE_MAPPING_name: "Duas colunas mapeadas para o nome.",
-  DUPLICATE_MAPPING_leadTimeDays: "Duas colunas mapeadas para o prazo de entrega.",
-  PREVIEW_TOKEN_REQUIRED: "Confirme o preview antes de aplicar.",
-  PREVIEW_TOKEN_INVALID: "Token do preview inválido.",
-  PREVIEW_TOKEN_MISMATCH: "O token não corresponde a este ficheiro.",
-  PREVIEW_EXPIRED: "O preview expirou — gere um novo.",
-  IMPORT_IN_PROGRESS: "Já existe uma aplicação desta importação em curso.",
-  IMPORT_FAILED: "Importação marcada como falhada: é preciso um novo preview.",
-  IMPORT_NOT_FOUND: "Importação não encontrada.",
-  SUPPLIER_IMPORT_APPLY_FAILED: "Falha ao aplicar. Nenhum registo foi gravado a mais: pode retomar.",
-  SUPPLIER_IMPORT_PREVIEW_FAILED: "Falha ao processar o ficheiro.",
-  UNAUTHORIZED: "Sem permissões (requer gestor).",
-};
+/** Tolerant body reader: a non-JSON body must not crash the flow. */
+async function readBody(res: Response): Promise<any> {
+  try {
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
 
-const messageFor = (code: string | undefined, fallback?: string) =>
-  (code && MESSAGES[code]) || fallback || code || "Ocorreu um erro.";
+/**
+ * The server's own safe message wins; otherwise the shared API/UI table
+ * translates the code (an unmapped code is shown as-is — machine-readable,
+ * never raw internals). Never coerces the raw body.
+ */
+const messageFor = (body: any) => supplierImportErrorMessage(body?.error, body?.message);
 
 const STATUS_LABEL: Record<string, string> = {
   preview: "em preview",
@@ -191,7 +176,8 @@ export default function SupplierImportPanel() {
     (async () => {
       const res = await fetch("/api/admin/suppliers");
       if (stopped || !res.ok) return;
-      const body = await res.json();
+      const body = await readBody(res);
+      if (stopped || !body) return;
       const list = (body.suppliers ?? []) as { id: number; name: string; isActive: boolean }[];
       const firstActive = list.find((s) => s.isActive);
       if (!stopped) setSupplierOptions(list);
@@ -206,8 +192,8 @@ export default function SupplierImportPanel() {
     (async () => {
       const res = await fetch(`/api/admin/supplier-import${qs}`);
       if (stopped || !res.ok) return;
-      const body = await res.json();
-      if (!stopped) setHistory((body.imports ?? []) as HistoryItem[]);
+      const body = await readBody(res);
+      if (!stopped && body) setHistory((body.imports ?? []) as HistoryItem[]);
     })();
     return () => { stopped = true; };
   }, [supplierId, historyVersion]);
@@ -221,8 +207,9 @@ export default function SupplierImportPanel() {
     const tick = async () => {
       const res = await fetch(`/api/admin/supplier-import/${watchId}/progress`);
       if (stopped || !res.ok) return;
-      const p = (await res.json()) as Progress;
-      if (stopped) return;
+      const body = await readBody(res);
+      if (stopped || !body) return;
+      const p = body as Progress;
       setProgress(p);
       if (p.status !== "applying") setWatchId(null);
     };
@@ -255,20 +242,24 @@ export default function SupplierImportPanel() {
     if (!supplierId || !csvText.trim()) return;
     setBusy(true);
     reset();
-    const res = await fetch("/api/admin/supplier-import", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ supplierId: Number(supplierId), fileName, data: csvText }),
-    });
-    const body = await res.json();
-    if (!res.ok) {
-      setError(messageFor(body.error, body.message));
+    try {
+      const res = await fetch("/api/admin/supplier-import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ supplierId: Number(supplierId), fileName, data: csvText }),
+      });
+      const body = await readBody(res);
+      if (!res.ok) {
+        setError(messageFor(body));
+        return;
+      }
+      setPreview(body as PreviewResult);
+      refreshHistory();
+    } catch {
+      setError("Não foi possível contactar o servidor.");
+    } finally {
       setBusy(false);
-      return;
     }
-    setPreview(body as PreviewResult);
-    setBusy(false);
-    refreshHistory();
   };
 
   /** Apply the FIRST time with the signed token; resume with nothing but the id. */
@@ -276,27 +267,31 @@ export default function SupplierImportPanel() {
     setBusy(true);
     setError("");
     setOutcome(null);
-    const res = await fetch("/api/admin/supplier-import/apply", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(previewToken ? { importId, previewToken } : { importId }),
-    });
-    const body = await res.json();
-    if (!res.ok) {
-      setError(messageFor(body.error, body.message));
-      setBusy(false);
+    try {
+      const res = await fetch("/api/admin/supplier-import/apply", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(previewToken ? { importId, previewToken } : { importId }),
+      });
+      const body = await readBody(res);
+      if (!res.ok) {
+        setError(messageFor(body));
+        refreshHistory();
+        return;
+      }
+      setOutcome(body);
+      setWatchId(importId);
       refreshHistory();
-      return;
+    } catch {
+      setError("Não foi possível contactar o servidor.");
+    } finally {
+      setBusy(false);
     }
-    setOutcome(body);
-    setBusy(false);
-    setWatchId(importId);
-    refreshHistory();
   };
 
   const checkHistory = async (importId: number) => {
     const res = await fetch(`/api/admin/supplier-import/${importId}/progress`);
-    const body = res.ok ? ((await res.json()) as Progress) : null;
+    const body = res.ok ? (await readBody(res)) : null;
     setHistoryProgress((prev) => ({ ...prev, [importId]: body }));
   };
 
@@ -437,7 +432,15 @@ export default function SupplierImportPanel() {
                 </tr>
               </thead>
               <tbody>
-                {shownLines.map((l) => (
+                {shownLines.map((l) => {
+                  // Row issues rendered as readable text — code, field and
+                  // message together, never a coerced "[object Object]".
+                  const issues = l.issues ?? [];
+                  const issuesText = formatImportErrors(
+                    issues.map((i) => ({ row: l.rowNumber, code: i.code, field: i.field, message: i.message }))
+                  );
+                  const hasErrorIssues = issues.some((i) => i.severity === "error");
+                  return (
                   <tr key={l.rowNumber} className="border-t align-top">
                     <td className="p-2 text-slate-400">{l.rowNumber}</td>
                     <td className="p-2 font-mono">
@@ -448,7 +451,14 @@ export default function SupplierImportPanel() {
                       <span className={`px-1.5 py-0.5 rounded ${LINE_BADGE[l.status]}`}>
                         {l.status === "new_product" ? "novo" : l.status === "ready" ? `via ${MATCH_LABEL[l.matchType] ?? l.matchType}` : l.status}
                       </span>
-                      {l.message && <span className="block text-slate-400 mt-0.5 max-w-56">{l.message}</span>}
+                      {hasErrorIssues ? (
+                        issuesText && <span className="block text-red-600 mt-0.5 max-w-56 whitespace-pre-wrap">{issuesText}</span>
+                      ) : (
+                        <>
+                          {l.message && <span className="block text-slate-400 mt-0.5 max-w-56">{l.message}</span>}
+                          {issuesText && <span className="block text-amber-600 mt-0.5 max-w-56 whitespace-pre-wrap">{issuesText}</span>}
+                        </>
+                      )}
                     </td>
                     <td className="p-2">
                       {l.productId ? (
@@ -477,7 +487,8 @@ export default function SupplierImportPanel() {
                     </td>
                     <td className="p-2 whitespace-nowrap text-slate-600">{l.computedPrice ? eur(l.computedPrice) : "—"}</td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           </div>

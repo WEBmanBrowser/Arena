@@ -19,25 +19,36 @@ import {
   listSupplierImports,
   previewSupplierImport,
 } from "@/lib/services/supplier-import-service";
-import { SUPPLIER_IMPORT_MAX_ROWS } from "@/lib/supplier-import/constants";
+import {
+  classifyImportStorageFailure,
+  supplierImportErrorMessage,
+} from "@/lib/supplier-import/error-messages";
 
 function errorResponse(e: unknown): NextResponse {
   if (e instanceof SupplierCsvError) {
-    const message = e.code === "CSV_TOO_MANY_ROWS"
-      ? `Ficheiro com demasiadas linhas (máx. ${SUPPLIER_IMPORT_MAX_ROWS})`
-      : e.code === "CSV_EMPTY" ? "CSV vazio"
-      : e.code === "CSV_NO_DATA" ? "CSV sem linhas de dados"
-      : e.code === "CSV_MISSING_KEY_COLUMN" ? "Ficheiro sem coluna de SKU do fornecedor, EAN ou SKU interno"
-      : e.code === "CSV_NO_COLUMNS_MAPPED" ? "Nenhuma coluna reconhecida — mapeie as colunas"
-      : e.code.startsWith("DUPLICATE_MAPPING") ? "Duas colunas mapeadas para o mesmo campo"
-      : "Erro ao processar o CSV";
-    return NextResponse.json({ error: e.code, message }, { status: e.httpStatus });
+    // Canonical message from the shared API/UI table; an unrecognised code
+    // (e.g. a legacy parser message) gets the generic sentence, never the raw
+    // error text.
+    return NextResponse.json(
+      { error: e.code, message: supplierImportErrorMessage(e.code, undefined, "Erro ao processar o CSV") },
+      { status: e.httpStatus }
+    );
   }
   if (e instanceof SupplierImportError) {
-    return NextResponse.json({ error: e.code, ...(e.detail ? { message: e.detail } : {}) }, { status: e.httpStatus });
+    return NextResponse.json(
+      { error: e.code, message: supplierImportErrorMessage(e.code, e.detail) },
+      { status: e.httpStatus }
+    );
   }
+  // Unexpected database failure: the technical error is logged server-side and
+  // the browser only ever receives a classified, safe category.
   console.error("supplier import preview:", e);
-  return NextResponse.json({ error: "SUPPLIER_IMPORT_PREVIEW_FAILED" }, { status: 500 });
+  const storage = classifyImportStorageFailure(e);
+  if (storage) return NextResponse.json({ error: storage.code, message: storage.message }, { status: 500 });
+  return NextResponse.json(
+    { error: "SUPPLIER_IMPORT_PREVIEW_FAILED", message: supplierImportErrorMessage("SUPPLIER_IMPORT_PREVIEW_FAILED") },
+    { status: 500 }
+  );
 }
 
 export async function GET(req: NextRequest) {
