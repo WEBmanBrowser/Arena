@@ -26,7 +26,11 @@ import { previewRecalculation } from "@/lib/services/pricing-recalc-service";
 const TAG = "C31REG";
 
 async function cleanupPricing() {
-  await db.execute(sql`DELETE FROM product_suppliers WHERE supplier_sku LIKE ${`${TAG}-%`}`);
+  // Apaga associações antes dos produtos para evitar violação de FK.
+  await db.execute(sql`DELETE FROM product_suppliers WHERE supplier_sku LIKE ${`${TAG}-%`} OR supplier_sku LIKE ${`${TAG.toLowerCase()}-%`}`);
+  // Se ainda restarem associações para produtos criados por este teste,
+  // apaga por referência direta ao product_id.
+  await db.execute(sql`DELETE FROM product_suppliers WHERE product_id IN (SELECT id FROM products WHERE sku LIKE ${`${TAG}-%`})`);
   await db.execute(sql`DELETE FROM products WHERE sku LIKE ${`${TAG}-%`}`);
   await db.execute(sql`DELETE FROM pricing_rules WHERE notes LIKE ${`${TAG}%`}`);
 }

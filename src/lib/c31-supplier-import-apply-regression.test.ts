@@ -27,9 +27,13 @@ import { applySupplierImport, previewSupplierImport } from "@/lib/services/suppl
 const TAG = "C31A";
 
 async function cleanupSupplier() {
+  // Limpa associações antes dos produtos para evitar violação de FK.
   await db.execute(sql`DELETE FROM supplier_import_rows WHERE import_id IN (SELECT id FROM supplier_imports WHERE file_name LIKE ${`${TAG}%`})`);
   await db.execute(sql`DELETE FROM supplier_imports WHERE file_name LIKE ${`${TAG}%`}`);
-  await db.execute(sql`DELETE FROM product_suppliers WHERE supplier_sku LIKE ${`${TAG}-%`}`);
+  // Apaga associações por referência direta aos produtos criados pelo teste.
+  await db.execute(sql`DELETE FROM product_suppliers WHERE product_id IN (SELECT id FROM products WHERE sku LIKE ${`${TAG}-%`})`);
+  // Se ainda restarem associações com supplierSku do teste, apaga por LIKE.
+  await db.execute(sql`DELETE FROM product_suppliers WHERE supplier_sku LIKE ${`${TAG}-%`} OR supplier_sku LIKE ${`${TAG.toLowerCase()}-%`}`);
   await db.execute(sql`DELETE FROM products WHERE sku LIKE ${`${TAG}-%`}`);
   await db.execute(sql`DELETE FROM suppliers WHERE name LIKE ${`${TAG}%`}`);
 }
