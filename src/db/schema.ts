@@ -1044,3 +1044,17 @@ export const productInternalSkuSeq = pgSequence("product_internal_sku_seq", {
   increment: 1,
   cache: 1,
 });
+
+// ─── C.3.2: SUPPLIER IMPORT PROFILES ─────────────────────
+export const supplierImportProfiles = pgTable("supplier_import_profiles", {
+  id: serial("id").primaryKey(),
+  supplierId: integer("supplier_id").notNull().references(() => suppliers.id, { onDelete: "cascade" }),
+  mapping: jsonb("mapping").$type<Record<string, string>>().notNull().default({}),
+  delimiter: varchar("delimiter", { length: 10 }),
+  createdBy: integer("created_by").references(() => users.id),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+}, (t) => [
+  index("sip_supplier_idx").on(t.supplierId),
+  uniqueIndex("sip_supplier_unique").on(t.supplierId),
+]);
