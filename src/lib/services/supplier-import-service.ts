@@ -663,9 +663,20 @@ async function isPreferredSupplier(tx: NodePgDatabase, productId: number, suppli
 }
 
 /**
- * Upsert this supplier's own link. `isPreferred` is NEVER touched on an
- * existing link: an import list must not silently demote the supplier the
- * catalogue currently buys from.
+ * Upsert this supplier's own link.
+ *
+ * Policy:
+ * - If the association exists:
+ *   - Preserve `isPreferred = true` if already preferred.
+ *   - If `isPreferred = false` and NO other supplier is preferred for this
+ *     product (`productSuppliers.isPreferred = true` with a different
+ *     supplier), promote to `true` so the import's supplier becomes the
+ *     preferred authority.
+ *   - If another preferred supplier already exists (`isPreferred = true`
+ *     for a different supplier), keep `false` (do not override).
+ * - If the association does NOT exist:
+ *   - Create with `isPreferred = true` only when no other preferred supplier
+ *     exists for the product; otherwise `false`.
  */
 async function upsertSupplierLink(
   tx: NodePgDatabase,
@@ -678,13 +689,30 @@ async function upsertSupplierLink(
     .where(and(eq(productSuppliers.productId, productId), eq(productSuppliers.supplierId, context.supplierId)))
     .limit(1);
 
+  // Check whether there is ANY preferred supplier for this product
+  // (excluding the current association when it exists).
+  const preferredForProductQuery = existing
+    ? and(
+        eq(productSuppliers.productId, productId),
+        eq(productSuppliers.isPreferred, true),
+        sql`${productSuppliers.id} != ${existing.id}`
+      )
+    : and(eq(productSuppliers.productId, productId), eq(productSuppliers.isPreferred, true));
+
+  const [otherPreferred] = await tx.select({ id: productSuppliers.id })
+    .from(productSuppliers)
+    .where(preferredForProductQuery)
+    .limit(1);
+
   if (existing) {
     const newCost = row.cost_price ?? existing.costPrice;
+    const shouldBePreferred = existing.isPreferred ? true : !otherPreferred;
     await tx.update(productSuppliers).set({
       supplierSku: row.supplier_sku ?? existing.supplierSku,
       costPrice: newCost,
       lastCostPrice: newCost !== existing.costPrice ? existing.costPrice : existing.lastCostPrice,
       leadTimeDays: row.lead_time_days ?? existing.leadTimeDays,
+      isPreferred: shouldBePreferred,
       updatedAt: new Date(),
     }).where(eq(productSuppliers.id, existing.id));
     return;
@@ -697,7 +725,7 @@ async function upsertSupplierLink(
     costPrice: row.cost_price,
     lastCostPrice: null,
     leadTimeDays: row.lead_time_days,
-    isPreferred: true,
+    isPreferred: !otherPreferred,
   });
 }
 
