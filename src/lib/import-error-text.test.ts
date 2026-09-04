@@ -172,27 +172,35 @@ describe("supplierImportErrorMessage — shared API/UI messages", () => {
   });
 });
 
-describe("both admin import panels stop coercing arrays/objects directly", () => {
+describe("admin import surfaces never coerce arrays/objects into the DOM", () => {
   const root = path.resolve(__dirname, "..", "..");
   const read = (rel: string) => fs.readFileSync(path.join(root, rel), "utf8");
 
-  it("legacy page: uses the formatters, the real row key and no errors.join", () => {
+  it("admin import page: legacy catalogue importer removed — no raw rows left to coerce", () => {
     const page = read("src/app/admin/import/page.tsx");
-    expect(page).toContain("formatImportErrors(r.errors)");
-    expect(page).toContain("formatImportValue(v)");
+    // Only the C.3.1 supplier panel remains on the page.
+    expect(page).toContain("SupplierImportPanel");
+    expect(page).not.toContain("Importar Catálogo CSV");
+    expect(page).not.toContain("Executar Importação");
+    // The legacy page used to render rows and summary; the panel owns that now.
     expect(page).not.toMatch(/errors\??\.join\s*\(/);
-    // The API returns `row`, the table must not render `r.line`.
-    expect(page).toContain("r.row");
+    expect(page).not.toContain("r.errors");
     expect(page).not.toContain("r.line");
-    // A failed execute must never show the success banner.
-    expect(page).toMatch(/result\?\.summary && !result\.error/);
+    expect(page).not.toContain("formatImportErrors(r.errors)");
+    expect(page).not.toContain("formatImportValue(v)");
   });
 
-  it("legacy page: tolerant body reading and try/finally around loading", () => {
+  it("admin import page: no longer fetches the legacy importer; the survivor keeps readBody + try/finally", () => {
     const page = read("src/app/admin/import/page.tsx");
-    expect(page).toContain("async function readBody");
-    expect(page).toMatch(/\bfinally\b/);
-    expect(page).not.toContain("details: e.message");
+    expect(page).not.toContain("/api/admin/import");
+    expect(page).not.toContain("async function readBody");
+    expect(page).not.toMatch(/\bfinally\b/);
+    // The supplier panel keeps the tolerant reader and always clears `busy`.
+    const panel = read("src/components/admin/SupplierImportPanel.tsx");
+    expect(panel).toContain("async function readBody");
+    expect(panel).toMatch(/\bfinally\b/);
+    expect(panel).not.toContain("details: e.message");
+    expect(panel).not.toContain("r.errors?.join");
   });
 
   it("supplier panel: shows issues as text with code/field/message, server message first", () => {
