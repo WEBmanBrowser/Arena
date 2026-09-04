@@ -358,6 +358,13 @@ export default function SupplierImportPanel() {
         </div>
       </div>
 
+      <div className="mt-3 border-l-2 border-sky-300 bg-sky-50/70 rounded-r-lg px-3 py-2">
+        <p className="text-xs font-medium text-slate-700">SKU do fornecedor ≠ SKU MDTech</p>
+        <p className="text-[11px] text-slate-500 mt-0.5">
+          Quando o produto é novo e a lista não contém um SKU interno MDTech explícito, será criado automaticamente um SKU MD-xxxxxx.
+        </p>
+      </div>
+
       <p className="text-[11px] text-slate-400 mt-2">
         Colunas reconhecidas: <span className="font-mono">skuFornecedor</span>, <span className="font-mono">nome</span>/<span className="font-mono">designacao</span>,{" "}
         <span className="font-mono">custo</span>, <span className="font-mono">stock</span>, <span className="font-mono">ean</span>,{" "}
