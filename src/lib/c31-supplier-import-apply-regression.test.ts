@@ -35,6 +35,8 @@ async function cleanupSupplier() {
   await db.execute(sql`DELETE FROM product_suppliers WHERE product_id IN (SELECT id FROM products WHERE sku LIKE ${`${TAG}-%`})`);
   // Se ainda restarem associações com supplierSku do teste, apaga por LIKE.
   await db.execute(sql`DELETE FROM product_suppliers WHERE supplier_sku LIKE ${`${TAG}-%`} OR supplier_sku LIKE ${`${TAG.toLowerCase()}-%`}`);
+  // Limpa movimentos de stock antes de apagar produtos.
+  await db.execute(sql`DELETE FROM stock_movements WHERE product_id IN (SELECT id FROM products WHERE sku LIKE ${`${TAG}-%`})`);
   await db.execute(sql`DELETE FROM products WHERE sku LIKE ${`${TAG}-%`}`);
   await db.execute(sql`DELETE FROM suppliers WHERE name LIKE ${`${TAG}%`}`);
 }
