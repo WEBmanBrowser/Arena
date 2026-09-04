@@ -697,7 +697,7 @@ async function upsertSupplierLink(
     costPrice: row.cost_price,
     lastCostPrice: null,
     leadTimeDays: row.lead_time_days,
-    isPreferred: preferredForNewProduct,
+    isPreferred: true,
   });
 }
 

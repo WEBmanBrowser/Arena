@@ -10,8 +10,8 @@
  * pricing-recalc-service.ts.
  */
 import { db } from "@/db";
-import { pricingRules, products, brands, categories, suppliers } from "@/db/schema";
-import { eq, sql, desc, asc } from "drizzle-orm";
+import { pricingRules, products, brands, categories, suppliers, productSuppliers } from "@/db/schema";
+import { and, eq, sql, desc, asc } from "drizzle-orm";
 import { createAuditLog } from "@/lib/audit";
 import { SCOPE_SPECIFICITY, type RuleScope } from "@/lib/pricing-rules";
 
@@ -263,17 +263,23 @@ export async function getCatalogueCoverage(): Promise<CatalogueCoverage> {
   const hasGlobalRule = ctx.rules.some((r) => r.scope === "global" && r.isActive);
 
   // Only automatic products WITH a cost can be missing a rule.
+  // Use an explicitly qualified LEFT JOIN instead of a correlational subquery,
+  // so the supplier reference never resolves to a wrong column.
   const candidates = await db
     .select({
       id: products.id,
       categoryId: products.categoryId,
       brandId: products.brandId,
-      supplierId: sql<number | null>`(
-        select ps.supplier_id from product_suppliers ps
-        where ps.product_id = ${products.id} and ps.is_preferred = true limit 1
-      )`,
+      supplierId: productSuppliers.supplierId,
     })
     .from(products)
+    .leftJoin(
+      productSuppliers,
+      and(
+        eq(productSuppliers.productId, products.id),
+        eq(productSuppliers.isPreferred, true)
+      )
+    )
     .where(sql`${products.priceMode} = 'auto' and ${products.costPrice} is not null and ${products.costPrice}::numeric > 0`);
 
   let withoutRule = 0;
