@@ -17,7 +17,7 @@
  * can never disagree.
  */
 import { db } from "@/db";
-import { products, brands, categories, suppliers } from "@/db/schema";
+import { products, brands, categories, suppliers, productSuppliers } from "@/db/schema";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import {
   computeAutomaticPrice,
@@ -161,15 +161,25 @@ export async function previewRecalculation(target: RecalcTarget): Promise<Recalc
     return { lines: [], summary, previewToken: null, requiresDecreaseConfirmation: false };
   }
 
+  // Obtain preferred supplier for each product explicitly (no correlational
+  // subquery), so the reference is always qualified and never resolves to a
+  // wrong column.
+  const preferredLinks = await db
+    .select({ productId: productSuppliers.productId, supplierId: productSuppliers.supplierId })
+    .from(productSuppliers)
+    .where(
+      and(
+        inArray(productSuppliers.productId, productIds),
+        eq(productSuppliers.isPreferred, true)
+      )
+    );
+  const preferredSupplierMap = new Map(preferredLinks.map((l) => [l.productId, l.supplierId]));
+
   const rows = await db
     .select({
       id: products.id, name: products.name, sku: products.sku,
       price: products.price, costPrice: products.costPrice, vatRate: products.vatRate,
       categoryId: products.categoryId, brandId: products.brandId, priceMode: products.priceMode,
-      supplierId: sql<number | null>`(
-        select ps.supplier_id from product_suppliers ps
-        where ps.product_id = ${products.id} and ps.is_preferred = true limit 1
-      )`,
     })
     .from(products)
     .where(inArray(products.id, productIds));
@@ -181,7 +191,8 @@ export async function previewRecalculation(target: RecalcTarget): Promise<Recalc
   const tokenLines: RecalcTokenLine[] = [];
 
   for (const row of rows) {
-    const result = computeAutomaticPrice(row, row.supplierId ?? null, ctx.rules, ctx.categoryTree, ctx.policy);
+    const supplierId = preferredSupplierMap.get(row.id) ?? null;
+    const result = computeAutomaticPrice(row, supplierId, ctx.rules, ctx.categoryTree, ctx.policy);
     const status = statusFor(result);
 
     const diffCents = result.newPrice
