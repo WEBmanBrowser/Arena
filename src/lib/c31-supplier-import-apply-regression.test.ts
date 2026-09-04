@@ -44,7 +44,7 @@ async function cleanupSupplier() {
 beforeAll(async () => {
   await cleanupSupplier();
   // Garante registos necessários para FK (supplier_imports → users, supplier_imports → suppliers).
-  await db.insert(suppliers).values({ id: 1, name: `${TAG} Supplier`, isActive: true }).onConflictDoNothing();
+  await db.insert(suppliers).values({ name: `${TAG} Supplier`, isActive: true }).onConflictDoNothing();
   await db.insert(users).values({ id: 1, email: `${TAG}@test.local`, password: "x", name: "Test", role: "manager" }).onConflictDoNothing();
 });
 
