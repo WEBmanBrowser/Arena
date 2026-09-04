@@ -40,6 +40,9 @@ async function cleanupSupplier() {
 
 beforeAll(async () => {
   await cleanupSupplier();
+  // Garante registos necessários para FK (supplier_imports → users, supplier_imports → suppliers).
+  await db.insert(suppliers).values({ id: 1, name: `${TAG} Supplier`, isActive: true }).onConflictDoNothing();
+  await db.insert(users).values({ id: 1, email: `${TAG}@test.local`, password: "x", name: "Test", role: "manager" }).onConflictDoNothing();
 });
 
 beforeEach(async () => {
@@ -52,6 +55,8 @@ afterAll(async () => {
 
 describe("BUG A — supplier import apply creates/updates productSuppliers (including EAN match)", () => {
   it("existing product found by EAN gets supplier link with supplierSku, not copied into products.sku", async () => {
+    // Garante que existe supplier para FK.
+    await db.insert(suppliers).values({ id: 1, name: `${TAG} Supplier`, isActive: true }).onConflictDoNothing();
     // Setup: supplier and product with known EAN.
     const [supplier] = await db.insert(suppliers).values({ name: `${TAG} Fornecedor`, isActive: true }).returning();
     const [existingProduct] = await db.insert(products).values({
@@ -103,6 +108,8 @@ describe("BUG A — supplier import apply creates/updates productSuppliers (incl
   });
 
   it("re-import of existing product by EAN updates link cost and supplierSku without duplicating", async () => {
+    // Garante que existe supplier para FK.
+    await db.insert(suppliers).values({ id: 1, name: `${TAG} Supplier`, isActive: true }).onConflictDoNothing();
     const [supplier] = await db.insert(suppliers).values({ name: `${TAG} Fornecedor 2`, isActive: true }).returning();
     const [existingProduct] = await db.insert(products).values({
       name: `${TAG}-Produto Reimport`, slug: `${TAG}-reimport`, sku: `${TAG}-SKU-RE`,

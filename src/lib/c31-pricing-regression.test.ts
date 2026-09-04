@@ -18,6 +18,8 @@ import {
   products,
   productSuppliers,
   pricingRules,
+  suppliers,
+  users,
 } from "@/db/schema";
 import { and, eq, sql } from "drizzle-orm";
 import { getCatalogueCoverage } from "@/lib/services/pricing-rules-service";
@@ -37,6 +39,9 @@ async function cleanupPricing() {
 
 beforeAll(async () => {
   await cleanupPricing();
+  // Garante registos necessários para FK.
+  await db.insert(suppliers).values({ name: `${TAG} Supplier`, isActive: true }).onConflictDoNothing();
+  await db.insert(users).values({ id: 1, email: `${TAG}@test.local`, password: "x", name: "Test", role: "manager" }).onConflictDoNothing();
 });
 
 beforeEach(async () => {
@@ -55,8 +60,13 @@ describe("BUG B — supplier pricing regression (explicit association, no correl
       price: "10.00", vatRate: "23.00", priceMode: "auto", costPrice: "7.25", stock: 10,
     }).returning();
 
+    // Garantir que existe um supplier com id = 1 para a FK.
+    await db.insert(suppliers).values({ id: 1, name: `${TAG} Supplier` }).onConflictDoNothing();
+    // Garantir que existe um supplier com id correto para a FK.
+    const [sup] = await db.select({ id: suppliers.id }).from(suppliers).where(eq(suppliers.name, `${TAG} Supplier`)).limit(1);
+    const supplierId = sup?.id ?? 1;
     const supplierRule = await db.insert(pricingRules).values({
-      scope: "supplier", supplierId: 1, method: "markup_on_cost", ratePercent: "20",
+      scope: "supplier", supplierId, method: "markup_on_cost", ratePercent: "20",
       roundingPolicy: "auto", notes: `${TAG} supplier rule`, isActive: true,
     }).returning();
 
@@ -91,23 +101,27 @@ describe("BUG B — supplier pricing regression (explicit association, no correl
       price: "10.00", vatRate: "23.00", priceMode: "auto", costPrice: "7.25", stock: 5,
     }).returning();
 
+    // Garantir que existe supplier para a FK.
+    const [sup] = await db.select({ id: suppliers.id }).from(suppliers).where(eq(suppliers.name, `${TAG} Supplier`)).limit(1);
+    const supplierId = sup?.id ?? 1;
+
     await db.insert(pricingRules).values({
       scope: "global", method: "markup_on_cost", ratePercent: "20",
       roundingPolicy: "auto", notes: `${TAG} global fallback`, isActive: true,
     });
 
     await db.insert(pricingRules).values({
-      scope: "supplier", supplierId: 1, method: "markup_on_cost", ratePercent: "20",
+      scope: "supplier", supplierId, method: "markup_on_cost", ratePercent: "20",
       roundingPolicy: "auto", notes: `${TAG} supplier`, isActive: true,
     });
 
     await db.insert(productSuppliers).values({
-      productId: product.id, supplierId: 1, supplierSku: `${TAG}-SUP2`,
+      productId: product.id, supplierId, supplierSku: `${TAG}-SUP2`,
       costPrice: "7.25", isPreferred: true,
     });
 
     // Call previewRecalculation with the supplier-targeted rule.
-    const preview = await previewRecalculation({ supplierId: 1 });
+    const preview = await previewRecalculation({ supplierId });
     expect(preview).toBeTruthy();
     expect(preview.lines).toBeTruthy();
     // Find the line for our product and confirm the Supplier rule resolved (ruleId is defined, not null / no_rule).
