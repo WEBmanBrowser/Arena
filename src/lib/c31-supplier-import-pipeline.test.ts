@@ -849,19 +849,53 @@ describe("C.3.1 — new products get an internal MDTech SKU", () => {
 
 // ─── C.3.1 audit fixes: persistence, disappearance and the size ceiling ───
 describe("C.3.1 — preview persistence, missing products and file size", () => {
-  it("rolls the whole preview back when a snapshot row cannot be written", async () => {
-    // 501 lines: the header and the first chunk are already in the database when
-    // the second chunk explodes (a cost beyond numeric(10,2)). A half-written
-    // snapshot must not survive, because that subset is exactly what apply would
-    // otherwise consume.
-    const rows = Array.from({ length: 501 }, (_, i) =>
-      line({ sku: `${TAG}-TX-${i}`, name: `linha ${i}`, cost: i === 500 ? "999999999,99" : "1,00" }));
-    const res = await preview(csvFile(...rows), { fileName: `${TAG}-tx.csv` });
+  it("an out-of-range cost is a row error, never a whole-preview failure", async () => {
+    const res = await preview(csvFile(line({ sku: "SUP-RANGE", name: "Custo impossível", cost: "999999999,99", stock: "1" })));
+    expect(res.status).toBe(200);
+    expect(res.json.summary).toMatchObject({ total: 1, errors: 1, actionable: 0 });
+    expect(res.json.lines[0]).toMatchObject({ status: "error" });
+    expect(res.json.lines[0].issues.map((i: { code: string }) => i.code)).toContain("COST_OUT_OF_RANGE");
+    // The value that does not fit the numeric(10,2) column is not recorded in
+    // the snapshot…
+    const [stored] = await db.select().from(supplierImportRows).where(eq(supplierImportRows.importId, res.json.importId));
+    expect(stored).toMatchObject({ rowNumber: 2, status: "error", applied: false });
+    expect(stored.costPrice).toBeNull();
+    // …and apply creates nothing from it.
+    const applied = await apply(res.json.importId, res.json.previewToken);
+    expect(applied.json).toMatchObject({ status: "completed", appliedNow: 0, created: 0, errors: 1, pending: 0 });
+    expect(await db.select().from(products).where(eq(products.name, "Custo impossível"))).toHaveLength(0);
+  });
 
-    expect(res.status).toBe(500);
-    expect(res.json.error).toBe("SUPPLIER_IMPORT_PREVIEW_FAILED");
+  it("rolls the whole preview back when a snapshot row cannot be written", async () => {
+    // Row-level ceilings in normalize.ts mean a value that does not fit a
+    // snapshot column never reaches the INSERT any more (see the test above).
+    // To keep proving the preview transaction is atomic — the header and its
+    // 501 rows commit together or not at all — a controlled, test-only CHECK
+    // constraint refuses one row mid-insert, and is removed in `finally`.
+    const constraint = `c31_pipe_tx_boom_${Date.now()}`;
+    // Test-only constant, inlined deliberately: a CHECK constraint cannot take
+    // a bound parameter, and the literal is fixed and safe.
+    const boomLiteral = "'TX-BOOM'";
+    await db.execute(sql`ALTER TABLE supplier_import_rows
+      ADD CONSTRAINT ${sql.raw(constraint)} CHECK (name IS DISTINCT FROM ${sql.raw(boomLiteral)})`);
+    try {
+      // 501 lines: the first chunk is already in the database when the second
+      // chunk explodes. A half-written snapshot must not survive, because that
+      // subset is exactly what apply would otherwise consume.
+      const rows = Array.from({ length: 501 }, (_, i) =>
+        line({ sku: `${TAG}-TX-${i}`, name: i === 500 ? "TX-BOOM" : `linha ${i}`, cost: "1,00" }));
+      const res = await preview(csvFile(...rows), { fileName: `${TAG}-tx.csv` });
+
+      expect(res.status).toBe(500);
+      // Classified, safe category only — never SQL, never the constraint name.
+      expect(res.json.error).toBe("IMPORT_VALUE_REJECTED");
+      const body = JSON.stringify(res.json);
+      expect(body).not.toMatch(/insert into|check constraint|c31_pipe_tx_boom/i);
+    } finally {
+      await db.execute(sql`ALTER TABLE supplier_import_rows DROP CONSTRAINT ${sql.raw(constraint)}`);
+    }
+    // Nothing of this file exists, and the user's history is untouched.
     expect(await db.select().from(supplierImports).where(eq(supplierImports.fileName, `${TAG}-tx.csv`))).toHaveLength(0);
-    // Nothing of this file exists either, and the user's history is untouched.
     const orphans = await db.execute(sql`
       SELECT count(*)::int AS count FROM supplier_import_rows r
         JOIN supplier_imports i ON i.id = r.import_id

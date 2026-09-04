@@ -26,7 +26,7 @@
 import { createHash } from "crypto";
 import { applyMapping, autoMapHeaders, normalizeHeader, parseCSV } from "@/lib/csv";
 import { isValidGTIN } from "@/lib/validation";
-import { SUPPLIER_IMPORT_MAX_ROWS } from "./constants";
+import { SNAPSHOT_COST_MAX, SNAPSHOT_INT4_MAX, SUPPLIER_IMPORT_MAX_ROWS } from "./constants";
 
 /** The only canonical fields a supplier import understands. */
 export const SUPPLIER_FIELDS = [
@@ -323,6 +323,17 @@ export function parseInteger(raw: string | undefined | null): { value: number | 
   return Number.isSafeInteger(value) ? { value, ambiguous: token.ambiguous } : { value: null, ambiguous: token.ambiguous };
 }
 
+/**
+ * Exact cents of a canonical "digits[.digits]" decimal string, as BigInt — so a
+ * numeric(10,2) ceiling comparison never depends on floating point. parseMoney
+ * output always has exactly 2 fraction digits, but a plain integer part
+ * ("42") is accepted too.
+ */
+function centsOf(value: string): bigint {
+  const [intPart, fracPart = "00"] = value.split(".");
+  return BigInt(intPart || "0") * BigInt(100) + BigInt((fracPart + "00").slice(0, 2));
+}
+
 // ─── Rows ────────────────────────────────────────────────
 
 function snapshotText(raw: string, max: number): { value: string; truncated: boolean } | null {
@@ -348,6 +359,14 @@ function snapshotKey(raw: string, limit: number): { value: string | null; tooLon
  * One mapped CSV row → NormalizedSupplierRow. Pure: no database, no I/O.
  * `mapped` comes from applyMapping(), so it only holds canonical fields; the
  * `price` key is carried through solely to warn about it.
+ *
+ * ── A value that cannot fit its snapshot column is REFUSED per row ──
+ * The snapshot is written to supplier_import_rows, whose columns are varchar /
+ * decimal(10,2) / integer. A value beyond those ceilings must never reach the
+ * INSERT: it would throw mid-preview and fail the whole file. It is rejected
+ * here instead — reported with its own code and never stored — so the preview
+ * keeps going and the operator fixes only the offending line. Values are never
+ * truncated or silently corrected to make them fit.
  */
 export function normalizeSupplierRow(rowNumber: number, mapped: Record<string, string>): NormalizedSupplierRow {
   const issues: SupplierImportIssue[] = [];
@@ -375,20 +394,35 @@ export function normalizeSupplierRow(rowNumber: number, mapped: Record<string, s
   }
 
   let ean: string | null = null;
+  let eanTooLong = false;
   const eanRaw = raw("ean").replace(/[\s\u00a0]/g, "");
   if (eanRaw) {
     // GTIN-12 (UPC-A) is canonically written as GTIN-13 with a leading zero.
-    ean = /^\d{12}$/.test(eanRaw) ? `0${eanRaw}` : eanRaw;
-    if (ean.length > SNAPSHOT_LIMITS.ean) error("ean", eanRaw, "EAN_TOO_LONG", "EAN demasiado longo");
-    else if (!isValidGTIN(ean)) error("ean", eanRaw, "INVALID_GTIN", "EAN/GTIN com checksum inválido");
+    const normalized = /^\d{12}$/.test(eanRaw) ? `0${eanRaw}` : eanRaw;
+    if (normalized.length > SNAPSHOT_LIMITS.ean) {
+      // Never truncated and never stored: the varchar(50) snapshot column would
+      // refuse it and sink the whole preview. The row is reported instead.
+      eanTooLong = true;
+      error("ean", eanRaw, "EAN_TOO_LONG",
+        `EAN demasiado longo (máx. ${SNAPSHOT_LIMITS.ean} caracteres) — não é gravado; a linha não é aplicada`);
+    } else {
+      ean = normalized;
+      if (!isValidGTIN(ean)) error("ean", eanRaw, "INVALID_GTIN", "EAN/GTIN com checksum inválido");
+    }
   }
 
   let costPrice: string | null = null;
   const costRaw = raw("costPrice");
   if (costRaw) {
     const parsed = parseMoney(costRaw);
-    if (parsed.value === null) error("costPrice", costRaw, "INVALID_COST", "Preço de custo inválido (decimal >= 0 esperado)");
-    else {
+    if (parsed.value === null) {
+      error("costPrice", costRaw, "INVALID_COST", "Preço de custo inválido (decimal >= 0 esperado)");
+    } else if (centsOf(parsed.value) > centsOf(SNAPSHOT_COST_MAX)) {
+      // decimal(10,2) ceiling reached from BELOW the preview — refusing beats a
+      // 500 on the INSERT. Never truncated to make it fit.
+      error("costPrice", costRaw, "COST_OUT_OF_RANGE",
+        `Custo acima do máximo suportado (${SNAPSHOT_COST_MAX} €) — não é truncado; a linha não é aplicada`);
+    } else {
       costPrice = parsed.value;
       if (parsed.ambiguous) warning("costPrice", costRaw, "AMBIGUOUS_NUMBER_FORMAT", `Custo lido como ${parsed.value}€`);
     }
@@ -398,8 +432,14 @@ export function normalizeSupplierRow(rowNumber: number, mapped: Record<string, s
   const stockRaw = raw("stock");
   if (stockRaw) {
     const parsed = parseInteger(stockRaw);
-    if (parsed.value === null) error("stock", stockRaw, "INVALID_STOCK", "Stock inválido (inteiro >= 0 esperado)");
-    else {
+    if (parsed.value === null) {
+      error("stock", stockRaw, "INVALID_STOCK", "Stock inválido (inteiro >= 0 esperado)");
+    } else if (parsed.value > SNAPSHOT_INT4_MAX) {
+      // The snapshot column is int4; an out-of-range stock would abort the
+      // preview INSERT. Refused per row instead of truncating the number.
+      error("stock", stockRaw, "STOCK_OUT_OF_RANGE",
+        `Stock acima do máximo suportado (${SNAPSHOT_INT4_MAX}) — não é truncado; a linha não é aplicada`);
+    } else {
       stock = parsed.value;
       if (parsed.ambiguous) warning("stock", stockRaw, "AMBIGUOUS_NUMBER_FORMAT", `Stock lido como ${parsed.value}`);
     }
@@ -409,11 +449,18 @@ export function normalizeSupplierRow(rowNumber: number, mapped: Record<string, s
   const leadRaw = raw("leadTimeDays");
   if (leadRaw) {
     const parsed = parseInteger(leadRaw);
-    if (parsed.value === null) error("leadTimeDays", leadRaw, "INVALID_LEAD_TIME", "Prazo de entrega inválido (inteiro >= 0 esperado)");
-    else leadTimeDays = parsed.value;
+    if (parsed.value === null) {
+      error("leadTimeDays", leadRaw, "INVALID_LEAD_TIME", "Prazo de entrega inválido (inteiro >= 0 esperado)");
+    } else if (parsed.value > SNAPSHOT_INT4_MAX) {
+      // Same int4 ceiling as stock: per-row error, never a whole-preview crash.
+      error("leadTimeDays", leadRaw, "LEAD_TIME_OUT_OF_RANGE",
+        `Prazo de entrega acima do máximo suportado (${SNAPSHOT_INT4_MAX}) — não é truncado; a linha não é aplicada`);
+    } else {
+      leadTimeDays = parsed.value;
+    }
   }
 
-  if (!supplierSku && !internalSku && !ean && !supplierKey.tooLong && !internalKey.tooLong) {
+  if (!supplierSku && !internalSku && !ean && !supplierKey.tooLong && !internalKey.tooLong && !eanTooLong) {
     error("row", "", "MISSING_IDENTIFIER_KEY", "Linha sem SKU do fornecedor, EAN ou SKU interno — impossível de identificar");
   }
 

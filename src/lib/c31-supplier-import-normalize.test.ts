@@ -243,3 +243,77 @@ describe("C.3.1 — file level guards", () => {
     expect(byteLengthUtf8("€")).toBe(3);
   });
 });
+
+describe("C.3.1 — per-row column-ceiling refusals (never a whole-preview failure)", () => {
+  const codes = (row: ReturnType<typeof normalizeSupplierRow>) => row.issues.map((i) => i.code);
+  const issue = (row: ReturnType<typeof normalizeSupplierRow>, code: string) =>
+    row.issues.find((i) => i.code === code);
+
+  it("rejects an EAN longer than the varchar(50) snapshot column and never stores it", () => {
+    const row = normalizeSupplierRow(2, { supplierSku: "S1", ean: "5".repeat(55) });
+    expect(codes(row)).toContain("EAN_TOO_LONG");
+    expect(issue(row, "EAN_TOO_LONG")?.severity).toBe("error");
+    expect(row.ean).toBeNull(); // the value that does not fit is not recorded
+    // A valid GTIN at the other end of the same rule is kept whole.
+    expect(normalizeSupplierRow(3, { supplierSku: "S1", ean: "4006381333931" }).ean).toBe("4006381333931");
+  });
+
+  it("does not complain about a missing key when the only key was an over-long EAN", () => {
+    const row = normalizeSupplierRow(2, { ean: "1".repeat(60) });
+    expect(codes(row)).toContain("EAN_TOO_LONG");
+    expect(codes(row)).not.toContain("MISSING_IDENTIFIER_KEY");
+  });
+
+  it("rejects a cost beyond numeric(10,2) instead of truncating or recording it", () => {
+    const row = normalizeSupplierRow(2, { supplierSku: "S1", costPrice: "100000000.00" });
+    expect(codes(row)).toContain("COST_OUT_OF_RANGE");
+    expect(issue(row, "COST_OUT_OF_RANGE")?.severity).toBe("error");
+    expect(row.costPrice).toBeNull();
+    // It parsed fine as money — only the column ceiling refused it.
+    expect(codes(row)).not.toContain("INVALID_COST");
+  });
+
+  it("accepts the exact numeric(10,2) ceiling", () => {
+    const row = normalizeSupplierRow(2, { supplierSku: "S1", costPrice: "99999999.99" });
+    expect(row.issues).toEqual([]);
+    expect(row.costPrice).toBe("99999999.99");
+  });
+
+  it("rejects stock above the int4 ceiling and never records it", () => {
+    const row = normalizeSupplierRow(2, { supplierSku: "S1", stock: "2147483648" });
+    expect(codes(row)).toContain("STOCK_OUT_OF_RANGE");
+    expect(issue(row, "STOCK_OUT_OF_RANGE")?.severity).toBe("error");
+    expect(row.stock).toBeNull();
+  });
+
+  it("accepts stock exactly at the int4 ceiling", () => {
+    const row = normalizeSupplierRow(2, { supplierSku: "S1", stock: "2147483647" });
+    expect(row.issues).toEqual([]);
+    expect(row.stock).toBe(2147483647);
+  });
+
+  it("rejects a lead time above the int4 ceiling and accepts the exact ceiling", () => {
+    const over = normalizeSupplierRow(2, { supplierSku: "S1", leadTimeDays: "9999999999" });
+    expect(codes(over)).toContain("LEAD_TIME_OUT_OF_RANGE");
+    expect(issue(over, "LEAD_TIME_OUT_OF_RANGE")?.severity).toBe("error");
+    expect(over.leadTimeDays).toBeNull();
+
+    const atMax = normalizeSupplierRow(3, { supplierSku: "S1", leadTimeDays: "2147483647" });
+    expect(atMax.issues).toEqual([]);
+    expect(atMax.leadTimeDays).toBe(2147483647);
+  });
+
+  it("rejects an out-of-range stock inside a whole file as a row error, keeping the rest", () => {
+    const parsed = parseSupplierCsv([
+      "skuFornecedor;nome;custo;stock",
+      "SUP-1;Cabo bom;10,00;5",
+      "SUP-2;Stock impossível;10,00;99999999999",
+      "SUP-3;Outro cabo;20,00;7",
+    ].join("\n"));
+    expect(parsed.rows).toHaveLength(3);
+    expect(codes(parsed.rows[0])).toEqual([]);
+    expect(codes(parsed.rows[1])).toEqual(["STOCK_OUT_OF_RANGE"]);
+    expect(parsed.rows[1].stock).toBeNull();
+    expect(codes(parsed.rows[2])).toEqual([]);
+  });
+});

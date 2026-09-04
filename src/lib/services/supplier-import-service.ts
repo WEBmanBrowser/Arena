@@ -78,6 +78,10 @@ import {
   tokenMatchesImport,
   verifySupplierImportToken,
 } from "@/lib/supplier-import/token";
+import {
+  classifyImportStorageFailure,
+  supplierImportErrorMessage,
+} from "@/lib/supplier-import/error-messages";
 
 /** Error carrying the code the API surfaces. */
 export class SupplierImportError extends Error {
@@ -493,7 +497,9 @@ export async function previewSupplierImport(input: PreviewInput): Promise<Suppli
         currentPrice: line.currentPrice,
         computedPrice: line.computedPrice,
         priceMode: line.priceMode,
-        priceMessage: line.priceMessage,
+        // price_message is varchar(255): a message longer than the column must
+        // not sink the preview INSERT the way an out-of-range value used to.
+        priceMessage: line.priceMessage ? line.priceMessage.slice(0, 255) : null,
         isPreferredSupplier: line.isPreferredSupplier,
       })));
     }
@@ -1046,7 +1052,23 @@ export async function applySupplierImport(input: ApplyInput): Promise<ApplyOutco
       }
       if (batch.claimed < SUPPLIER_IMPORT_BATCH_SIZE) break;
     } catch (e) {
-      lastError = { code: "APPLY_BATCH_FAILED", message: e instanceof Error ? e.message : "Erro ao aplicar" };
+      // The full technical error belongs in the server log only. A real
+      // database/storage failure is classified into a safe category — never
+      // SQL, query, params or a stack trace. Anything else keeps its
+      // (human-authored) message under APPLY_BATCH_FAILED, which is what the
+      // recovery tests assert a killed worker reports.
+      console.error(`supplier import apply batch (import ${snapshot.id}):`, e);
+      const storage = classifyImportStorageFailure(e);
+      if (storage) {
+        lastError = { code: storage.code, message: storage.message };
+      } else {
+        lastError = {
+          code: "APPLY_BATCH_FAILED",
+          message: e instanceof Error && e.message.trim()
+            ? e.message.trim()
+            : supplierImportErrorMessage("APPLY_BATCH_FAILED"),
+        };
+      }
       break;
     }
   }

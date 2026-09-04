@@ -59,8 +59,11 @@ export async function POST(req: NextRequest) {
   try {
     parsed = parseCSV(csvData);
   } catch (e: unknown) {
-    const code = e instanceof Error ? e.message : "CSV_PARSE_ERROR";
-    return NextResponse.json({ error: code, message: "Erro ao processar CSV" }, { status: 400 });
+    // Stable code + safe message only: a csv-parse error text may carry the
+    // offending row contents and is never echoed back verbatim.
+    const raw = e instanceof Error ? e.message : "";
+    const code = raw === "CSV_EMPTY" || raw === "CSV_NO_DATA" || raw === "CSV_TOO_MANY_ROWS" ? raw : "CSV_PARSE_ERROR";
+    return NextResponse.json({ error: code, message: "Erro ao processar CSV — verifique o formato do ficheiro" }, { status: 400 });
   }
 
   // Build mapping: user-provided or auto-detected
@@ -395,7 +398,13 @@ export async function POST(req: NextRequest) {
     await createAuditLog({ userId: user.id, action: "catalog.imported", entity: "products", details: { created: execCreated, updated: execUpdated } });
     return NextResponse.json({ results, summary: { total: results.length, created: execCreated, updated: execUpdated, skipped: skipCount, errors: 0 } });
   } catch (e) {
+    // The technical error (which may carry SQL/params) is logged server-side
+    // only. The browser receives a code + safe message, never `details` with
+    // e.message.
     console.error("Import error:", e);
-    return NextResponse.json({ error: "Erro na importação — rollback completo", details: e instanceof Error ? e.message : "" }, { status: 500 });
+    return NextResponse.json({
+      error: "IMPORT_EXECUTION_FAILED",
+      message: "Erro na importação — nenhum registo foi gravado (rollback completo).",
+    }, { status: 500 });
   }
 }
