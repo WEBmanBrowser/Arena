@@ -104,6 +104,8 @@ export async function POST(req: NextRequest) {
   const mapping = body.mapping && typeof body.mapping === "object"
     ? (body.mapping as Record<string, string>)
     : undefined;
+  // C.3.2 — o preview pode pedir para guardar o perfil do fornecedor.
+  const saveProfile = body.saveProfile === true || body.saveProfile === "true";
 
   if (!Number.isInteger(supplierId) || supplierId < 1) {
     return NextResponse.json({ error: "SUPPLIER_ID_REQUIRED", message: "Fornecedor obrigatório" }, { status: 400 });
@@ -121,7 +123,7 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const preview = await previewSupplierImport({ supplierId, fileName, csvText: data, mapping, userId: user.id });
+    const preview = await previewSupplierImport({ supplierId, fileName, csvText: data, mapping, userId: user.id, saveProfile });
     return NextResponse.json(preview);
   } catch (e) {
     return errorResponse(e);
