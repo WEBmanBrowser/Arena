@@ -319,6 +319,11 @@ export interface PreviewInput {
   supplierId: number;
   fileName: string;
   csvText: string;
+  /**
+   * Mapeamento manual header→campo. Vazio ({}) conta como AUSENTE: nessa caso,
+   * um perfil válido guardado para o fornecedor tem prioridade e o CSV é
+   * parseado com o mapping do perfil.
+   */
   mapping?: Record<string, string>;
   userId: number;
   /**
@@ -346,22 +351,26 @@ export async function previewSupplierImport(input: PreviewInput): Promise<Suppli
   if (!supplier) throw new SupplierImportError("SUPPLIER_NOT_FOUND", 404);
   if (!supplier.isActive) throw new SupplierImportError("SUPPLIER_INACTIVE", 400);
 
-  // C.3.2 — Perfil de importação por fornecedor
-  // Primeiro parse para obter headers; depois verifica perfil.
-  const initialParsed = parseSupplierCsv(input.csvText, input.mapping);
+  // C.3.2 — Perfil de importação por fornecedor.
+  // Primeiro parse (auto ou manual) para obter headers; depois verifica perfil.
+  // Mapping manual VAZIO é tratado como ausente: a UI envia sempre mapping:{},
+  // e um objeto vazio não pode esconder um perfil guardado válido.
+  const manualMapping = hasManualMappingEntries(input.mapping) ? input.mapping : undefined;
+  const initialParsed = parseSupplierCsv(input.csvText, manualMapping);
   const fileHash = sha256Hex(input.csvText);
   const fileSizeBytes = byteLengthUtf8(input.csvText);
 
   const profile = await loadSupplierProfile(supplier.id);
   let resolution: ProfileResolution;
-  let effectiveMapping = input.mapping ?? undefined;
+  let parsed = initialParsed;
 
-  if (profile) {
-    const headersFromCsv = initialParsed.headers;
-    const compatible = isProfileCompatibleWithHeaders(profile.mapping, headersFromCsv);
-    if (compatible) {
+  if (profile && !manualMapping) {
+    // Sem mapeamento manual, um perfil válido guardado tem prioridade: o CSV é
+    // relido com o mapping do perfil e o snapshot (supplier_imports.mapping)
+    // continua a ser o mapping realmente usado.
+    if (isProfileCompatibleWithHeaders(profile.mapping, initialParsed.headers)) {
+      parsed = parseSupplierCsv(input.csvText, profile.mapping);
       resolution = { type: "profile_valid", mapping: profile.mapping, profileId: profile.id };
-      effectiveMapping = profile.mapping;
     } else {
       resolution = {
         type: "profile_invalid",
@@ -369,24 +378,23 @@ export async function previewSupplierImport(input: PreviewInput): Promise<Suppli
         mapping: profile.mapping,
         profileId: profile.id,
       };
-      effectiveMapping = input.mapping ?? undefined; // mantém override manual, ou usa autoMapHeaders abaixo
+      // parsed fica o parse inicial (autoMapHeaders) — fallback seguro.
     }
+  } else if (profile && manualMapping) {
+    // Mapeamento manual NÃO VAZIO mantém o comportamento manual atual: o CSV é
+    // lido com o mapeamento do operador (initialParsed); o perfil apenas
+    // informa a resolução.
+    resolution = isProfileCompatibleWithHeaders(profile.mapping, initialParsed.headers)
+      ? { type: "profile_valid", mapping: profile.mapping, profileId: profile.id }
+      : {
+          type: "profile_invalid",
+          reason: "O formato desta lista parece ter mudado. Confirme o mapeamento antes de continuar.",
+          mapping: profile.mapping,
+          profileId: profile.id,
+        };
   } else {
     resolution = { type: "no_profile", mapping: initialParsed.mapping };
-    effectiveMapping = input.mapping ?? undefined;
   }
-
-  // Se houve override manual ou não há perfil válido, re-parse com o mapping efetivo
-  let parsedForMapping = initialParsed;
-  if (effectiveMapping && (!profile || resolution.type === "profile_invalid") && input.mapping) {
-    if (input.mapping) {
-      parsedForMapping = parseSupplierCsv(input.csvText, input.mapping);
-    }
-  } else if (profile && resolution.type === "profile_valid" && !input.mapping) {
-    parsedForMapping = parseSupplierCsv(input.csvText, profile.mapping);
-  }
-
-  const parsed = parsedForMapping;
 
   // C.3.2 — Guardar perfil durante o preview.
   // O mapping guardado é exatamente o mapping efetivamente usado neste preview
@@ -399,8 +407,14 @@ export async function previewSupplierImport(input: PreviewInput): Promise<Suppli
       Object.keys(mappingToSave).length > 0 &&
       isProfileCompatibleWithHeaders(mappingToSave, parsed.headers);
     if (validMapping) {
-      const saved = await saveSupplierProfile(supplier.id, mappingToSave, parsed.delimiter, input.userId);
-      resolution = { type: "profile_valid", mapping: mappingToSave, profileId: saved.id };
+      await saveSupplierProfile(supplier.id, mappingToSave, parsed.delimiter, input.userId);
+      // O retorno do save não é prova de sucesso: profile_valid só é reportado
+      // depois de uma RELEITURA (loadSupplierProfile) confirmar que o perfil
+      // gravado é legível. Sem confirmação, mantém-se a resolução anterior.
+      const reread = await loadSupplierProfile(supplier.id);
+      if (reread) {
+        resolution = { type: "profile_valid", mapping: reread.mapping, profileId: reread.id };
+      }
     }
   }
 
@@ -1376,6 +1390,40 @@ function isStringRecord(value: unknown): value is Record<string, string> {
   return true;
 }
 
+/**
+ * C.3.2 — o JSONB `mapping` pode chegar como STRING JSON (dupla codificação,
+ * ex.: "{\"nome\":\"name\",…}" — a forma exata encontrada em staging). Aceita:
+ *  - objeto Record<string,string> diretamente;
+ *  - string JSON válida que, após JSON.parse, seja Record<string,string>.
+ * Qualquer outra forma é inválida → null.
+ */
+function parseProfileMapping(value: unknown): Record<string, string> | null {
+  if (isStringRecord(value)) return value;
+  if (typeof value === "string" && value.trim().length > 0) {
+    try {
+      const parsed: unknown = JSON.parse(value);
+      if (isStringRecord(parsed)) return parsed;
+    } catch {
+      // string que não é JSON — inválida, cai no return null
+    }
+  }
+  return null;
+}
+
+/** Descreve apenas a FORMA do valor (para log seguro), nunca o conteúdo. */
+function describeMappingShape(value: unknown): string {
+  if (value === null || value === undefined) return "vazio";
+  if (Array.isArray(value)) return "array";
+  if (typeof value === "object") return "objeto com valores não-string";
+  if (typeof value === "string") return "string sem objeto Record válido";
+  return typeof value;
+}
+
+/** Mapping manual só conta quando tem pelo menos uma entrada string→string. */
+function hasManualMappingEntries(mapping: Record<string, string> | undefined): boolean {
+  return !!mapping && Object.values(mapping).some((v) => typeof v === "string");
+}
+
 /** Carrega o perfil ativo de um fornecedor (0 ou 1 devido ao UNIQUE). */
 export async function loadSupplierProfile(supplierId: number): Promise<SupplierImportProfile | null> {
   const [rawProfile] = await db.select({
@@ -1388,15 +1436,21 @@ export async function loadSupplierProfile(supplierId: number): Promise<SupplierI
     updatedAt: supplierImportProfiles.updatedAt,
   }).from(supplierImportProfiles).where(eq(supplierImportProfiles.supplierId, supplierId)).limit(1);
   if (!rawProfile) return null;
-  if (!isStringRecord(rawProfile.mapping)) {
-    // Mapping corrompido/inválido no JSONB — trata como perfil ausente,
-    // sem quebrar o preview. A resolução usa autoMapHeaders como fallback.
+  const mapping = parseProfileMapping(rawProfile.mapping);
+  if (!mapping) {
+    // Mapping corrompido/inválido no JSONB — não é engolido em silêncio: fica
+    // logged de forma SEGURA (apenas ids e a forma do valor — nunca o conteúdo
+    // do mapping nem dados do ficheiro) e o perfil é tratado como ausente,
+    // mantendo o preview funcional via autoMapHeaders/fallback.
+    console.warn(
+      `[supplier-import] perfil #${rawProfile.id} do fornecedor #${rawProfile.supplierId} ignorado: mapping JSONB inválido (${describeMappingShape(rawProfile.mapping)})`
+    );
     return null;
   }
   return {
     id: rawProfile.id,
     supplierId: rawProfile.supplierId,
-    mapping: rawProfile.mapping,
+    mapping,
     delimiter: rawProfile.delimiter,
     createdBy: rawProfile.createdBy,
     createdAt: rawProfile.createdAt,
