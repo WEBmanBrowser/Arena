@@ -18,6 +18,8 @@ import {
   SupplierImportError,
   listSupplierImports,
   previewSupplierImport,
+  loadSupplierProfile,
+  saveSupplierProfile,
 } from "@/lib/services/supplier-import-service";
 import {
   classifyImportStorageFailure,
@@ -63,6 +65,12 @@ export async function GET(req: NextRequest) {
   const limitParam = req.nextUrl.searchParams.get("limit");
   const limit = limitParam ? Number.parseInt(limitParam, 10) : 20;
 
+  const profileParam = req.nextUrl.searchParams.get("profile");
+  if (profileParam === "1" && supplierId) {
+    const profile = await loadSupplierProfile(supplierId);
+    return NextResponse.json({ profile });
+  }
+
   const imports = await listSupplierImports({ supplierId, limit: Number.isFinite(limit) ? limit : 20 });
   return NextResponse.json({ imports });
 }
@@ -84,6 +92,15 @@ export async function POST(req: NextRequest) {
   const supplierId = Number(body.supplierId);
   const data = typeof body.data === "string" ? body.data : "";
   const fileName = typeof body.fileName === "string" && body.fileName.trim() ? body.fileName.trim() : "supplier-list.csv";
+  if (body.action === "saveProfile") {
+    const profileMapping = body.mapping && typeof body.mapping === "object"
+      ? (body.mapping as Record<string, string>)
+      : {};
+    const profileDelimiter = typeof body.delimiter === "string" ? body.delimiter : null;
+    const saved = await saveSupplierProfile(supplierId, profileMapping, profileDelimiter, user.id);
+    return NextResponse.json({ profile: saved, action: "saveProfile" });
+  }
+
   const mapping = body.mapping && typeof body.mapping === "object"
     ? (body.mapping as Record<string, string>)
     : undefined;

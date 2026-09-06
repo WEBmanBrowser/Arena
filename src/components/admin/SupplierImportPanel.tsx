@@ -62,6 +62,8 @@ type PreviewResult = {
   };
   previewToken: string;
   batchesTotal: number;
+  profileUsed?: string; // "profile_valid", "profile_invalid", "no_profile", "manual"
+  profileName?: string; // nome do perfil guardado, se usado
 };
 
 type Progress = {
@@ -168,6 +170,11 @@ export default function SupplierImportPanel() {
   const [historyVersion, setHistoryVersion] = useState(0);
   /** Import id being watched, or null. The progress effect owns the polling. */
   const [watchId, setWatchId] = useState<number | null>(null);
+  // C.3.2 — profile mapping manual + save
+  const [manualMapping, setManualMapping] = useState<Record<string, string>>({});
+  const [saveProfileChecked, setSaveProfileChecked] = useState(false);
+  const [profileUsed, setProfileUsed] = useState<string | null>(null); // "profile_valid", "profile_invalid", "no_profile", "manual"
+  const [profileName, setProfileName] = useState<string | null>(null);
 
   const refreshHistory = useCallback(() => setHistoryVersion((v) => v + 1), []);
 
@@ -246,7 +253,7 @@ export default function SupplierImportPanel() {
       const res = await fetch("/api/admin/supplier-import", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ supplierId: Number(supplierId), fileName, data: csvText }),
+        body: JSON.stringify({ supplierId: Number(supplierId), fileName, data: csvText, mapping: manualMapping, saveProfile: saveProfileChecked }),
       });
       const body = await readBody(res);
       if (!res.ok) {
@@ -357,6 +364,62 @@ export default function SupplierImportPanel() {
           )}
         </div>
       </div>
+
+      <>
+        {/* C.3.2 — Manual column mapping + save profile */}
+      <div className="mt-3 border-l-2 border-emerald-400 bg-emerald-50/50 rounded-r-lg px-3 py-2">
+        <p className="text-xs font-medium text-slate-700 mb-1">C.3.2 — Mapeamento manual e perfil</p>
+        <div className="text-[11px] text-slate-500 mb-2">
+          Se o ficheiro não corresponde ao perfil guardado do fornecedor, pode ajustar aqui. O mapeamento usado será guardado se marcar a opção abaixo.
+        </div>
+        <div className="grid grid-cols-2 gap-2">
+          {[
+            { label: "SKU fornecedor", key: "supplierSku" },
+            { label: "Nome / Designação", key: "name" },
+            { label: "Custo", key: "cost" },
+            { label: "Stock", key: "stock" },
+            { label: "EAN", key: "ean" },
+            { label: "SKU interno (manual)", key: "internalSku" },
+            { label: "Prazo entrega", key: "leadTime" },
+          ].map((col) => (
+            <label key={col.key} className="flex items-center gap-2 text-xs text-slate-600">
+              <input
+                type="checkbox"
+                checked={manualMapping[col.key] === col.key}
+                onChange={(e) => {
+                  setManualMapping((prev) => {
+                    const next = { ...prev };
+                    if (e.target.checked) next[col.key] = col.key;
+                    else delete next[col.key];
+                    return next;
+                  });
+                }}
+                className="accent-emerald-600"
+              />
+              <span className="font-medium">{col.label}</span>
+            </label>
+          ))}
+        </div>
+        <label className="flex items-center gap-2 mt-2 text-xs text-slate-600">
+          <input
+            type="checkbox"
+            checked={saveProfileChecked}
+            onChange={(e) => setSaveProfileChecked(e.target.checked)}
+            className="accent-emerald-600"
+          />
+          <span className="font-medium text-emerald-700">Guardar este mapeamento para este fornecedor</span>
+        </label>
+      </div>
+
+      {/* C.3.2 — Profile used indicator */}
+      {preview && preview.profileUsed && (
+        <div className="mt-2 border-l-2 border-emerald-400 bg-emerald-50/50 rounded-r-lg px-3 py-2 text-[11px] text-slate-600">
+          <span className="font-medium text-emerald-700">C.3.2 — Perfil utilizado: </span>
+          {preview.profileName ? `“${preview.profileName}”` : `perfil #${preview.profileUsed}`}
+          <span className="text-slate-400 ml-1">({preview.profileUsed === "profile_valid" ? "perfil válido" : preview.profileUsed === "profile_invalid" ? "perfil inválido — usou fallback" : preview.profileUsed === "manual" ? "mapeamento manual" : "sem perfil"})</span>
+        </div>
+      )}
+      </>
 
       <div className="mt-3 border-l-2 border-sky-300 bg-sky-50/70 rounded-r-lg px-3 py-2">
         <p className="text-xs font-medium text-slate-700">SKU do fornecedor ≠ SKU MDTech</p>

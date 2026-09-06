@@ -242,6 +242,8 @@ export interface SupplierImportPreview {
   previewToken: string;
   batchesTotal: number;
   batchSize: number;
+  profileUsed?: string;
+  profileName?: string;
 }
 
 // ─── Missing products (detection only) ───────────────────
@@ -578,6 +580,8 @@ export async function previewSupplierImport(input: PreviewInput): Promise<Suppli
     }),
     batchesTotal,
     batchSize: SUPPLIER_IMPORT_BATCH_SIZE,
+    profileUsed: resolution.type,
+    profileName: resolution.profileId ? `Perfil #${resolution.profileId}` : undefined,
   };
 }
 
@@ -1423,4 +1427,4 @@ export function isProfileCompatibleWithHeaders(
 export type ProfileResolution =
   | { type: "profile_valid"; mapping: Record<string, string>; profileId?: number }
   | { type: "profile_invalid"; reason: string; mapping: Record<string, string>; profileId?: number }
-  | { type: "no_profile"; mapping: Record<string, string> };
+  | { type: "no_profile"; mapping: Record<string, string>; profileId?: number };
