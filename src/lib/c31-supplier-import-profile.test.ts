@@ -3,7 +3,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import { db } from "@/db";
-import { suppliers, supplierImportProfiles, supplierImports, supplierImportRows, products, productSuppliers } from "@/db/schema";
+import { suppliers, supplierImportProfiles, supplierImports, supplierImportRows, products, productSuppliers, users } from "@/db/schema";
 import { eq, and, sql } from "drizzle-orm";
 import {
   loadSupplierProfile,
@@ -27,6 +27,7 @@ beforeAll(async () => {
   await cleanupProfile();
   await db.insert(suppliers).values({ id: 1, name: `${TAG} Supplier A`, isActive: true }).onConflictDoNothing();
   await db.insert(suppliers).values({ id: 2, name: `${TAG} Supplier B`, isActive: true }).onConflictDoNothing();
+  await db.insert(users).values({ id: 1, email: `${TAG}@test.local`, password: "x", name: "Test", role: "manager" }).onConflictDoNothing();
 });
 
 beforeEach(async () => {
