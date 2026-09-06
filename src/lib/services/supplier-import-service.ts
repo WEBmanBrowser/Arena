@@ -1340,9 +1340,20 @@ export interface SupplierImportProfile {
   updatedAt: Date;
 }
 
+/** Type guard for JSONB mapping returned from the database. */
+function isStringRecord(value: unknown): value is Record<string, string> {
+  if (value === null || value === undefined) return false;
+  if (typeof value !== "object" || Array.isArray(value)) return false;
+  for (const [k, v] of Object.entries(value)) {
+    if (typeof k !== "string") return false;
+    if (typeof v !== "string") return false;
+  }
+  return true;
+}
+
 /** Carrega o perfil ativo de um fornecedor (0 ou 1 devido ao UNIQUE). */
 export async function loadSupplierProfile(supplierId: number): Promise<SupplierImportProfile | null> {
-  const [profile] = await db.select({
+  const [rawProfile] = await db.select({
     id: supplierImportProfiles.id,
     supplierId: supplierImportProfiles.supplierId,
     mapping: supplierImportProfiles.mapping,
@@ -1351,7 +1362,21 @@ export async function loadSupplierProfile(supplierId: number): Promise<SupplierI
     createdAt: supplierImportProfiles.createdAt,
     updatedAt: supplierImportProfiles.updatedAt,
   }).from(supplierImportProfiles).where(eq(supplierImportProfiles.supplierId, supplierId)).limit(1);
-  return profile ?? null;
+  if (!rawProfile) return null;
+  if (!isStringRecord(rawProfile.mapping)) {
+    // Mapping corrompido/inválido no JSONB — trata como perfil ausente,
+    // sem quebrar o preview. A resolução usa autoMapHeaders como fallback.
+    return null;
+  }
+  return {
+    id: rawProfile.id,
+    supplierId: rawProfile.supplierId,
+    mapping: rawProfile.mapping,
+    delimiter: rawProfile.delimiter,
+    createdBy: rawProfile.createdBy,
+    createdAt: rawProfile.createdAt,
+    updatedAt: rawProfile.updatedAt,
+  };
 }
 
 /** Guarda (INSERT ou UPDATE) o perfil para um fornecedor. */
