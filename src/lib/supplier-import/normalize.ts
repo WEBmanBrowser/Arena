@@ -7,6 +7,11 @@
  * second importer: a feed parser produces NormalizedSupplierRow rows and
  * everything downstream already exists.
  *
+ * C.3.3 (etapa 1) — a porta de entrada do parsing passou a ser o dispatcher
+ * parseSupplierFile (./file.ts); o ramo CSV delega NESTE parser, sem alterar
+ * nenhuma regra (aliases, delimiter, BOM, limites, normalização numérica).
+ * O contrato de saída é já agnóstico ao formato: SupplierFileParse.
+ *
  * Parsing itself reuses src/lib/csv.ts (delimiter / BOM / quote handling and
  * the 10 000 row ceiling) — no second CSV engine.
  *
@@ -143,15 +148,22 @@ export interface NormalizedSupplierRow {
   issues: SupplierImportIssue[];
 }
 
-export interface SupplierCsvParse {
+export interface SupplierFileParse {
   headers: string[];
   delimiter: string;
-  /** CSV header → canonical supplier field. */
+  /** Ficheiro header → canonical supplier field. */
   mapping: Record<string, string>;
   /** Headers recognised by the generic CSV vocabulary but not applicable here. */
   ignoredColumns: string[];
   rows: NormalizedSupplierRow[];
 }
+
+/**
+ * C.3.3 (etapa 1) — contrato generalizado do resultado do parsing de UM
+ * ficheiro de fornecedor, seja qual for o formato. O nome histórico
+ * SupplierCsvParse mantém-se como alias para não partir importadores C.3.1/C.3.2.
+ */
+export type SupplierCsvParse = SupplierFileParse;
 
 /** File-level failure. `code` is what the API returns to the operator. */
 export class SupplierCsvError extends Error {
@@ -486,8 +498,12 @@ export function normalizeSupplierRow(rowNumber: number, mapped: Record<string, s
 /**
  * Whole CSV → normalized rows plus the mapping that produced them.
  * Throws SupplierCsvError for file-level problems (empty, unmappable, too big).
+ *
+ * C.3.3 (etapa 1): este parser deixa de ser chamado diretamente pelo serviço —
+ * passa a ser o ramo CSV do dispatcher parseSupplierFile (./file.ts), que
+ * devolve o mesmo contrato generalizado SupplierFileParse.
  */
-export function parseSupplierCsv(csvText: string, overrides?: Record<string, string>): SupplierCsvParse {
+export function parseSupplierCsv(csvText: string, overrides?: Record<string, string>): SupplierFileParse {
   if (!csvText || !csvText.trim()) throw new SupplierCsvError("CSV_EMPTY");
 
   let parsed: ReturnType<typeof parseCSV>;
