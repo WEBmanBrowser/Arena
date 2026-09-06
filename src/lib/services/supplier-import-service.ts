@@ -42,6 +42,7 @@ import {
   suppliers,
   supplierImportRows,
   supplierImports,
+  supplierImportProfiles,
 } from "@/db/schema";
 import { syncProductCost } from "@/lib/services/product-supplier-service";
 import { computeAutomaticPrice, loadPricingContext } from "@/lib/services/pricing-engine-service";
@@ -338,9 +339,47 @@ export async function previewSupplierImport(input: PreviewInput): Promise<Suppli
   if (!supplier) throw new SupplierImportError("SUPPLIER_NOT_FOUND", 404);
   if (!supplier.isActive) throw new SupplierImportError("SUPPLIER_INACTIVE", 400);
 
-  const parsed = parseSupplierCsv(input.csvText, input.mapping);
+  // C.3.2 — Perfil de importação por fornecedor
+  // Primeiro parse para obter headers; depois verifica perfil.
+  const initialParsed = parseSupplierCsv(input.csvText, input.mapping);
   const fileHash = sha256Hex(input.csvText);
   const fileSizeBytes = byteLengthUtf8(input.csvText);
+
+  const profile = await loadSupplierProfile(supplier.id);
+  let resolution: ProfileResolution;
+  let effectiveMapping = input.mapping ?? undefined;
+
+  if (profile) {
+    const headersFromCsv = initialParsed.headers;
+    const compatible = isProfileCompatibleWithHeaders(profile.mapping, headersFromCsv);
+    if (compatible) {
+      resolution = { type: "profile_valid", mapping: profile.mapping, profileId: profile.id };
+      effectiveMapping = profile.mapping;
+    } else {
+      resolution = {
+        type: "profile_invalid",
+        reason: "O formato desta lista parece ter mudado. Confirme o mapeamento antes de continuar.",
+        mapping: profile.mapping,
+        profileId: profile.id,
+      };
+      effectiveMapping = input.mapping ?? undefined; // mantém override manual, ou usa autoMapHeaders abaixo
+    }
+  } else {
+    resolution = { type: "no_profile", mapping: initialParsed.mapping };
+    effectiveMapping = input.mapping ?? undefined;
+  }
+
+  // Se houve override manual ou não há perfil válido, re-parse com o mapping efetivo
+  let parsedForMapping = initialParsed;
+  if (effectiveMapping && (!profile || resolution.type === "profile_invalid") && input.mapping) {
+    if (input.mapping) {
+      parsedForMapping = parseSupplierCsv(input.csvText, input.mapping);
+    }
+  } else if (profile && resolution.type === "profile_valid" && !input.mapping) {
+    parsedForMapping = parseSupplierCsv(input.csvText, profile.mapping);
+  }
+
+  const parsed = parsedForMapping;
 
   const index = await buildIndexForRows(parsed.rows, supplier.id);
   const plans = planSupplierRows(parsed.rows, index);
@@ -1289,3 +1328,74 @@ export async function listSupplierImports(
     summary: (r.summary as Record<string, unknown> | null) ?? null,
   }));
 }
+
+// ─── C.3.2 — Perfil de importação por fornecedor ──
+export interface SupplierImportProfile {
+  id: number;
+  supplierId: number;
+  mapping: Record<string, string>;
+  delimiter?: string | null;
+  createdBy?: number | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+/** Carrega o perfil ativo de um fornecedor (0 ou 1 devido ao UNIQUE). */
+export async function loadSupplierProfile(supplierId: number): Promise<SupplierImportProfile | null> {
+  const [profile] = await db.select({
+    id: supplierImportProfiles.id,
+    supplierId: supplierImportProfiles.supplierId,
+    mapping: supplierImportProfiles.mapping,
+    delimiter: supplierImportProfiles.delimiter,
+    createdBy: supplierImportProfiles.createdBy,
+    createdAt: supplierImportProfiles.createdAt,
+    updatedAt: supplierImportProfiles.updatedAt,
+  }).from(supplierImportProfiles).where(eq(supplierImportProfiles.supplierId, supplierId)).limit(1);
+  return profile ?? null;
+}
+
+/** Guarda (INSERT ou UPDATE) o perfil para um fornecedor. */
+export async function saveSupplierProfile(
+  supplierId: number,
+  mapping: Record<string, string>,
+  delimiter?: string | null,
+  userId?: number
+): Promise<{ id: number; updated: boolean }> {
+  const existing = await loadSupplierProfile(supplierId);
+  if (existing) {
+    await db.update(supplierImportProfiles).set({
+      mapping,
+      delimiter: delimiter ?? null,
+      updatedAt: new Date(),
+    }).where(eq(supplierImportProfiles.id, existing.id));
+    return { id: existing.id, updated: true };
+  }
+  const [created] = await db.insert(supplierImportProfiles).values({
+    supplierId,
+    mapping,
+    delimiter: delimiter ?? null,
+    createdBy: userId ?? null,
+  }).returning({ id: supplierImportProfiles.id });
+  return { id: created.id, updated: false };
+}
+
+/** Verifica se o mapping do perfil ainda é compatível com os headers do ficheiro. */
+export function isProfileCompatibleWithHeaders(
+  profileMapping: Record<string, string>,
+  fileHeaders: string[]
+): boolean {
+  const normalizedHeaders = fileHeaders.map((h) => h.toLowerCase().trim());
+  for (const [header, field] of Object.entries(profileMapping)) {
+    const headerLower = header.toLowerCase().trim();
+    if (!normalizedHeaders.includes(headerLower)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** Estado de resolução do mapping para o preview. */
+export type ProfileResolution =
+  | { type: "profile_valid"; mapping: Record<string, string>; profileId?: number }
+  | { type: "profile_invalid"; reason: string; mapping: Record<string, string>; profileId?: number }
+  | { type: "no_profile"; mapping: Record<string, string> };

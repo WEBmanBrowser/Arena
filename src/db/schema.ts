@@ -1039,6 +1039,19 @@ export const supplierImportRows = pgTable("supplier_import_rows", {
  * number — and because it is not transactional, a rolled-back batch only leaves
  * a gap, never a duplicate.
  */
+export const supplierImportProfiles = pgTable("supplier_import_profiles", {
+  id: serial("id").primaryKey(),
+  supplierId: integer("supplier_id").notNull().references(() => suppliers.id, { onDelete: "cascade" }),
+  mapping: jsonb("mapping").notNull().default("{}"),
+  delimiter: varchar("delimiter", { length: 10 }),
+  createdBy: integer("created_by").references(() => users.id),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+}, (t) => [
+  index("sip_supplier_idx").on(t.supplierId),
+  uniqueIndex("sip_supplier_unique").on(t.supplierId),
+]);
+
 export const productInternalSkuSeq = pgSequence("product_internal_sku_seq", {
   startWith: 1,
   increment: 1,
