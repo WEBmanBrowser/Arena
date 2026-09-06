@@ -61,12 +61,18 @@ import {
   SUPPLIER_IMPORT_PREVIEW_LIMIT,
 } from "@/lib/supplier-import/constants";
 import {
-  parseSupplierCsv,
   sha256Hex,
   byteLengthUtf8,
   type NormalizedSupplierRow,
   type SupplierImportIssue,
 } from "@/lib/supplier-import/normalize";
+// C.3.3 (etapa 1) — o serviço já não chama o parser CSV diretamente: passa pelo
+// dispatcher de formatos e pelo resolvedor puro de mapping/perfil (C.3.2).
+import {
+  isProfileCompatibleWithHeaders,
+  parseSupplierFile,
+  resolveSupplierFileMapping,
+} from "@/lib/supplier-import/file";
 import {
   planSupplierRows,
   summarizePlan,
@@ -355,46 +361,24 @@ export async function previewSupplierImport(input: PreviewInput): Promise<Suppli
   // Primeiro parse (auto ou manual) para obter headers; depois verifica perfil.
   // Mapping manual VAZIO é tratado como ausente: a UI envia sempre mapping:{},
   // e um objeto vazio não pode esconder um perfil guardado válido.
+  //
+  // C.3.3 (etapa 1) — o parse passa pelo dispatcher parseSupplierFile (hoje
+  // apenas o ramo CSV) e a resolução perfil/mapping vive em
+  // resolveSupplierFileMapping (./supplier-import/file), com a MESMA semântica
+  // C.3.2: a ordem de execução mantém-se — parse inicial ANTES de carregar o
+  // perfil da base de dados, re-parse com o perfil só quando aplicável.
   const manualMapping = hasManualMappingEntries(input.mapping) ? input.mapping : undefined;
-  const initialParsed = parseSupplierCsv(input.csvText, manualMapping);
+  const initialParsed = parseSupplierFile(input.csvText, manualMapping);
   const fileHash = sha256Hex(input.csvText);
   const fileSizeBytes = byteLengthUtf8(input.csvText);
 
   const profile = await loadSupplierProfile(supplier.id);
-  let resolution: ProfileResolution;
-  let parsed = initialParsed;
-
-  if (profile && !manualMapping) {
-    // Sem mapeamento manual, um perfil válido guardado tem prioridade: o CSV é
-    // relido com o mapping do perfil e o snapshot (supplier_imports.mapping)
-    // continua a ser o mapping realmente usado.
-    if (isProfileCompatibleWithHeaders(profile.mapping, initialParsed.headers)) {
-      parsed = parseSupplierCsv(input.csvText, profile.mapping);
-      resolution = { type: "profile_valid", mapping: profile.mapping, profileId: profile.id };
-    } else {
-      resolution = {
-        type: "profile_invalid",
-        reason: "O formato desta lista parece ter mudado. Confirme o mapeamento antes de continuar.",
-        mapping: profile.mapping,
-        profileId: profile.id,
-      };
-      // parsed fica o parse inicial (autoMapHeaders) — fallback seguro.
-    }
-  } else if (profile && manualMapping) {
-    // Mapeamento manual NÃO VAZIO mantém o comportamento manual atual: o CSV é
-    // lido com o mapeamento do operador (initialParsed); o perfil apenas
-    // informa a resolução.
-    resolution = isProfileCompatibleWithHeaders(profile.mapping, initialParsed.headers)
-      ? { type: "profile_valid", mapping: profile.mapping, profileId: profile.id }
-      : {
-          type: "profile_invalid",
-          reason: "O formato desta lista parece ter mudado. Confirme o mapeamento antes de continuar.",
-          mapping: profile.mapping,
-          profileId: profile.id,
-        };
-  } else {
-    resolution = { type: "no_profile", mapping: initialParsed.mapping };
-  }
+  let { parsed, resolution } = resolveSupplierFileMapping({
+    initial: initialParsed,
+    reparse: (mapping) => parseSupplierFile(input.csvText, mapping),
+    manualMapping,
+    profile,
+  });
 
   // C.3.2 — Guardar perfil durante o preview.
   // O mapping guardado é exatamente o mapping efetivamente usado neste preview
@@ -1483,23 +1467,9 @@ export async function saveSupplierProfile(
   return { id: created.id, updated: false };
 }
 
-/** Verifica se o mapping do perfil ainda é compatível com os headers do ficheiro. */
-export function isProfileCompatibleWithHeaders(
-  profileMapping: Record<string, string>,
-  fileHeaders: string[]
-): boolean {
-  const normalizedHeaders = fileHeaders.map((h) => h.toLowerCase().trim());
-  for (const [header, field] of Object.entries(profileMapping)) {
-    const headerLower = header.toLowerCase().trim();
-    if (!normalizedHeaders.includes(headerLower)) {
-      return false;
-    }
-  }
-  return true;
-}
-
-/** Estado de resolução do mapping para o preview. */
-export type ProfileResolution =
-  | { type: "profile_valid"; mapping: Record<string, string>; profileId?: number }
-  | { type: "profile_invalid"; reason: string; mapping: Record<string, string>; profileId?: number }
-  | { type: "no_profile"; mapping: Record<string, string>; profileId?: number };
+// ─── C.3.3 (etapa 1) — movidos para @/lib/supplier-import/file ──
+// `isProfileCompatibleWithHeaders` e o tipo `ProfileResolution` passaram a viver
+// junto da resolução mapping/perfil (pura, agnóstica ao formato). Mantêm-se
+// exportados DAQUI para não partir os importadores C.3.2 existentes.
+export { isProfileCompatibleWithHeaders } from "@/lib/supplier-import/file";
+export type { ProfileResolution } from "@/lib/supplier-import/file";
