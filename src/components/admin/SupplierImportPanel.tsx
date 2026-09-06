@@ -326,7 +326,7 @@ export default function SupplierImportPanel() {
             são recalculados pelo motor de pricing e produtos com preço manual mantêm o preço que definiram.
           </p>
         </div>
-        <span className="text-[10px] uppercase tracking-wide text-slate-400 border rounded px-2 py-1">C.3.1</span>
+        <span className="text-[10px] uppercase tracking-wide text-slate-400 border rounded px-2 py-1">C.3.2</span>
       </div>
 
       <div className="grid grid-cols-3 gap-4 mt-4">

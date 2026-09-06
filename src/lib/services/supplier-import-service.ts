@@ -321,6 +321,11 @@ export interface PreviewInput {
   csvText: string;
   mapping?: Record<string, string>;
   userId: number;
+  /**
+   * C.3.2 — quando true e o mapping efetivamente usado for válido, o perfil do
+   * fornecedor é gravado durante o próprio PREVIEW (e reutilizado no seguinte).
+   */
+  saveProfile?: boolean;
 }
 
 interface ProductInfo {
@@ -382,6 +387,22 @@ export async function previewSupplierImport(input: PreviewInput): Promise<Suppli
   }
 
   const parsed = parsedForMapping;
+
+  // C.3.2 — Guardar perfil durante o preview.
+  // O mapping guardado é exatamente o mapping efetivamente usado neste preview
+  // (o mesmo snapshot que fica em supplier_imports.mapping), pelo que um
+  // segundo preview reutiliza o perfil sem alterar o histórico já persistido.
+  if (input.saveProfile) {
+    const mappingToSave = parsed.mapping;
+    const validMapping =
+      isStringRecord(mappingToSave) &&
+      Object.keys(mappingToSave).length > 0 &&
+      isProfileCompatibleWithHeaders(mappingToSave, parsed.headers);
+    if (validMapping) {
+      const saved = await saveSupplierProfile(supplier.id, mappingToSave, parsed.delimiter, input.userId);
+      resolution = { type: "profile_valid", mapping: mappingToSave, profileId: saved.id };
+    }
+  }
 
   const index = await buildIndexForRows(parsed.rows, supplier.id);
   const plans = planSupplierRows(parsed.rows, index);
