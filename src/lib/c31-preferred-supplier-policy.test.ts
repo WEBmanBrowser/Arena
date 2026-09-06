@@ -19,8 +19,8 @@ async function cleanupPolicy() {
 
 beforeAll(async () => {
   await cleanupPolicy();
-  await db.insert(suppliers).values({ id: 1, name: `${TAG} Supplier`, isActive: true }).onConflictDoNothing();
-  await db.insert(suppliers).values({ id: 2, name: `${TAG} Other`, isActive: true }).onConflictDoNothing();
+  await db.insert(suppliers).values({ name: `${TAG} Supplier`, isActive: true }).onConflictDoNothing();
+  await db.insert(suppliers).values({ name: `${TAG} Other`, isActive: true }).onConflictDoNothing();
   await db.insert(users).values({ id: 1, email: `${TAG}@test.local`, password: "x", name: "Test", role: "manager" }).onConflictDoNothing();
 });
 

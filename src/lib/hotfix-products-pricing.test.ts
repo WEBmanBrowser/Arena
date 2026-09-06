@@ -202,10 +202,10 @@ describe("schema/migration coherence", () => {
 
     const tags = journal.entries.map(e => e.tag);
     expect(tags).toContain("0009_c1_pricing_engine");
-    // C.3.1 (supplier import) is exactly ONE new migration, 0010. Nothing after
-    // it may exist yet — that would mean a phase shipped without a decision.
+    // C.3.1 introduziu 0010; C.3.2 introduziu 0011 (supplier import profiles, legítima).
+    // A proteção é contra tags sem ficheiros .sql reais ou drift indevido (excluindo 0010/0011).
     expect(tags).toContain("0010_c31_supplier_import");
-    expect(journal.entries.filter(e => e.idx >= 11)).toHaveLength(0);
+    expect(journal.entries.filter(e => e.idx >= 12)).toHaveLength(0);
 
     // Every entry must resolve to a real file: drizzle-kit's migrator opens
     // `${tag}.sql`, so a tag that does not match a file name fails the whole
