@@ -101,8 +101,14 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ profile: saved, action: "saveProfile" });
   }
 
-  const mapping = body.mapping && typeof body.mapping === "object"
-    ? (body.mapping as Record<string, string>)
+  // C.3.2 — a UI envia sempre `mapping` ({} quando não há escolha manual); um
+  // mapping vazio é tratado como AUSENTE para não esconder o perfil guardado.
+  // Só um mapping manual com pelo menos uma entrada string→string passa adiante.
+  const bodyMapping = body.mapping && typeof body.mapping === "object" && !Array.isArray(body.mapping)
+    ? (body.mapping as Record<string, unknown>)
+    : undefined;
+  const mapping = bodyMapping && Object.values(bodyMapping).some((v) => typeof v === "string")
+    ? (bodyMapping as Record<string, string>)
     : undefined;
   // C.3.2 — o preview pode pedir para guardar o perfil do fornecedor.
   const saveProfile = body.saveProfile === true || body.saveProfile === "true";
