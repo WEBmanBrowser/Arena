@@ -192,7 +192,7 @@ describe("C.3.4.1 — IP helpers puros", () => {
 
 describe("C.3.4.1 — guardSupplierSourceUrl (guardas SSRF puras)", () => {
   it("HTTPS público válido: aceite (hostname devolvido normalizado)", () => {
-    const r = guardSupplierSourceUrl("https://supplier.example.com/files/lista.csv?token=abc");
+    const r = guardSupplierSourceUrl("https://supplier.example.com/files/lista.csv");
     expect(r.ok).toBe(true);
     if (r.ok) {
       expect(r.hostname).toBe("supplier.example.com");
@@ -200,6 +200,35 @@ describe("C.3.4.1 — guardSupplierSourceUrl (guardas SSRF puras)", () => {
     }
     const withPort = guardSupplierSourceUrl("https://supplier.example.com:8443/x");
     expect(withPort.ok).toBe(true);
+  });
+
+  it("C.3.4.2 fail-closed: query e fragmento são PROIBIDOS (sem sanitização silenciosa)", () => {
+    for (const [url, code] of [
+      ["https://supplier.example.com/files/lista.csv?token=abc", "SOURCE_URL_QUERY_NOT_ALLOWED"],
+      ["https://supplier.example.com/feed.csv?x=1", "SOURCE_URL_QUERY_NOT_ALLOWED"],
+      ["https://supplier.example.com/feed.csv?a=1#frag", "SOURCE_URL_QUERY_NOT_ALLOWED"],
+      ["https://supplier.example.com/feed.csv#top", "SOURCE_URL_FRAGMENT_NOT_ALLOWED"],
+    ] as const) {
+      const r = guardSupplierSourceUrl(url);
+      expect(r.ok, url).toBe(false);
+      if (!r.ok) {
+        expect(r.code, url).toBe(code);
+        // a mensagem é estática: NUNCA ecoa o URL nem o valor do parâmetro
+        expect(r.message, url).not.toContain("abc");
+        expect(r.message, url).not.toContain(url);
+      }
+    }
+  });
+
+  it("C.3.4.2: '?' ou '#' sem conteúdo NÃO carregam parâmetros (search/hash vazios) — aceites", () => {
+    // Política é sobre DADOS (query/fragmento com conteúdo podem esconder
+    // tokens); um "?" sem parâmetros não veicula nada — `url.search === ""`.
+    const r = guardSupplierSourceUrl("https://supplier.example.com/feed.csv?");
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.url.search).toBe("");
+    const h = guardSupplierSourceUrl("https://supplier.example.com/feed.csv#");
+    expect(h.ok).toBe(true);
+    if (h.ok) expect(h.url.hash).toBe("");
   });
 
   it("HTTP é recusado por defeito; allowHttp é opt-in explícito", () => {

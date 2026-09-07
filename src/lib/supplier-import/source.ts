@@ -19,15 +19,19 @@
  * NÃO é alterado nesta fase — SupplierFileParse continua a ser o contrato de
  * saída dos parsers (nunca substituído por NormalizedSupplierRow[] isolado).
  *
- * Nesta fase:
+ * Nesta fase (C.3.4.1):
  *  - o upload CSV/XLSX é convertido para SourcePayload por `uploadSource()`,
  *    usado pela rota E pelos testes de serviço (compatibilidade garantida);
- *  - o serviço (previewSupplierImport) passa a receber apenas `source`;
- *  - NÃO existe fetch remoto: as guardas de URL/SSRF abaixo são PURAS
- *    (sem DNS, sem rede, sem I/O) — prontas para a C.3.4.2.
+ *  - o serviço (previewSupplierImport) passa a receber apenas `source`.
+ *
+ * C.3.4.2 acrescenta a este módulo o fetch remoto HTTPS (`fetchSource`),
+ * reutilizando as guardas de URL/SSRF PURAS abaixo (sem DNS, sem rede, sem I/O
+ * na validação) — o único I/O vive no `fetchSource`, que produz um
+ * SourcePayload idêntico ao do upload e nada mais.
  */
 import { classifySupplierFileName, type SupplierFileFormat } from "./file";
 import { byteLengthUtf8, sha256Hex, sha256HexBytes } from "./normalize";
+import { CSV_MAX_SIZE } from "@/lib/csv";
 
 // ─── Tipos ────────────────────────────────────────────────
 
@@ -158,6 +162,8 @@ export const SOURCE_URL_GUARD_CODES = [
   "SOURCE_URL_TOO_LONG",
   "SOURCE_URL_SCHEME",
   "SOURCE_URL_CREDENTIALS",
+  "SOURCE_URL_QUERY_NOT_ALLOWED",
+  "SOURCE_URL_FRAGMENT_NOT_ALLOWED",
   "SOURCE_URL_HOST",
   "SOURCE_URL_LOCAL_HOST",
   "SOURCE_URL_PRIVATE_IP",
@@ -328,8 +334,13 @@ const fail = (code: SourceUrlGuardCode, message: string): SourceUrlGuardResult =
  * Guarda PURA de URL de fonte de fornecedor (sem DNS, sem rede).
  *
  * Verifica: formato (HTTPS por defeito), userinfo (credenciais na URL
- * proibidas), literal de IP privado/especial/metadados (IPv4+IPv6+IPv4-mapped),
- * hostnames locais/metadados por convenção, hosts numéricos e comprimento.
+ * proibidas), query string e fragmento PROIBIDOS (política fail-closed
+ * C.3.4.2: tokens em `?...` acabariam em `supplier_sources.url`,
+ * `source_label` e `file_name`; autenticação vive exclusivamente em
+ * basic/bearer/header + `secret_reference` — NUNCA se "sanitiza" removendo a
+ * query, rejeita-se a configuração), literal de IP privado/especial/metadados
+ * (IPv4+IPv6+IPv4-mapped), hostnames locais/metadados por convenção, hosts
+ * numéricos e comprimento.
  *
  * NÃO resolve DNS (limitação conhecida do Workers: não há pinning — a
  * C.3.4.2 adiciona allowlist exata de hostname + revalidação em cada redirect
@@ -360,6 +371,18 @@ export function guardSupplierSourceUrl(
   if (url.username || url.password) {
     return fail("SOURCE_URL_CREDENTIALS", "credenciais na URL são proibidas");
   }
+  // Política fail-closed (C.3.4.2): query strings podem carregar tokens que
+  // acabariam persistidos (`supplier_sources.url`, `source_label`,
+  // `file_name`). NÃO se remove a query para continuar — a query pode ser
+  // parte da autenticação/semântica do recurso; rejeita-se a configuração.
+  // `url.search` é "" tanto para "sem ?" como para "?" vazio (o parser
+  // WHATWG normaliza o vazio fora do href, logo nada viaja na rede).
+  if (url.search) {
+    return fail("SOURCE_URL_QUERY_NOT_ALLOWED", "parâmetros de query na URL da fonte são proibidos; use basic/bearer/header");
+  }
+  if (url.hash) {
+    return fail("SOURCE_URL_FRAGMENT_NOT_ALLOWED", "fragmento (#) na URL da fonte é proibido");
+  }
 
   const hostname = url.hostname.toLowerCase().replace(/\.$/, "");
   if (!hostname) return fail("SOURCE_URL_HOST", "host ausente");
@@ -368,4 +391,456 @@ export function guardSupplierSourceUrl(
   if (isLocalHostname(hostname)) return fail("SOURCE_URL_LOCAL_HOST", "hostname local/metadados bloqueado");
 
   return { ok: true, url, hostname };
+}
+
+// ═══════════════════════════════════════════════════════════
+// C.3.4.2 — FETCH REMOTO HTTPS
+// ═══════════════════════════════════════════════════════════
+//
+// `fetchSource` é a ÚNICA forma de obter conteúdo remoto. Não conhece o
+// parser, o mapping nem o motor: devolve o MESMO SourcePayload do upload,
+// produzido pelas mesmas regras (formato decidido por "explícito vence; auto
+// deteta PK\x03\x04 → xlsx, senão csv — Content-Type é apenas informativo).
+//
+// Regras fixas desta fase:
+//  - APENAS HTTPS (o `allowHttp` das guardas puras NÃO é usado aqui);
+//  - `redirect: "manual"` sempre — o redirect NUNCA é seguido automaticamente;
+//    cada `Location` é revalidado com TODAS as regras e tem de manter o
+//    hostname original (cross-host é SOURCE_REDIRECT_BLOCKED; máximo 3);
+//  - corpo lido em STREAMING com teto de 5 MB (mesmo teto dos parsers,
+//    `CSV_MAX_SIZE`); `Content-Length` acima do teto aborta ANTES de ler;
+//  - timeout de 10 s por tentativa via AbortController/AbortSignal
+//    (compatível com Cloudflare Workers); máximo de 3 tentativas NO TOTAL,
+//    apenas para timeout/rede, 429, 502, 503, 504 (com Retry-After ≤ 10 s);
+//  - segredos NUNCA vêm da BD nem da UI: `secret_reference` é o NOME da
+//    variável de ambiente; o valor é resolvido só em runtime e nunca é
+//    devolvido, persistido nem escrito em erro/log.
+
+/** Timeout por tentativa (ms). */
+export const SOURCE_FETCH_TIMEOUT_MS = 10_000;
+/** Tentativas TOTAL por fetch (não por redirect). */
+export const SOURCE_FETCH_MAX_ATTEMPTS = 3;
+/** Redirects máximos seguidos manualmente. */
+export const SOURCE_MAX_REDIRECTS = 3;
+/** Teto de bytes ACEITES: o mesmo 5 MB dos parsers (CSV_MAX_SIZE = XLSX_MAX_SIZE_BYTES). */
+export const SOURCE_MAX_CONTENT_BYTES = CSV_MAX_SIZE;
+/** Retry-After só é "razoável" até 10 s; acima disso não se espera — falha já. */
+export const SOURCE_MAX_RETRY_AFTER_MS = 10_000;
+
+/** Status HTTP que justificam nova tentativa (e apenas estes + timeout/rede). */
+const RETRYABLE_HTTP_STATUSES = new Set([429, 502, 503, 504]);
+
+/** Códigos de erro estáveis do fetch remoto (nunca texto bruto do erro). */
+export const SOURCE_FETCH_ERROR_CODES = [
+  "SOURCE_URL_INVALID",
+  "SOURCE_AUTH_SECRET_MISSING",
+  "SOURCE_AUTH_CONFIG_INVALID",
+  "SOURCE_HEADERS_CONFIG_INVALID",
+  "SOURCE_FETCH_TIMEOUT",
+  "SOURCE_FETCH_FAILED",
+  "SOURCE_HTTP_401",
+  "SOURCE_HTTP_403",
+  "SOURCE_HTTP_404",
+  "SOURCE_HTTP_429",
+  "SOURCE_HTTP_5XX",
+  "SOURCE_TOO_LARGE",
+  "SOURCE_REDIRECT_BLOCKED",
+] as const;
+export type SourceFetchErrorCode = (typeof SOURCE_FETCH_ERROR_CODES)[number];
+
+/** Erro de fetch remoto: código estável + status HTTP do REMOTO (para `last_http_status`). */
+export class SourceFetchError extends SupplierSourceError {
+  /** `httpStatus` (base) é o status da NOSSA API; `remoteStatus` o do fornecedor. */
+  constructor(code: string, httpStatus: number, readonly remoteStatus: number | null = null) {
+    super(code, httpStatus);
+    this.name = "SourceFetchError";
+  }
+}
+
+export const SOURCE_AUTH_TYPES = ["none", "basic", "bearer", "header"] as const;
+export type SourceAuthType = (typeof SOURCE_AUTH_TYPES)[number];
+
+/**
+ * Chave reservada em `headers_config` para auth=header: contém só o NOME do
+ * header para onde o segredo vai (o valor nunca é configurado aqui).
+ */
+export const SOURCE_SECRET_HEADER_KEY = "headerName";
+
+/** O que o fetch precisa de saber da source (projeção de supplier_sources — sem segredos). */
+export interface RemoteSourceConfig {
+  url: string;
+  format: "auto" | "csv" | "xlsx";
+  authType: SourceAuthType;
+  /** Não-secreto (Basic Auth user). */
+  username?: string | null;
+  /** NOME da variável de ambiente com o segredo; nunca o valor. */
+  secretReference?: string | null;
+  /** Headers não-secretos; `headerName` é reservado (auth=header). */
+  headersConfig?: Record<string, unknown> | null;
+  /** Validadores da última resposta boa (condicional GET). */
+  lastEtag?: string | null;
+  lastModified?: string | null;
+}
+
+/** Injeção de dependências — o padrão do cliente Eupago: testes não precisam de rede. */
+export interface FetchSourceOptions {
+  fetchImpl?: typeof fetch;
+  env?: Record<string, string | undefined>;
+  timeoutMs?: number;
+  maxAttempts?: number;
+  maxRedirects?: number;
+  maxBytes?: number;
+  /** Sobrescrevível nos testes para não dormir de verdade no Retry-After. */
+  sleepImpl?: (ms: number) => Promise<void>;
+}
+
+export type FetchSourceResult =
+  | { kind: "not_modified"; httpStatus: 304 }
+  | {
+      kind: "content";
+      httpStatus: number;
+      payload: SourcePayload;
+      etag: string | null;
+      lastModified: string | null;
+    };
+
+// ─── Segredo + cabeçalhos ─────────────────────────────────
+
+/** Nome de env legal para `secret_reference` (fail closed: nada fora disto é lido). */
+const SECRET_ENV_NAME_RE = /^[A-Z][A-Z0-9_]{0,254}$/;
+
+/**
+ * Resolve o segredo EXCLUSIVAMENTE em runtime a partir do NOME guardado na BD
+ * (`process.env[secretReference]`). Se não existir → SOURCE_AUTH_SECRET_MISSING.
+ * O valor devolvido NUNCA é copiado para erros, logs, BD ou respostas.
+ */
+export function resolveSourceSecret(
+  secretReference: string | null | undefined,
+  env: Record<string, string | undefined> = process.env
+): string {
+  if (typeof secretReference !== "string" || !SECRET_ENV_NAME_RE.test(secretReference)) {
+    throw new SourceFetchError("SOURCE_AUTH_SECRET_MISSING", 500);
+  }
+  const value = env[secretReference];
+  if (typeof value !== "string" || value.length === 0 || /[\r\n\0]/.test(value)) {
+    // /[\r\n\0]/: um valor com CRLF permitiria header injection; é sempre um
+    // erro de configuração — nunca se envia, nunca se revela o motivo técnico.
+    throw new SourceFetchError("SOURCE_AUTH_SECRET_MISSING", 500);
+  }
+  return value;
+}
+
+/** Header name = token HTTP (RFC 7230). */
+const HEADER_TOKEN_RE = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+
+/**
+ * Headers que a config não-secreta NUNCA pode definir — são do transporte ou
+ * da autenticação (que só existe via secret_reference). Defenso em profundidade
+ * contra um segredo/Authorization escrito em headers_config.
+ */
+export const FORBIDDEN_SOURCE_HEADERS = [
+  "authorization", "proxy-authorization", "cookie", "set-cookie", "host",
+  "content-length", "content-type", "connection", "keep-alive", "te",
+  "trailer", "transfer-encoding", "upgrade", "expect", "date",
+] as const;
+
+function base64Utf8(input: string): string {
+  // btoa + TextEncoder existem no Node (≥16) e no workerd (nodejs_compat);
+  // sem dependências novas e sem Buffer no caminho de auth.
+  const bytes = new TextEncoder().encode(input);
+  let binary = "";
+  for (const b of bytes) binary += String.fromCharCode(b);
+  return btoa(binary);
+}
+
+/**
+ * Constrói os headers do pedido. Seguros por construção:
+ *  - segredos só entram via resolveSourceSecret (nunca da BD/URL/config);
+ *  - headers_config não-secreto é validado (token, sem CRLF, sem nomes
+ *    reservados) e `headerName` reservado não é enviado como header literal;
+ *  - `Accept-Encoding: identity` — os bytes contados no streaming são os
+ *    bytes que o parser vê (sem gzip a falsear Content-Length/tamanho);
+ *  - validadores condicionais só existem se a fonte os guardou.
+ */
+export function buildSourceRequestHeaders(
+  cfg: RemoteSourceConfig,
+  env: Record<string, string | undefined> = process.env
+): Record<string, string> {
+  const headers: Record<string, string> = {
+    accept: "text/csv, application/vnd.openxmlformats-officedocument.spreadsheetml.sheet, */*",
+    "accept-encoding": "identity",
+    "cache-control": "no-cache",
+    "user-agent": "MDTech-SupplierSource/1.0",
+  };
+
+  const configEntries: Array<[string, unknown]> =
+    cfg.headersConfig && typeof cfg.headersConfig === "object" && !Array.isArray(cfg.headersConfig)
+      ? Object.entries(cfg.headersConfig as Record<string, unknown>)
+      : [];
+
+  for (const [rawName, rawValue] of configEntries) {
+    if (rawName === SOURCE_SECRET_HEADER_KEY) continue; // reservado: é config, não header
+    const name = String(rawName);
+    const value = typeof rawValue === "string" ? rawValue : "";
+    if (
+      !HEADER_TOKEN_RE.test(name) ||
+      FORBIDDEN_SOURCE_HEADERS.includes(name.toLowerCase() as (typeof FORBIDDEN_SOURCE_HEADERS)[number]) ||
+      typeof rawValue !== "string" ||
+      /[\r\n\0]/.test(value) ||
+      value.length > 2048
+    ) {
+      throw new SourceFetchError("SOURCE_HEADERS_CONFIG_INVALID", 400);
+    }
+    headers[name] = value;
+  }
+
+  if (cfg.authType !== "none") {
+    const secret = resolveSourceSecret(cfg.secretReference, env);
+    if (cfg.authType === "basic") {
+      const username = typeof cfg.username === "string" ? cfg.username.trim() : "";
+      if (!username || /[\r\n\0]/.test(username)) {
+        throw new SourceFetchError("SOURCE_AUTH_CONFIG_INVALID", 500);
+      }
+      headers.authorization = `Basic ${base64Utf8(`${username}:${secret}`)}`;
+    } else if (cfg.authType === "bearer") {
+      headers.authorization = `Bearer ${secret}`;
+    } else {
+      // auth=header: o NOME vem de headers_config (não-secreto); o VALOR só do secret.
+      const headerName = (cfg.headersConfig as Record<string, unknown> | null | undefined)?.[SOURCE_SECRET_HEADER_KEY];
+      if (
+        typeof headerName !== "string" ||
+        !HEADER_TOKEN_RE.test(headerName) ||
+        FORBIDDEN_SOURCE_HEADERS.includes(headerName.toLowerCase() as (typeof FORBIDDEN_SOURCE_HEADERS)[number])
+      ) {
+        throw new SourceFetchError("SOURCE_AUTH_CONFIG_INVALID", 500);
+      }
+      headers[headerName] = secret;
+    }
+  }
+
+  if (cfg.lastEtag && String(cfg.lastEtag).trim()) headers["if-none-match"] = String(cfg.lastEtag).trim();
+  if (cfg.lastModified && String(cfg.lastModified).trim()) headers["if-modified-since"] = String(cfg.lastModified).trim();
+  return headers;
+}
+
+// ─── Leitura em streaming com teto ────────────────────────
+
+interface BodySource {
+  status: number;
+  headers: { get(name: string): string | null };
+  body: { getReader(): { read(): Promise<{ done: boolean; value?: Uint8Array }>; cancel(reason?: unknown): Promise<void> } } | null;
+}
+
+/**
+ * Lê `response.body` em streaming até `maxBytes`. Interrompe ASSIM que o
+ * limite é ultrapassado (mesmo sem Content-Length) e cancela o leitor.
+ * NUNCA `response.arrayBuffer()` sem limite.
+ */
+export async function readBodyCapped(source: BodySource, maxBytes: number): Promise<Uint8Array> {
+  // Guardas: o shape mínimo tem de existir; um body não-iterável é erro, não crash.
+  const reader = source.body?.getReader();
+  if (!reader) return new Uint8Array(0);
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value || value.byteLength === 0) continue;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await Promise.resolve(reader.cancel()).catch(() => undefined);
+        throw new SourceFetchError("SOURCE_TOO_LARGE", 413);
+      }
+      chunks.push(value);
+    }
+  } finally {
+    // nada a libertar no contrato mínimo; mantém o try/finally explícito p/ mocks.
+  }
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return out;
+}
+
+function parseContentLength(value: string | null): number | null {
+  if (value === null) return null;
+  const n = Number(value.trim());
+  if (!Number.isSafeInteger(n) || n < 0) return null;
+  return n;
+}
+
+function parseRetryAfterMs(value: string | null): number | null {
+  if (value === null) return null;
+  const trimmed = value.trim();
+  if (/^\d{1,9}$/.test(trimmed)) return Math.min(Number(trimmed) * 1000, 24 * 3600_000);
+  const date = Date.parse(trimmed);
+  if (Number.isFinite(date)) return Math.max(0, Math.min(date - Date.now(), 24 * 3600_000));
+  return null;
+}
+
+/** Assinatura ZIP/OOXML (mesmo critério do parser XLSX): PK\x03\x04 → xlsx. */
+function looksLikeXlsx(bytes: Uint8Array): boolean {
+  return bytes.byteLength >= 4 && bytes[0] === 0x50 && bytes[1] === 0x4b && bytes[2] === 0x03 && bytes[3] === 0x04;
+}
+
+function httpFailureError(status: number): SourceFetchError {
+  const code: SourceFetchErrorCode =
+    status === 401 ? "SOURCE_HTTP_401"
+      : status === 403 ? "SOURCE_HTTP_403"
+        : status === 404 ? "SOURCE_HTTP_404"
+          : status === 429 ? "SOURCE_HTTP_429"
+            : status >= 500 && status <= 599 ? "SOURCE_HTTP_5XX"
+              : "SOURCE_FETCH_FAILED";
+  // A nossa API responde 502 (o remoto não produziu representação); o status
+  // do fornecedor segue no `remoteStatus` para `last_http_status`.
+  return new SourceFetchError(code, status === 429 ? 429 : 502, status);
+}
+
+// ─── fetchSource ──────────────────────────────────────────
+
+/**
+ * Obtém o conteúdo remoto de uma fonte de fornecedor e devolve o SourcePayload
+ * (ou `not_modified` num 304 condicionado). Não parseia, não grava nada.
+ */
+export async function fetchSource(cfg: RemoteSourceConfig, opts: FetchSourceOptions = {}): Promise<FetchSourceResult> {
+  const timeoutMs = Math.max(1, opts.timeoutMs ?? SOURCE_FETCH_TIMEOUT_MS);
+  const maxAttempts = Math.max(1, Math.min(opts.maxAttempts ?? SOURCE_FETCH_MAX_ATTEMPTS, 10));
+  const maxRedirects = Math.max(0, Math.min(opts.maxRedirects ?? SOURCE_MAX_REDIRECTS, 10));
+  const maxBytes = Math.max(1, Math.min(opts.maxBytes ?? SOURCE_MAX_CONTENT_BYTES, SOURCE_MAX_CONTENT_BYTES));
+  const fetchImpl = opts.fetchImpl ?? globalThis.fetch;
+  const env = opts.env ?? process.env;
+  const sleep = opts.sleepImpl ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+
+  if (typeof fetchImpl !== "function") throw new SourceFetchError("SOURCE_FETCH_FAILED", 500);
+
+  // 1) URL validada ANTES de qualquer fetch. HTTPS apenas — allowHttp não existe aqui.
+  if (typeof cfg.url !== "string" || !cfg.url.trim()) throw new SourceFetchError("SOURCE_URL_INVALID", 400);
+  const initial = guardSupplierSourceUrl(cfg.url.trim());
+  if (!initial.ok) throw new SourceFetchError(initial.code, 400);
+  const originHostname = initial.hostname;
+
+  // 2) Headers (auth/condicional/config) — constuídos UMA vez; um segredo
+  //    ausente falha aqui, antes de qualquer rede.
+  const headers = buildSourceRequestHeaders(cfg, env);
+
+  let current = initial.url;
+  let redirectsFollowed = 0;
+  let attempt = 0;
+
+  for (;;) {
+    attempt += 1;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    let response: Response;
+    try {
+      response = await fetchImpl(current.href, {
+        method: "GET",
+        redirect: "manual", // NUNCA seguir automaticamente
+        headers: { ...headers },
+        signal: controller.signal,
+      });
+    } catch (e) {
+      clearTimeout(timer);
+      if (attempt < maxAttempts) continue; // retry: timeout/rede
+      const timedOut = controller.signal.aborted || (e instanceof Error && /abort/i.test(e.name));
+      throw new SourceFetchError(timedOut ? "SOURCE_FETCH_TIMEOUT" : "SOURCE_FETCH_FAILED", 502);
+    }
+
+    try {
+      const status = response.status;
+
+      // 3) 304 ANTES do ramo 3xx — "Not Modified" é um 3xx SEM redirect a
+      //    seguir: nenhuma alteração, sem body, sem payload, sem preview.
+      if (status === 304) {
+        clearTimeout(timer);
+        return { kind: "not_modified", httpStatus: 304 };
+      }
+
+      // 4) Redirect manual revalidado — NÃO consome tentativa, mas consome o
+      //    orçamento de redirects e re-aplica TODAS as regras ao Location.
+      if (status >= 300 && status < 400) {
+        clearTimeout(timer);
+        await Promise.resolve(response.body?.cancel()).catch(() => undefined);
+        const location = response.headers.get("location");
+        if (!location) throw new SourceFetchError("SOURCE_REDIRECT_BLOCKED", 502, status);
+        let nextUrl: URL;
+        try {
+          nextUrl = new URL(location, current);
+        } catch {
+          throw new SourceFetchError("SOURCE_URL_MALFORMED", 400, status);
+        }
+        const guarded = guardSupplierSourceUrl(nextUrl.href);
+        if (!guarded.ok) throw new SourceFetchError(guarded.code, 400, status);
+        if (guarded.hostname !== originHostname) {
+          // HOST POLICY: sem wildcards, sem cross-host silencioso.
+          throw new SourceFetchError("SOURCE_REDIRECT_BLOCKED", 502, status);
+        }
+        if (redirectsFollowed >= maxRedirects) {
+          throw new SourceFetchError("SOURCE_REDIRECT_BLOCKED", 502, status);
+        }
+        redirectsFollowed += 1;
+        current = guarded.url;
+        attempt -= 1; // o redirect não gasta tentativas de retry
+        continue;
+      }
+
+      // 5) 200 — streaming limitado. Qualquer outro 2xx é falha explícita
+      //    (não se tenta adivinhar representações não-documentadas).
+      if (status === 200) {
+        const declared = parseContentLength(response.headers.get("content-length"));
+        if (declared !== null && declared > maxBytes) {
+          await Promise.resolve(response.body?.cancel()).catch(() => undefined);
+          throw new SourceFetchError("SOURCE_TOO_LARGE", 413, status);
+        }
+        let bytes: Uint8Array;
+        try {
+          bytes = await readBodyCapped(response as unknown as BodySource, maxBytes);
+        } finally {
+          clearTimeout(timer); // o timeout abarca fetch + leitura do corpo
+        }
+        const etag = response.headers.get("etag");
+        const lastModified = response.headers.get("last-modified");
+        // Content-Type é apenas informativo; o formato efetivo é decidido por
+        // explícito-vence / sniffing dos BYTES (nunca pelo header).
+        const format: SupplierFileFormat = cfg.format === "auto" ? (looksLikeXlsx(bytes) ? "xlsx" : "csv") : cfg.format;
+        const transport = {
+          contentType: response.headers.get("content-type") ?? undefined,
+          url: current.href,
+          etag: etag ?? undefined,
+          lastModified: lastModified ?? undefined,
+        };
+        const payload: SourcePayload =
+          format === "xlsx"
+            ? { kind: "url", label: cfg.url.trim(), format: "xlsx", bytes, ...transport }
+            : { kind: "url", label: cfg.url.trim(), format: "csv", text: new TextDecoder("utf-8").decode(bytes), ...transport };
+        assertSourcePayload(payload);
+        return { kind: "content", httpStatus: 200, payload, etag, lastModified };
+      }
+
+      // 6) Erros HTTP. Retry APENAS em 429/502/503/504 (e timeout/rede acima).
+      const retryable = RETRYABLE_HTTP_STATUSES.has(status);
+      if (retryable && attempt < maxAttempts) {
+        clearTimeout(timer);
+        if (status === 429) {
+          const waitMs = parseRetryAfterMs(response.headers.get("retry-after"));
+          if (waitMs !== null && waitMs > SOURCE_MAX_RETRY_AFTER_MS) {
+            // "razoável" é um limite, não uma sugestão: espera longa → falha já.
+            throw new SourceFetchError("SOURCE_HTTP_429", 429, status);
+          }
+          if (waitMs !== null && waitMs > 0) await sleep(Math.min(waitMs, SOURCE_MAX_RETRY_AFTER_MS));
+        }
+        continue;
+      }
+      throw httpFailureError(status);
+    } catch (e) {
+      clearTimeout(timer);
+      if (e instanceof SupplierSourceError) throw e;
+      if (attempt < maxAttempts) continue; // timeout/rede durante a leitura do corpo
+      throw new SourceFetchError(controller.signal.aborted ? "SOURCE_FETCH_TIMEOUT" : "SOURCE_FETCH_FAILED", 502);
+    }
+  }
 }

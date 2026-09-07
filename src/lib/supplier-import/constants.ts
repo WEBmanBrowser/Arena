@@ -45,6 +45,15 @@ export const SUPPLIER_IMPORT_MISSING_LIMIT = 500;
 export const SUPPLIER_IMPORT_KEY_CHUNK = 500;
 
 /**
+ * C.3.4.2 — Window after which a `running` supplier_source_run may be claimed
+ * over (worker crash mid-run). Same 5-minute budget as the import heartbeat: a
+ * fetch is capped at 3×10 s + parse of ≤5 MB, so a live run never goes silent
+ * for this long; a dead one never strands the source forever. Staleness is
+ * decided in Postgres (`started_at`), never in the Worker's memory.
+ */
+export const SOURCE_RUN_STALE_MS = 5 * 60 * 1000;
+
+/**
  * Prefix of an internal MDTech SKU minted for a product a supplier list introduces.
  *
  * products.sku is MDTech's own global reference; product_suppliers.supplier_sku is

@@ -354,6 +354,12 @@ export interface PreviewInput {
    * fornecedor é gravado durante o próprio PREVIEW (e reutilizado no seguinte).
    */
   saveProfile?: boolean;
+  /**
+   * C.3.4.2 — id da `supplier_sources` que produziu este payload (runSource).
+   * Persistido em `supplier_imports.source_id` para o histórico ligar a fonte.
+   * Upload manual continua a não passar nada → NULL (comportamento inalterado).
+   */
+  sourceId?: number | null;
 }
 
 interface ProductInfo {
@@ -559,10 +565,12 @@ export async function previewSupplierImport(input: PreviewInput): Promise<Suppli
       supplierId: supplier.id,
       fileName: sourceLabel.slice(0, 255),
       // C.3.4.1 — a fonte configurada (supplier_sources) nasce na gestão de
-      // fontes; um upload manual ainda não tem linha de fonte (source_id NULL).
+      // fontes; um upload manual não tem linha de fonte (source_id NULL).
+      // C.3.4.2 — quando o preview vem de um runSource, o id da fonte é
+      // passado explicitamente; o motor (matching/pricing/snapshot) é o mesmo.
       // O label é persistido como snapshot para o histórico sobreviver a
       // renome/delete; os validadores HTTP ficam NULL no upload.
-      sourceId: null,
+      sourceId: input.sourceId ?? null,
       sourceLabel: sourceLabel.slice(0, 255),
       httpEtag: source.etag ?? null,
       httpLastModified: source.lastModified ?? null,
