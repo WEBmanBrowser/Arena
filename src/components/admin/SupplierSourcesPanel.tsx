@@ -11,11 +11,15 @@
  *    mutação está em voo + estado ativo vindo do servidor);
  *  - o resultado de um sync é sempre "Preview criado — rever e aplicar" (ou
  *    "sem alterações"); nada é aplicado automaticamente — o aplicar continua
- *    a ser exclusivamente o painel de importação (C.3.1) com o token assinado;
+ *    a ser exclusivamente o painel de importação (C.3.1) com o token assinado.
+ *    O link abre a importação CONCRETA (/admin/import?open=<id>): a página
+ *    reabre o preview persistido e recebe aí um token novo — o token nunca
+ *    entra numa URL;
  *  - fonte nova nasce desativada: o toggle "Ativar" é um ato separado.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { supplierImportErrorMessage } from "@/lib/supplier-import/error-messages";
+import { supplierImportReviewHref } from "@/lib/import-review-link";
 
 type SourceRow = {
   id: number;
@@ -393,7 +397,9 @@ export default function SupplierSourcesPanel({ supplierId, supplierName }: { sup
                 {r.kind === "ok" && r.importId ? (
                   <>
                     {" — "}
-                    <a href="/admin/import" className="underline font-medium">
+                    {/* Só o id viaja na URL: o token de apply é reemitido pela
+                        página de revisão (GET …/preview), nunca por um link. */}
+                    <a href={supplierImportReviewHref(r.importId)} className="underline font-medium">
                       abrir a importação gerada (#{r.importId}) e rever/aplicar
                     </a>
                   </>

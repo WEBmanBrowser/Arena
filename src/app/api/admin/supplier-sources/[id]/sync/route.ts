@@ -8,8 +8,10 @@
  *
  * Estado devolvido (nunca segredos, nunca corpo do remoto):
  *  - status: "success" | "no_change" — run registada em supplier_source_runs;
- *  - importId quando existe preview novo (a UI oferece o link para a fila de
- *    importação, onde a revisão/apply acontece — no mesmo painel C.3.1);
+ *  - importId quando existe preview novo: a UI abre /admin/import?open=<id>,
+ *    onde o painel C.3.1 reabre o snapshot persistido através de
+ *    GET /api/admin/supplier-import/:id/preview (token de apply reemitido aí)
+ *    e a revisão/apply manual acontece;
  *  - erros do run viram código estável + frase segura da tabela partilhada.
  */
 import { NextRequest, NextResponse } from "next/server";
@@ -60,9 +62,11 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         etag: outcome.etag,
         lastModified: outcome.lastModified,
         fileHash: outcome.fileHash,
-        // A resposta do preview é deliberadamente resumida: a revisão usa o
-        // painel existente (GET /api/admin/supplier-import/:id), nunca esta
-        // resposta, para reaplicar valores financeiros.
+        // A resposta do preview é deliberadamente resumida (e SEM token): a
+        // revisão reabre o snapshot persistido no painel existente via
+        // GET /api/admin/supplier-import/:id/preview — nunca esta resposta —
+        // e o apply continua a consumir apenas o snapshot, nunca valores
+        // financeiros vindos do browser.
         previewSummary: outcome.preview
           ? {
               importId: outcome.preview.importId,
