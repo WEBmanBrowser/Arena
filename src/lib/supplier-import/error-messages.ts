@@ -100,6 +100,10 @@ export const SUPPLIER_IMPORT_MESSAGES: Record<string, string> = {
   IMPORT_NOT_FOUND: "Importação não encontrada.",
   IMPORT_IN_PROGRESS: "Já existe uma aplicação desta importação em curso.",
   IMPORT_FAILED: "Importação marcada como falhada: é preciso um novo preview.",
+  // C.3.4.2 — reabrir só faz sentido para um preview ainda por aplicar; uma
+  // importação concluída não se reaplica e uma incompleta retoma-se.
+  IMPORT_NOT_REOPENABLE:
+    "Esta importação já não está em preview — se ficou incompleta, use “Retomar”; se foi concluída, não volta a ser aplicada.",
 
   // ── generic failures (full technical detail stays in the server log) ──
   SUPPLIER_IMPORT_PREVIEW_FAILED: "Falha ao processar o ficheiro — nenhuma alteração foi gravada.",

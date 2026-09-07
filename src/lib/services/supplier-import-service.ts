@@ -1347,6 +1347,196 @@ export async function getImportLines(importId: number, limit = SUPPLIER_IMPORT_P
     .limit(limit);
 }
 
+// ─── C.3.4.2 — Reopen a persisted preview ────────────────
+
+/**
+ * A persisted preview handed back to the operator for manual review, with a
+ * FRESH signed token. Shape-compatible with `SupplierImportPreview` so the
+ * panel renders it through the same card and applies it through the same
+ * button; `reopened` only tells the UI where it came from.
+ */
+export interface SupplierImportReopenedPreview extends SupplierImportPreview {
+  reopened: true;
+}
+
+/**
+ * Reopen a persisted `preview` so a human can review and apply it — the
+ * missing step between "Sync Now created import #N" and the C.3.1 Apply.
+ *
+ * ── Why this exists ──
+ * The apply token is deliberately never persisted: it is the proof that THIS
+ * snapshot was shown to an operator, and it only ever lives in the response of
+ * the preview call. So a preview produced by a remote sync (or a manual upload
+ * followed by a reload) had no way back to the Apply button. This function
+ * re-shows exactly the persisted snapshot and re-issues a token bound to it —
+ * same HMAC module, same TTL, same `kind`, same binding
+ * (importId + supplierId + fileHash + rowCount). Apply then verifies it the
+ * way it verifies any first-apply token.
+ *
+ * ── What it never does ──
+ * No parsing, no matching, no pricing, no snapshot rewrite, no status change,
+ * no products/product_suppliers/stock touched. Everything the operator sees
+ * comes from supplier_imports + supplier_import_rows as persisted. The product
+ * SKU/name are LEFT JOINed for display only — apply keeps reading the rows.
+ *
+ * ── State machine ──
+ *  - preview           → reopened (this function);
+ *  - completed         → 409 IMPORT_NOT_REOPENABLE (nothing to apply; the
+ *                        apply route already answers idempotently);
+ *  - applying/partial  → 409 IMPORT_NOT_REOPENABLE — a first-apply token
+ *                        would be meaningless: the resume flow (apply without
+ *                        token, gated by the heartbeat) already owns them;
+ *  - failed            → 409 IMPORT_FAILED (existing safe error);
+ *  - unknown id        → 404 IMPORT_NOT_FOUND.
+ */
+export async function reopenSupplierImportPreview(importId: number): Promise<SupplierImportReopenedPreview> {
+  const [row] = await db
+    .select({
+      id: supplierImports.id,
+      supplierId: supplierImports.supplierId,
+      supplierName: suppliers.name,
+      fileName: supplierImports.fileName,
+      sourceId: supplierImports.sourceId,
+      sourceLabel: supplierImports.sourceLabel,
+      fileHash: supplierImports.fileHash,
+      fileSizeBytes: supplierImports.fileSizeBytes,
+      rowCount: supplierImports.rowCount,
+      status: supplierImports.status,
+      mapping: supplierImports.mapping,
+      summary: supplierImports.summary,
+      batchesTotal: supplierImports.batchesTotal,
+    })
+    .from(supplierImports)
+    .leftJoin(suppliers, eq(suppliers.id, supplierImports.supplierId))
+    .where(eq(supplierImports.id, importId))
+    .limit(1);
+  if (!row) throw new SupplierImportError("IMPORT_NOT_FOUND", 404);
+
+  if (row.status === "failed") {
+    throw new SupplierImportError("IMPORT_FAILED", 409, "Importação marcada como falhada — é preciso novo preview");
+  }
+  if (row.status !== "preview") {
+    // completed: nothing left to apply. applying/partial: owned by the resume
+    // flow — never re-issue a first-apply token for an import already claimed.
+    throw new SupplierImportError("IMPORT_NOT_REOPENABLE", 409);
+  }
+
+  // The visible window is the same as a fresh preview; one extra row decides
+  // `truncated` without counting the whole snapshot.
+  const persisted = await db
+    .select({
+      rowNumber: supplierImportRows.rowNumber,
+      supplierSku: supplierImportRows.supplierSku,
+      ean: supplierImportRows.ean,
+      internalSku: supplierImportRows.internalSku,
+      name: supplierImportRows.name,
+      productId: supplierImportRows.productId,
+      matchType: supplierImportRows.matchType,
+      status: supplierImportRows.status,
+      costPrice: supplierImportRows.costPrice,
+      stock: supplierImportRows.stock,
+      leadTimeDays: supplierImportRows.leadTimeDays,
+      message: supplierImportRows.message,
+      currentPrice: supplierImportRows.currentPrice,
+      computedPrice: supplierImportRows.computedPrice,
+      priceMode: supplierImportRows.priceMode,
+      priceMessage: supplierImportRows.priceMessage,
+      isPreferredSupplier: supplierImportRows.isPreferredSupplier,
+      // Display only (LEFT JOIN): a product deleted since the preview simply
+      // shows without a SKU — the row keeps its own persisted values.
+      productSku: products.sku,
+      productName: products.name,
+    })
+    .from(supplierImportRows)
+    .leftJoin(products, eq(products.id, supplierImportRows.productId))
+    .where(eq(supplierImportRows.importId, row.id))
+    .orderBy(asc(supplierImportRows.rowNumber))
+    .limit(SUPPLIER_IMPORT_PREVIEW_LIMIT + 1);
+
+  const truncated = persisted.length > SUPPLIER_IMPORT_PREVIEW_LIMIT;
+  const visible = truncated ? persisted.slice(0, SUPPLIER_IMPORT_PREVIEW_LIMIT) : persisted;
+
+  const lines: SupplierImportPreviewLine[] = visible.map((r) => ({
+    rowNumber: r.rowNumber,
+    supplierSku: r.supplierSku,
+    ean: r.ean,
+    internalSku: r.internalSku,
+    name: r.name,
+    status: r.status as SupplierImportPreviewLine["status"],
+    matchType: r.matchType as SupplierImportPreviewLine["matchType"],
+    // Not persisted per row: the snapshot keeps the human message instead.
+    codes: [],
+    message: r.message,
+    issues: [],
+    costPrice: r.costPrice,
+    // "Before" values were read live at preview time and are not part of the
+    // snapshot; the panel already guards on null.
+    costBefore: null,
+    stock: r.stock,
+    stockBefore: null,
+    reservedStock: null,
+    leadTimeDays: r.leadTimeDays,
+    productId: r.productId,
+    productSku: r.productSku ?? null,
+    productName: r.productName ?? null,
+    currentPrice: r.currentPrice,
+    computedPrice: r.computedPrice,
+    priceMode: r.priceMode === "auto" || r.priceMode === "manual" ? r.priceMode : null,
+    priceMessage: r.priceMessage,
+    isPreferredSupplier: r.isPreferredSupplier,
+  }));
+
+  const mapping = isStringRecord(row.mapping) ? row.mapping : {};
+  const summary = (row.summary as Record<string, unknown> | null) ?? {};
+  const ignoredColumns = Array.isArray(summary.ignoredColumns)
+    ? (summary.ignoredColumns as unknown[]).filter((c): c is string => typeof c === "string")
+    : [];
+  const missingProducts = isMissingProductsReport(summary.missingProducts)
+    ? summary.missingProducts
+    : {
+        action: "none" as const, comparedToImportId: null, comparedToFinishedAt: null,
+        count: 0, ambiguous: 0, skippedReason: "NOT_PERSISTED", items: [],
+      };
+
+  return {
+    importId: row.id,
+    supplierId: row.supplierId,
+    supplierName: row.supplierName ?? "",
+    fileName: row.fileName,
+    sourceId: row.sourceId,
+    sourceLabel: row.sourceLabel,
+    fileHash: row.fileHash,
+    fileSizeBytes: row.fileSizeBytes,
+    // Headers/delimiter are not part of the snapshot: only the mapping is.
+    // The panel already treats `delimiter: null` as "not applicable".
+    delimiter: null,
+    headers: Object.keys(mapping),
+    mapping,
+    ignoredColumns,
+    status: row.status,
+    summary,
+    lines,
+    truncated,
+    missingProducts,
+    // Same module, same secret, same TTL/kind and the same four-field binding
+    // as the token the original preview issued — apply cannot tell them apart,
+    // and this one is just as useless against any other import.
+    previewToken: createSupplierImportToken({
+      importId: row.id, supplierId: row.supplierId, fileHash: row.fileHash, rowCount: row.rowCount,
+    }),
+    batchesTotal: row.batchesTotal,
+    batchSize: SUPPLIER_IMPORT_BATCH_SIZE,
+    reopened: true,
+  };
+}
+
+/** Shape guard for the missing-products report persisted inside `summary`. */
+function isMissingProductsReport(value: unknown): value is MissingProductsReport {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const v = value as Record<string, unknown>;
+  return v.action === "none" && typeof v.count === "number" && Array.isArray(v.items);
+}
+
 // ─── History ─────────────────────────────────────────────
 
 export interface SupplierImportHistoryItem {

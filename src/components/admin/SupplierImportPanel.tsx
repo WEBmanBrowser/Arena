@@ -10,7 +10,12 @@
  *  - o preço NÃO é importado: uma lista de fornecedor só traz custo/stock. O
  *    preço automático é decisão do motor de pricing (C.1/C.2);
  *  - a disponibilidade de "retomar" é decidida no servidor (`canResume`, com
- *    base no heartbeat). Aqui nunca se faz aritmética de tempo no browser.
+ *    base no heartbeat). Aqui nunca se faz aritmética de tempo no browser;
+ *  - C.3.4.2: um preview PERSISTIDO (criado por "Sincronizar agora" ou por um
+ *    upload manual seguido de reload) é reaberto por `importId` através de
+ *    GET /api/admin/supplier-import/{id}/preview, que devolve o mesmo snapshot
+ *    e um token novo. Cai no MESMO cartão de preview e no MESMO botão Aplicar
+ *    (`run(importId, previewToken)`): não há um segundo motor de apply.
  */
 import { useCallback, useEffect, useState } from "react";
 import { formatImportErrors } from "@/lib/import-error-text";
@@ -65,6 +70,11 @@ type PreviewResult = {
   batchesTotal: number;
   profileUsed?: string; // "profile_valid", "profile_invalid", "no_profile", "manual"
   profileName?: string; // nome do perfil guardado, se usado
+  // C.3.4.2 — fonte configurada que produziu o snapshot (null no upload manual).
+  sourceLabel?: string | null;
+  // C.3.4.2 — true quando o preview foi reaberto a partir do snapshot
+  // persistido (UI apenas: o apply é exatamente o mesmo).
+  reopened?: boolean;
 };
 
 type Progress = {
@@ -135,6 +145,25 @@ const isXlsxName = (name: string) => name.toLowerCase().endsWith(".xlsx");
  */
 const messageFor = (body: any) => supplierImportErrorMessage(body?.error, body?.message);
 
+type ReopenResult = { kind: "ok"; preview: PreviewResult } | { kind: "error"; message: string };
+
+/**
+ * C.3.4.2 — Reopen a PERSISTED preview by id. The server re-reads the
+ * snapshot and re-issues the signed token (GET only, nothing is applied). The
+ * result is shape-compatible with a fresh preview, so the caller feeds it to
+ * the very same `preview` state.
+ */
+async function fetchReopenedPreview(importId: number): Promise<ReopenResult> {
+  try {
+    const res = await fetch(`/api/admin/supplier-import/${importId}/preview`);
+    const body = await readBody(res);
+    if (!res.ok) return { kind: "error", message: messageFor(body) };
+    return { kind: "ok", preview: body as PreviewResult };
+  } catch {
+    return { kind: "error", message: "Não foi possível contactar o servidor." };
+  }
+}
+
 const STATUS_LABEL: Record<string, string> = {
   preview: "em preview",
   applying: "a aplicar",
@@ -172,7 +201,7 @@ function Chip({ label, value, tone = "slate" }: { label: string; value: number; 
   );
 }
 
-export default function SupplierImportPanel() {
+export default function SupplierImportPanel({ openImportId = null }: { openImportId?: number | null } = {}) {
   const [supplierOptions, setSupplierOptions] = useState<{ id: number; name: string; isActive: boolean }[]>([]);
   const [supplierId, setSupplierId] = useState("");
   const [fileName, setFileName] = useState("");
@@ -281,6 +310,50 @@ export default function SupplierImportPanel() {
     setOutcome(null);
     setError("");
   };
+
+  /**
+   * C.3.4.2 — Land a reopened PERSISTED preview (or its safe error) in the
+   * same state a fresh preview uses: the same card and the same Apply button
+   * take over. Nothing is applied here; only `fetchReopenedPreview` did I/O.
+   */
+  const showReopened = useCallback((result: ReopenResult) => {
+    setWatchId(null);
+    setProgress(null);
+    setOutcome(null);
+    if (result.kind === "error") {
+      setPreview(null);
+      setError(result.message);
+      return;
+    }
+    setError("");
+    setPreview(result.preview);
+    // Keep the history filter on the import's supplier so its row is visible.
+    if (result.preview.supplierId) setSupplierId(String(result.preview.supplierId));
+  }, []);
+
+  /** "Rever" on a history row: reopen by id, through the same landing. */
+  const reopen = async (importId: number) => {
+    setBusy(true);
+    setError("");
+    try {
+      showReopened(await fetchReopenedPreview(importId));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Deep link (/admin/import?open=<id>): reopen the requested import once.
+  // Same shape as the history/progress effects: the async IIFE owns the fetch
+  // and every setState happens in its continuation, never in the effect body.
+  useEffect(() => {
+    if (openImportId === null) return;
+    let stopped = false;
+    (async () => {
+      const result = await fetchReopenedPreview(openImportId);
+      if (!stopped) showReopened(result);
+    })();
+    return () => { stopped = true; };
+  }, [openImportId, showReopened]);
 
   const doPreview = async () => {
     // CSV viaja como texto (comportamento atual); XLSX viaja como base64 de bytes.
@@ -498,8 +571,17 @@ export default function SupplierImportPanel() {
         <div className="mt-5 border-t pt-4">
           <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500 mb-3">
             <span className="font-medium text-slate-700">{preview.fileName}</span>
-            {preview.delimiter === null && <span className="text-emerald-700">Excel (XLSX)</span>}
+            {/* C.3.4.2 — num preview reaberto o separador não é persistido:
+                delimiter null deixa de significar "XLSX". */}
+            {preview.reopened ? (
+              <span className="text-sky-700 border border-sky-200 rounded px-1.5 py-0.5" title="Snapshot persistido reaberto para revisão — nada foi recalculado">
+                preview #{preview.importId} reaberto
+              </span>
+            ) : (
+              preview.delimiter === null && <span className="text-emerald-700">Excel (XLSX)</span>
+            )}
             <span>· {preview.supplierName}</span>
+            {preview.sourceLabel && preview.sourceLabel !== preview.fileName && <span>· fonte {preview.sourceLabel}</span>}
             {preview.delimiter !== null && <span>· separador “{preview.delimiter}”</span>}
             <span className="font-mono" title="SHA-256 do ficheiro">#{preview.fileHash.slice(0, 12)}</span>
           </div>
@@ -518,13 +600,20 @@ export default function SupplierImportPanel() {
             {!headersFor("internalSku") && " — produtos novos recebem um SKU interno próprio (MD-…)"}
           </p>
 
-          {preview.ignoredColumns.length > 0 && (
+          {(preview.ignoredColumns?.length ?? 0) > 0 && (
             <p className="text-[11px] text-slate-500 mb-2">
               Colunas ignoradas: {preview.ignoredColumns.join(", ")} — o preço de venda não se importa por lista de fornecedor.
             </p>
           )}
 
-          {preview.missingProducts.count > 0 && (
+          {preview.reopened && (
+            <p className="text-[11px] text-slate-500 mb-2">
+              Snapshot gravado em preview, à espera de revisão: os valores abaixo são exatamente os que foram calculados nessa altura.
+              Aplicar consome este snapshot — nada é recalculado nem reenviado pelo browser.
+            </p>
+          )}
+
+          {(preview.missingProducts?.count ?? 0) > 0 && (
             <div className="mb-3 bg-amber-50 border border-amber-200 rounded-lg p-3 text-xs text-amber-900">
               <p className="font-medium mb-1">
                 {preview.missingProducts.count} produto(s) que constavam da última importação concluída deste fornecedor já não aparecem nesta lista.
@@ -714,7 +803,18 @@ export default function SupplierImportPanel() {
                   <td className="p-1.5 text-slate-500">{dt(h.createdAt)}</td>
                   <td className="p-1.5 text-slate-500">{dt(h.finishedAt)}</td>
                   <td className="p-1.5 text-right">
-                    {h.status === "applying" || h.status === "partial" ? (
+                    {h.status === "preview" ? (
+                      // C.3.4.2 — a persisted preview (remote sync, or a manual
+                      // upload whose page was reloaded) reopens into the same
+                      // card + Apply button above. Resume stays for applying/partial.
+                      <button
+                        onClick={() => void reopen(h.id)}
+                        disabled={busy}
+                        className={`px-2 py-1 rounded text-[11px] font-medium disabled:opacity-50 ${preview?.importId === h.id ? "border border-sky-300 text-sky-700 bg-sky-50" : "bg-sky-600 text-white hover:bg-sky-700"}`}
+                      >
+                        {preview?.importId === h.id ? "Em revisão" : "Rever"}
+                      </button>
+                    ) : h.status === "applying" || h.status === "partial" ? (
                       historyProgress[h.id]?.canResume ? (
                         <button
                           onClick={() => { stopWatching(); void run(h.id); }}
@@ -735,6 +835,7 @@ export default function SupplierImportPanel() {
           </table>
           <p className="text-[11px] text-slate-400 mt-1">
             Uma importação interrompida mantém o snapshot no servidor: pode ser retomada sem voltar a carregar o CSV.
+            Uma importação em preview (sincronização remota ou upload ainda não aplicado) pode ser reaberta com “Rever” e aplicada daqui.
           </p>
         </div>
       )}

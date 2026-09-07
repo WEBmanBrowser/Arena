@@ -1,5 +1,8 @@
 "use client";
+import { Suspense } from "react";
+import { useSearchParams } from "next/navigation";
 import SupplierImportPanel from "@/components/admin/SupplierImportPanel";
+import { IMPORT_REVIEW_QUERY_PARAM, parseSupplierImportReviewParam } from "@/lib/import-review-link";
 
 /**
  * Admin → Importar/Exportar.
@@ -8,7 +11,19 @@ import SupplierImportPanel from "@/components/admin/SupplierImportPanel";
  * O importador legacy de catálogo CSV deixou de estar exposto nesta página —
  * o endpoint legacy continua a existir no backend, mas não é invocado aqui.
  * A exportação do catálogo CSV mantém-se através de /api/admin/export.
+ *
+ * C.3.4.2 — `?open=<id>` reabre um preview PERSISTIDO (criado por
+ * "Sincronizar agora" ou por um upload seguido de reload) no mesmo painel. A
+ * URL transporta apenas o id: o token de apply é reemitido pelo servidor ao
+ * abrir. `useSearchParams` vive num componente filho dentro de <Suspense>
+ * para a página continuar prerenderable (Next 16 exige o boundary).
  */
+function ImportPanelFromQuery() {
+  const searchParams = useSearchParams();
+  const openImportId = parseSupplierImportReviewParam(searchParams.get(IMPORT_REVIEW_QUERY_PARAM));
+  return <SupplierImportPanel openImportId={openImportId} />;
+}
+
 export default function AdminImportPage() {
   const doExport = () => { window.open("/api/admin/export", "_blank"); };
 
@@ -26,7 +41,9 @@ export default function AdminImportPage() {
         </button>
       </div>
 
-      <SupplierImportPanel />
+      <Suspense fallback={<div className="bg-white border rounded-xl p-6 mb-6 text-sm text-slate-500">A carregar...</div>}>
+        <ImportPanelFromQuery />
+      </Suspense>
     </div>
   );
 }
