@@ -1,10 +1,13 @@
 "use client";
-import { useState, useEffect } from "react";
+import { Fragment, useState, useEffect } from "react";
+import SupplierSourcesPanel from "@/components/admin/SupplierSourcesPanel";
 
 export default function AdminSuppliersPage() {
   const [items, setItems] = useState<any[]>([]);
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<any>(null);
+  // C.3.4.2 — painel de FONTES remotas por fornecedor (URL/HTTPS + Sync Now).
+  const [sourcesFor, setSourcesFor] = useState<number | null>(null);
   const [form, setForm] = useState({ name: "", legalName: "", taxId: "", email: "", phone: "", website: "", contactName: "", notes: "", isActive: true });
 
   const load = () => fetch("/api/admin/suppliers").then(r => r.json()).then(d => setItems(d.suppliers || []));
@@ -48,14 +51,32 @@ export default function AdminSuppliersPage() {
           <thead className="bg-slate-50"><tr><th className="text-left p-3 font-medium text-slate-600">Nome</th><th className="text-left p-3 font-medium text-slate-600">Email</th><th className="text-left p-3 font-medium text-slate-600">Telefone</th><th className="text-left p-3 font-medium text-slate-600">NIF</th><th className="text-center p-3 font-medium text-slate-600">Estado</th><th className="text-right p-3 font-medium text-slate-600">Ações</th></tr></thead>
           <tbody>
             {items.map((s: any) => (
-              <tr key={s.id} className="border-t hover:bg-slate-50">
+              <Fragment key={s.id}>
+              <tr className="border-t hover:bg-slate-50">
                 <td className="p-3 font-medium text-slate-800">{s.name}</td>
                 <td className="p-3 text-slate-500">{s.email || "—"}</td>
                 <td className="p-3 text-slate-500">{s.phone || "—"}</td>
                 <td className="p-3 text-slate-500">{s.taxId || "—"}</td>
                 <td className="p-3 text-center"><span className={`px-2 py-0.5 rounded text-xs ${s.isActive ? "bg-green-50 text-green-600" : "bg-red-50 text-red-500"}`}>{s.isActive ? "Ativo" : "Inativo"}</span></td>
-                <td className="p-3 text-right"><button onClick={() => openEdit(s)} className="text-sky-600 text-xs font-medium">Editar</button></td>
+                <td className="p-3 text-right space-x-3">
+                  <button onClick={() => openEdit(s)} className="text-sky-600 text-xs font-medium">Editar</button>
+                  <button
+                    onClick={() => setSourcesFor(current => (current === s.id ? null : s.id))}
+                    className="text-slate-600 text-xs font-medium underline decoration-dotted"
+                    title="Gerir fontes de sincronização por URL (C.3.4.2)"
+                  >
+                    {sourcesFor === s.id ? "Fechar Fontes" : "Fontes"}
+                  </button>
+                </td>
               </tr>
+              {sourcesFor === s.id && (
+                <tr className="border-t">
+                  <td colSpan={6} className="p-0">
+                    <SupplierSourcesPanel supplierId={s.id} supplierName={s.name} />
+                  </td>
+                </tr>
+              )}
+              </Fragment>
             ))}
           </tbody>
         </table>

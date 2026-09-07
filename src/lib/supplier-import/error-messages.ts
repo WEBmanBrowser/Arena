@@ -47,10 +47,39 @@ export const SUPPLIER_IMPORT_MESSAGES: Record<string, string> = {
   SOURCE_URL_TOO_LONG: "URL da fonte demasiado longa.",
   SOURCE_URL_SCHEME: "Apenas URLs HTTPS são permitidas por defeito.",
   SOURCE_URL_CREDENTIALS: "Credenciais na URL da fonte são proibidas.",
+  SOURCE_URL_QUERY_NOT_ALLOWED: "A URL da fonte não pode conter parâmetros de query; use autenticação por basic/bearer/header.",
+  SOURCE_URL_FRAGMENT_NOT_ALLOWED: "A URL da fonte não pode conter fragmento (#).",
   SOURCE_URL_HOST: "URL da fonte sem host válido.",
   SOURCE_URL_LOCAL_HOST: "Hostname local ou de metadados bloqueado.",
   SOURCE_URL_PRIVATE_IP: "Endereço IP privado/especial bloqueado.",
   SOURCE_URL_NUMERIC_HOST: "Host numérico não é permitido.",
+
+  // ── remote fetch (C.3.4.2) ──
+  // Nenhuma destas mensagens pode conter URL com query, headers, corpo,
+  // stack ou segredos — a tabela é a única fonte do texto visto pelo operador.
+  SOURCE_URL_INVALID: "A fonte remota não tem uma URL HTTPS configurada.",
+  SOURCE_AUTH_SECRET_MISSING:
+    "O segredo da fonte não está disponível no runtime — verifique a referência do secret (o valor nunca é guardado na aplicação).",
+  SOURCE_AUTH_CONFIG_INVALID: "Configuração de autenticação da fonte inválida (faltam dados não-secretos obrigatórios).",
+  SOURCE_HEADERS_CONFIG_INVALID: "Os headers não-secretos da fonte são inválidos ou reservados.",
+  SOURCE_FETCH_TIMEOUT: "A fonte remota não respondeu dentro do limite de 10 segundos por tentativa.",
+  SOURCE_FETCH_FAILED: "Falha ao obter a fonte remota — tente novamente mais tarde.",
+  SOURCE_HTTP_401: "A fonte remota recusou as credenciais (HTTP 401).",
+  SOURCE_HTTP_403: "A fonte remota negou acesso (HTTP 403).",
+  SOURCE_HTTP_404: "O ficheiro da fonte remota não existe (HTTP 404).",
+  SOURCE_HTTP_429: "A fonte remota impôs limite de pedidos (HTTP 429) — tente novamente mais tarde.",
+  SOURCE_HTTP_5XX: "A fonte remota está indisponível (erro 5xx do servidor).",
+  SOURCE_TOO_LARGE: "A fonte remota excede o limite de 5 MB — nada foi importado.",
+  SOURCE_REDIRECT_BLOCKED:
+    "O redirecionamento da fonte remota foi bloqueado (mudou de host ou excedeu o máximo de redirecionamentos).",
+  SOURCE_ALREADY_RUNNING: "Já existe uma sincronização desta fonte em curso.",
+  SOURCE_NO_CHANGE: "Nenhuma alteração desde a última sincronização.",
+  SOURCE_PARSE_FAILED: "O conteúdo obtido não é uma lista de fornecedor válida — nada foi importado.",
+  SOURCE_NOT_FOUND: "Fonte de fornecedor não encontrada.",
+  SOURCE_DISABLED: "A fonte está desativada — ative-a para sincronizar.",
+  SOURCE_TYPE_UNSUPPORTED: "Esta fonte não é uma fonte remota HTTPS — nada a sincronizar.",
+  SOURCE_RUN_FAILED: "Falha ao sincronizar a fonte — nenhuma alteração foi gravada no catálogo.",
+  SOURCE_NAME_EXISTS: "Já existe uma fonte com este nome para este fornecedor.",
 
   // ── XLSX file level (C.3.3 etapa 2) ──
   // Nenhuma destas mensagens revela detalhes técnicos (mensagem da
