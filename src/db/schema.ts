@@ -941,6 +941,15 @@ export const supplierImports = pgTable("supplier_imports", {
   // A supplier deletion must not break on import history: the audit trail of
   // the operation itself lives in audit_logs, not here.
   supplierId: integer("supplier_id").notNull().references(() => suppliers.id, { onDelete: "cascade" }),
+  // ── C.3.4.1: fonte que produziu este snapshot ──
+  // sourceId: configuração da fonte (NULL para upload manual); ON DELETE SET
+  // NULL para o histórico sobreviver à remoção de uma fonte.
+  sourceId: integer("source_id").references(() => supplierSources.id, { onDelete: "set null" }),
+  /** Snapshot do nome da fonte no momento da run (sobrevive a rename/delete). */
+  sourceLabel: varchar("source_label", { length: 255 }),
+  /** Validadores HTTP recebidos no fetch (C.3.4.2): ETag / Last-Modified. */
+  httpEtag: varchar("http_etag", { length: 500 }),
+  httpLastModified: varchar("http_last_modified", { length: 100 }),
   fileName: varchar("file_name", { length: 255 }).notNull(),
   /** SHA-256 (hex) of the exact bytes that produced this snapshot. */
   fileHash: varchar("file_hash", { length: 64 }).notNull(),
@@ -965,6 +974,8 @@ export const supplierImports = pgTable("supplier_imports", {
   index("supplier_imports_status_idx").on(t.status),
   // Same file re-uploaded for the same supplier must be findable.
   index("supplier_imports_hash_idx").on(t.supplierId, t.fileHash),
+  // C.3.4.1 — histórico por fonte (join/agregação de runs).
+  index("supplier_imports_source_idx").on(t.sourceId),
   check("supplier_imports_status_valid", sql`${t.status} IN ('preview','applying','completed','failed','partial')`),
   check("supplier_imports_row_count_non_negative", sql`${t.rowCount} >= 0`),
   check("supplier_imports_file_size_non_negative", sql`${t.fileSizeBytes} >= 0`),
@@ -1042,7 +1053,7 @@ export const supplierImportRows = pgTable("supplier_import_rows", {
 export const supplierImportProfiles = pgTable("supplier_import_profiles", {
   id: serial("id").primaryKey(),
   supplierId: integer("supplier_id").notNull().references(() => suppliers.id, { onDelete: "cascade" }),
-  mapping: jsonb("mapping").notNull().default("{}"),
+  mapping: jsonb("mapping").notNull().default({}),
   delimiter: varchar("delimiter", { length: 10 }),
   createdBy: integer("created_by").references(() => users.id),
   createdAt: timestamp("created_at").notNull().defaultNow(),
@@ -1050,6 +1061,133 @@ export const supplierImportProfiles = pgTable("supplier_import_profiles", {
 }, (t) => [
   index("sip_supplier_idx").on(t.supplierId),
   uniqueIndex("sip_supplier_unique").on(t.supplierId),
+]);
+
+// ─── C.3.4.1: FONTES AUTOMÁTICAS DE FORNECEDOR ─────────────
+// SOURCE → SourcePayload → FORMATO → SupplierFileParse → NormalizedSupplierRow[]
+// → matching → pricing → preview → apply (motor C.3.1/3.2/3.3, inalterado).
+//
+// Esta fase cria APENAS o modelo: NÃO existe fetch, cron, token de API nem
+// credenciais. Regras de segurança fixadas no schema:
+//  - `secret_reference` NUNCA guarda o segredo (é apenas uma referência);
+//  - URL só HTTPS (CHECK) e nunca userinfo/credenciais;
+//  - `apply_policy` default `preview_only` (auto-apply nunca é silencioso);
+//  - `username`/`headers_config`/`api_config` só dados não-secretos.
+export const SUPPLIER_SOURCE_TYPES = ["upload", "url"] as const;
+export type SupplierSourceType = (typeof SUPPLIER_SOURCE_TYPES)[number];
+
+/** "auto" → deteção por bytes/texto; os restantes são formatos do dispatcher. */
+export const SUPPLIER_SOURCE_FORMATS = ["auto", "csv", "xlsx"] as const;
+export type SupplierSourceFormat = (typeof SUPPLIER_SOURCE_FORMATS)[number];
+
+export const SUPPLIER_SOURCE_AUTH_TYPES = ["none", "basic", "bearer", "header"] as const;
+export type SupplierSourceAuthType = (typeof SUPPLIER_SOURCE_AUTH_TYPES)[number];
+
+/** `auto_if_clean` fica reservado para fase futura — nunca implícito. */
+export const SUPPLIER_SOURCE_APPLY_POLICIES = ["preview_only", "auto_if_clean"] as const;
+export type SupplierSourceApplyPolicy = (typeof SUPPLIER_SOURCE_APPLY_POLICIES)[number];
+
+export const supplierSources = pgTable("supplier_sources", {
+  id: serial("id").primaryKey(),
+  supplierId: integer("supplier_id").notNull().references(() => suppliers.id, { onDelete: "cascade" }),
+  /** Nome legível para o admin (único por fornecedor). */
+  name: varchar("name", { length: 100 }).notNull(),
+  /** upload | url (aditivo futuro: api). */
+  sourceType: varchar("source_type", { length: 20 }).notNull().default("upload"),
+  /** auto → detetar; csv/xlsx explícitos vencem o sniffing. */
+  format: varchar("format", { length: 10 }).notNull().default("auto"),
+  /** URL da fonte (apenas HTTPS; NULL para upload). C.3.4.2 lê isto. */
+  url: varchar("url", { length: 1000 }),
+  /**
+   * NUNCA ligada por defeito: criar/configurar uma fonte não pode iniciar
+   * implicitamente uma sincronização futura. A ativação é sempre um ato
+   * explícito e auditável do admin.
+   */
+  enabled: boolean("enabled").notNull().default(false),
+  authType: varchar("auth_type", { length: 20 }).notNull().default("none"),
+  /** Não-secreto (Basic Auth user). Nunca uma password/API key. */
+  username: varchar("username", { length: 255 }),
+  /**
+   * Referência para o segredo (ex.: SUPPLIER_SRC_12_TOKEN). O valor NUNCA é
+   * guardado aqui: C.3.4.5 decide entre Cloudflare Secrets e encrypted-at-rest
+   * com master key em Cloudflare Secret — nenhum plaintext na BD.
+   */
+  secretReference: varchar("secret_reference", { length: 255 }),
+  /** Headers não-secretos (User-Agent, Accept…) — sem Authorization. */
+  headersConfig: jsonb("headers_config").$type<Record<string, string>>(),
+  /** Config do adapter (futuro API): endpoint/paginação/body — sem segredos. */
+  apiConfig: jsonb("api_config").$type<Record<string, unknown>>(),
+  /** Perfil de mapping opcional: NULL = perfil do fornecedor (C.3.2 atual). */
+  profileId: integer("profile_id").references(() => supplierImportProfiles.id, { onDelete: "set null" }),
+  /** Política por defeito: preview manual (nunca auto-apply silencioso). */
+  applyPolicy: varchar("apply_policy", { length: 20 }).notNull().default("preview_only"),
+  /** Cron/intervalo em UTC (C.3.4.4). */
+  schedule: varchar("schedule", { length: 100 }),
+  nextRunAt: timestamp("next_run_at"),
+  // ── Observabilidade (agregada; detalhe por run em supplier_source_runs) ──
+  lastCheckedAt: timestamp("last_checked_at"),
+  lastSuccessAt: timestamp("last_success_at"),
+  lastErrorCode: varchar("last_error_code", { length: 80 }),
+  /** Mensagem sanitizada (nunca SQL/stack/secrets). */
+  lastErrorMessage: varchar("last_error_message", { length: 500 }),
+  lastDurationMs: integer("last_duration_ms"),
+  lastRowCount: integer("last_row_count"),
+  lastHttpStatus: integer("last_http_status"),
+  lastEtag: varchar("last_etag", { length: 500 }),
+  lastModified: varchar("last_modified", { length: 100 }),
+  createdBy: integer("created_by").references(() => users.id),
+  updatedBy: integer("updated_by").references(() => users.id),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+}, (t) => [
+  index("ss_supplier_idx").on(t.supplierId),
+  // Scheduling: "quais fontes estão due" sem varrer tudo.
+  index("ss_due_idx").on(t.enabled, t.nextRunAt),
+  uniqueIndex("ss_supplier_name_unique").on(t.supplierId, t.name),
+  check("ss_source_type_valid", sql`${t.sourceType} IN ('upload','url')`),
+  check("ss_format_valid", sql`${t.format} IN ('auto','csv','xlsx')`),
+  check("ss_auth_type_valid", sql`${t.authType} IN ('none','basic','bearer','header')`),
+  check("ss_apply_policy_valid", sql`${t.applyPolicy} IN ('preview_only','auto_if_clean')`),
+  // Apenas HTTPS nesta fase; credenciais na URL são sempre proibidas.
+  check("ss_url_https_only", sql`${t.url} IS NULL OR ${t.url} ~ '^https://'`),
+  check("ss_url_no_credentials", sql`${t.url} IS NULL OR ${t.url} !~ '//[^@/]+@'`),
+  check("ss_non_negative", sql`${t.lastDurationMs} IS NULL OR ${t.lastDurationMs} >= 0`),
+  check("ss_row_count_non_negative", sql`${t.lastRowCount} IS NULL OR ${t.lastRowCount} >= 0`),
+]);
+
+/**
+ * Uma execução de uma fonte (append-only). É o histórico real por fonte:
+ * sucesso, no_change (304/hash igual), erro, duração, contagens e o import
+ * que produziu (NULL quando a run não gerou snapshot).
+ */
+export const SUPPLIER_SOURCE_RUN_STATUSES = ["running", "success", "no_change", "error", "skipped"] as const;
+export type SupplierSourceRunStatus = (typeof SUPPLIER_SOURCE_RUN_STATUSES)[number];
+
+export const supplierSourceRuns = pgTable("supplier_source_runs", {
+  id: serial("id").primaryKey(),
+  sourceId: integer("source_id").notNull().references(() => supplierSources.id, { onDelete: "cascade" }),
+  status: varchar("status", { length: 20 }).notNull().default("running"),
+  startedAt: timestamp("started_at").notNull().defaultNow(),
+  finishedAt: timestamp("finished_at"),
+  durationMs: integer("duration_ms"),
+  rowCount: integer("row_count"),
+  /** Deliberately separate from supplier_imports.summary: run-level, por fonte. */
+  newCount: integer("new_count"),
+  updatedCount: integer("updated_count"),
+  missingCount: integer("missing_count"),
+  httpStatus: integer("http_status"),
+  etag: varchar("etag", { length: 500 }),
+  lastModified: varchar("last_modified", { length: 100 }),
+  /** Snapshot que esta run produziu (NULL em no_change/erro). */
+  importId: integer("import_id").references(() => supplierImports.id, { onDelete: "set null" }),
+  errorCode: varchar("error_code", { length: 80 }),
+  errorMessage: varchar("error_message", { length: 500 }),
+}, (t) => [
+  index("ssr_source_idx").on(t.sourceId, t.startedAt),
+  index("ssr_status_idx").on(t.status),
+  check("ssr_status_valid", sql`${t.status} IN ('running','success','no_change','error','skipped')`),
+  check("ssr_duration_non_negative", sql`${t.durationMs} IS NULL OR ${t.durationMs} >= 0`),
+  check("ssr_counts_non_negative", sql`${t.rowCount} IS NULL OR ${t.rowCount} >= 0`),
 ]);
 
 export const productInternalSkuSeq = pgSequence("product_internal_sku_seq", {

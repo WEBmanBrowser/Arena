@@ -2,6 +2,7 @@
  * C.3.2 — Regression tests for supplier import profiles.
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
+import { uploadSource } from "@/lib/supplier-import/source";
 import { db } from "@/db";
 import { suppliers, supplierImportProfiles, supplierImports, supplierImportRows, products, productSuppliers, users } from "@/db/schema";
 import { eq, and, sql } from "drizzle-orm";
@@ -51,9 +52,7 @@ describe("C.3.2 — Supplier Import Profile", () => {
 
     const preview = await previewSupplierImport({
       supplierId: supplier.id,
-      fileName: `${TAG}-A.csv`,
-      csvText: "skuFornecedor;nome;custo;stock;ean\nTEST-001;Produto A;10,00;5;5901234123457",
-      userId: 1,
+      source: uploadSource({ fileName: `${TAG}-A.csv`, csvText: "skuFornecedor;nome;custo;stock;ean\nTEST-001;Produto A;10,00;5;5901234123457" }), userId: 1,
     });
     expect(preview.status).toBe("preview");
     expect(preview.mapping).toBeDefined();
@@ -96,9 +95,7 @@ describe("C.3.2 — Supplier Import Profile", () => {
 
     const preview = await previewSupplierImport({
       supplierId: supplier.id,
-      fileName: `${TAG}-C.csv`,
-      csvText: "skuFornecedor;nome;custo;stock;ean\nTEST-001;Produto C;10,00;5;5901234123457",
-      userId: 1,
+      source: uploadSource({ fileName: `${TAG}-C.csv`, csvText: "skuFornecedor;nome;custo;stock;ean\nTEST-001;Produto C;10,00;5;5901234123457" }), userId: 1,
     });
 
     // O preview ainda funciona, mas o mapping usado é o do CSV (autoMapHeaders),
@@ -147,9 +144,7 @@ describe("C.3.2 — Supplier Import Profile", () => {
     try {
       await previewSupplierImport({
         supplierId: supplier.id,
-        fileName: `${TAG}-fail.csv`,
-        csvText: "",
-        userId: 1,
+        source: uploadSource({ fileName: `${TAG}-fail.csv`, csvText: "" }), userId: 1,
       });
     } catch (e) {
       // esperado
@@ -176,9 +171,7 @@ describe("C.3.2 — Supplier Import Profile", () => {
     // Simular uma importação (preview) com o perfil antigo
     const preview = await previewSupplierImport({
       supplierId: supplier.id,
-      fileName: `${TAG}-history.csv`,
-      csvText: "skuFornecedor;nome;custo;stock;ean\nTEST-001;Produto;10,00;5;5901234123457",
-      userId: 1,
+      source: uploadSource({ fileName: `${TAG}-history.csv`, csvText: "skuFornecedor;nome;custo;stock;ean\nTEST-001;Produto;10,00;5;5901234123457" }), userId: 1,
     });
     expect(preview.mapping["skuFornecedor"]).toBe("supplierSku");
 

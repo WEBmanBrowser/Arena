@@ -7,6 +7,7 @@ import { db } from "@/db";
 import { products, productSuppliers, suppliers, users } from "@/db/schema";
 import { eq, and, sql } from "drizzle-orm";
 import { previewSupplierImport, applySupplierImport } from "@/lib/services/supplier-import-service";
+import { uploadSource } from "@/lib/supplier-import/source";
 
 const TAG = "C31-REG-POLICY";
 
@@ -67,9 +68,7 @@ describe("C.3.1 — Preferred Supplier Policy (reproduz bug antes da correção)
     // Preparar importação com linha que encontra o produto pelo EAN.
     const preview = await previewSupplierImport({
       supplierId: supplier.id,
-      fileName: `${TAG}-A.csv`,
-      csvText: "skuFornecedor;nome;custo;stock;ean\nFORN-TEST-001;Produto A;10,00;5;5901234123457",
-      userId: 1,
+      source: uploadSource({ fileName: `${TAG}-A.csv`, csvText: "skuFornecedor;nome;custo;stock;ean\nFORN-TEST-001;Produto A;10,00;5;5901234123457" }), userId: 1,
     });
     expect(preview.status).toBe("preview");
     expect(preview.lines[0].status).toBe("ready");

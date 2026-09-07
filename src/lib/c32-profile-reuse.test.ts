@@ -31,6 +31,7 @@ import {
   saveSupplierProfile,
 } from "@/lib/services/supplier-import-service";
 import { POST as supplierImportPOST } from "@/app/api/admin/supplier-import/route";
+import { uploadSource } from "@/lib/supplier-import/source";
 
 const TAG = "C32-REUSE";
 const CSV = "skuFornecedor;nome;custo;stock;ean\nTEST-001;Produto A;10,00;5;5901234123457";
@@ -92,7 +93,7 @@ describe("C.3.2 — Reutilização do perfil (correção)", () => {
 
     // E o preview reutiliza esse perfil sem mapping manual.
     const preview = await previewSupplierImport({
-      supplierId: supplier.id, fileName: `${TAG}-A.csv`, csvText: CSV, userId: 1,
+      supplierId: supplier.id, source: uploadSource({ fileName: `${TAG}-A.csv`, csvText: CSV }), userId: 1,
     });
     expect(preview.profileUsed).toBe("profile_valid");
     expect(preview.profileName).toBe(`Perfil #${profile!.id}`);
@@ -127,7 +128,7 @@ describe("C.3.2 — Reutilização do perfil (correção)", () => {
 
     // O preview continua funcional (fallback autoMap), mas nunca diz profile_valid.
     const preview = await previewSupplierImport({
-      supplierId: s3.id, fileName: `${TAG}-A2.csv`, csvText: CSV, mapping: {}, userId: 1,
+      supplierId: s3.id, source: uploadSource({ fileName: `${TAG}-A2.csv`, csvText: CSV }), mapping: {}, userId: 1,
     });
     expect(preview.status).toBe("preview");
     expect(preview.profileUsed).toBe("no_profile");
@@ -144,7 +145,7 @@ describe("C.3.2 — Reutilização do perfil (correção)", () => {
 
     // A UI envia sempre mapping:{} — tem de contar como "sem mapping manual".
     const preview = await previewSupplierImport({
-      supplierId: supplier.id, fileName: `${TAG}-B.csv`, csvText: CSV, mapping: {}, userId: 1,
+      supplierId: supplier.id, source: uploadSource({ fileName: `${TAG}-B.csv`, csvText: CSV }), mapping: {}, userId: 1,
     });
     expect(preview.profileUsed).toBe("profile_valid");
     expect(preview.mapping).toEqual(STAGING_MAPPING_APPLIED); // parseado com o mapping do perfil
@@ -177,7 +178,7 @@ describe("C.3.2 — Reutilização do perfil (correção)", () => {
 
     // 1º preview: grava o perfil (como a UI com a checkbox marcada).
     const first = await previewSupplierImport({
-      supplierId: supplier.id, fileName: `${TAG}-C1.csv`, csvText: CSV, mapping: {}, userId: 1, saveProfile: true,
+      supplierId: supplier.id, source: uploadSource({ fileName: `${TAG}-C1.csv`, csvText: CSV }), mapping: {}, userId: 1, saveProfile: true,
     });
     expect(first.profileUsed).toBe("profile_valid");
     const saved = await loadSupplierProfile(supplier.id);
@@ -185,7 +186,7 @@ describe("C.3.2 — Reutilização do perfil (correção)", () => {
 
     // 2º preview: saveProfile=false e mapping:{} — o bug mostrava "no_profile".
     const second = await previewSupplierImport({
-      supplierId: supplier.id, fileName: `${TAG}-C2.csv`, csvText: CSV, mapping: {}, userId: 1, saveProfile: false,
+      supplierId: supplier.id, source: uploadSource({ fileName: `${TAG}-C2.csv`, csvText: CSV }), mapping: {}, userId: 1, saveProfile: false,
     });
     expect(second.profileUsed).toBe("profile_valid");
     expect(second.profileName).toBe(`Perfil #${saved!.id}`);
@@ -202,7 +203,7 @@ describe("C.3.2 — Reutilização do perfil (correção)", () => {
     const [supplier] = await db.insert(suppliers).values({ id: 323, name: `${TAG}-Reread`, isActive: true }).returning();
 
     const preview = await previewSupplierImport({
-      supplierId: supplier.id, fileName: `${TAG}-D.csv`, csvText: CSV, mapping: {}, userId: 1, saveProfile: true,
+      supplierId: supplier.id, source: uploadSource({ fileName: `${TAG}-D.csv`, csvText: CSV }), mapping: {}, userId: 1, saveProfile: true,
     });
 
     // O id reportado vem da releitura, não apenas do retorno do save.
@@ -219,7 +220,7 @@ describe("C.3.2 — Reutilização do perfil (correção)", () => {
     await insertRawProfile(supplier.id, JSON.stringify("SECRET-MARKER-XYZ"));
 
     const preview = await previewSupplierImport({
-      supplierId: supplier.id, fileName: `${TAG}-D2.csv`, csvText: CSV, mapping: {}, userId: 1,
+      supplierId: supplier.id, source: uploadSource({ fileName: `${TAG}-D2.csv`, csvText: CSV }), mapping: {}, userId: 1,
     });
     expect(preview.profileUsed).not.toBe("profile_valid");
     expect(preview.profileUsed).toBe("no_profile");
@@ -238,7 +239,7 @@ describe("C.3.2 — Reutilização do perfil (correção)", () => {
     const manual = { skuFornecedor: "supplierSku", precoCustoAlt: "costPrice" };
 
     const preview = await previewSupplierImport({
-      supplierId: supplier.id, fileName: `${TAG}-E.csv`, csvText: csv, mapping: manual, userId: 1,
+      supplierId: supplier.id, source: uploadSource({ fileName: `${TAG}-E.csv`, csvText: csv }), mapping: manual, userId: 1,
     });
 
     // O CSV foi lido com o mapeamento MANUAL, não com o do perfil.
@@ -265,7 +266,7 @@ describe("C.3.2 — Reutilização do perfil (correção)", () => {
     const manual = { skuFornecedor: "supplierSku", precoCustoAlt: "costPrice" };
 
     const preview = await previewSupplierImport({
-      supplierId: supplier.id, fileName: `${TAG}-E2.csv`, csvText: csv, mapping: manual, userId: 1,
+      supplierId: supplier.id, source: uploadSource({ fileName: `${TAG}-E2.csv`, csvText: csv }), mapping: manual, userId: 1,
     });
     expect(preview.profileUsed).toBe("profile_invalid");
     expect(preview.mapping).toEqual({
@@ -279,7 +280,7 @@ describe("C.3.2 — Reutilização do perfil (correção)", () => {
     // F1 — fornecedor novo: o CSV falha no parse (sem coluna-chave) → sem perfil.
     const [fresh] = await db.insert(suppliers).values({ id: 327, name: `${TAG}-FailNew`, isActive: true }).returning();
     await expect(previewSupplierImport({
-      supplierId: fresh.id, fileName: `${TAG}-F1.csv`, csvText: "nome;custo\nA;1", mapping: {}, saveProfile: true, userId: 1,
+      supplierId: fresh.id, source: uploadSource({ fileName: `${TAG}-F1.csv`, csvText: "nome;custo\nA;1" }), mapping: {}, saveProfile: true, userId: 1,
     })).rejects.toThrow();
     expect(await loadSupplierProfile(fresh.id)).toBeNull();
     const [count1] = await db.select({ count: sql<number>`count(*)` })
@@ -292,7 +293,7 @@ describe("C.3.2 — Reutilização do perfil (correção)", () => {
     const before = await loadSupplierProfile(withProfile.id);
 
     await expect(previewSupplierImport({
-      supplierId: withProfile.id, fileName: `${TAG}-F2.csv`, csvText: "", mapping: {}, saveProfile: true, userId: 1,
+      supplierId: withProfile.id, source: uploadSource({ fileName: `${TAG}-F2.csv`, csvText: "" }), mapping: {}, saveProfile: true, userId: 1,
     })).rejects.toThrow();
 
     const after = await loadSupplierProfile(withProfile.id);

@@ -61,12 +61,16 @@ import {
   SUPPLIER_IMPORT_PREVIEW_LIMIT,
 } from "@/lib/supplier-import/constants";
 import {
-  sha256Hex,
-  sha256HexBytes,
-  byteLengthUtf8,
   type NormalizedSupplierRow,
   type SupplierImportIssue,
 } from "@/lib/supplier-import/normalize";
+import {
+  assertSourcePayload,
+  sourceByteLength,
+  sourceFormat,
+  sourceSha256Hex,
+  type SourcePayload,
+} from "@/lib/supplier-import/source";
 import { type SupplierFileFormat } from "@/lib/supplier-import/file";
 // C.3.3 (etapa 1) — o serviço já não chama o parser CSV diretamente: passa pelo
 // dispatcher de formatos e pelo resolvedor puro de mapping/perfil (C.3.2).
@@ -236,6 +240,10 @@ export interface SupplierImportPreview {
   supplierId: number;
   supplierName: string;
   fileName: string;
+  /** C.3.4.1 — fonte configurada que produziu o snapshot (NULL no upload manual). */
+  sourceId: number | null;
+  /** Snapshot do nome da fonte no momento do preview (sobrevive a rename). */
+  sourceLabel: string | null;
   fileHash: string;
   fileSizeBytes: number;
   /** CSV: separador detetado. XLSX (C.3.3 etapa 2): null — não se aplica. */
@@ -326,24 +334,16 @@ async function detectMissingProducts(
 
 export interface PreviewInput {
   supplierId: number;
-  fileName: string;
   /**
-   * CSV/TXT: texto completo do ficheiro (caminho atual, inalterado).
-   * C.3.3 (etapa 2): quando `xlsxBytes` está presente, este campo é ignorado
-   * — o ficheiro é o XLSX, em bytes originais.
+   * C.3.4.1 — FONTE única de conteúdo (contrato SourcePayload). O upload
+   * CSV/XLSX chega aqui via `uploadSource()` (./supplier-import/source) e o
+   * serviço já não conhece `csvText` nem `xlsxBytes`: só o contrato da fonte.
+   * `label` alimenta supplier_imports.file_name + source_label; `text`/`bytes`
+   * alimentam o dispatcher de formatos (SupplierFileParse nunca muda).
    */
-  csvText: string;
+  source: SourcePayload;
   /**
-   * C.3.3 (etapa 2) — XLSX: BYTES exatos do ficheiro (decodificados do base64
-   * de transporte na rota). Quando presente:
-   *  - fileHash = SHA-256 destes bytes (nunca da string base64);
-   *  - fileSizeBytes = comprimento destes bytes (teto de 5 MB aplicado antes);
-   *  - o parse passa pelo ramo "xlsx" do dispatcher;
-   *  - `csvText` é ignorado.
-   */
-  xlsxBytes?: Uint8Array;
-  /**
-   * Mapeamento manual header→campo. Vazio ({}) conta como AUSENTE: nessa caso,
+   * Mapeamento manual header→campo. Vazio ({}) conta como AUSENTE: nesse caso,
    * um perfil válido guardado para o fornecedor tem prioridade e o CSV é
    * parseado com o mapping do perfil.
    */
@@ -385,19 +385,22 @@ export async function previewSupplierImport(input: PreviewInput): Promise<Suppli
   // execução mantém-se — parse inicial ANTES de carregar o perfil da base de
   // dados, re-parse com o perfil só quando aplicável.
   //
-  // C.3.3 (etapa 2) — o formato vem dos BYTES: se há xlsxBytes, o ficheiro é
-  // XLSX e o hash/tamanho são calculados sobre os bytes originais do ficheiro
-  // (NUNCA sobre a string base64 de transporte, que é outra sequência de
-  // bytes). O caminho CSV é exatamente o de sempre (texto → sha256/texto).
-  const isXlsx = input.xlsxBytes !== undefined && input.xlsxBytes.byteLength > 0;
-  const format: SupplierFileFormat = isXlsx ? "xlsx" : "csv";
+  // C.3.4.1 — o conteúdo vem sempre de um SourcePayload (contrato único SOURCE
+  // → FORMATO → SupplierFileParse). O formato é resolvido pelo payload
+  // (explícito na rota/upload; "auto" deteta bytes/texto) e o hash/tamanho são
+  // calculados sobre o conteúdo exato (UTF-8 para texto; bytes originais para
+  // XLSX — NUNCA sobre o base64 de transporte).
+  assertSourcePayload(input.source);
+  const source = input.source;
+  const format = sourceFormat(source);
   const parseOne = (overrides?: Record<string, string>) =>
-    parseSupplierFile(input.csvText, overrides, format, input.xlsxBytes);
+    parseSupplierFile(source.text ?? "", overrides, format, source.bytes);
 
   const manualMapping = hasManualMappingEntries(input.mapping) ? input.mapping : undefined;
   const initialParsed = parseOne(manualMapping);
-  const fileHash = isXlsx ? sha256HexBytes(input.xlsxBytes!) : sha256Hex(input.csvText);
-  const fileSizeBytes = isXlsx ? input.xlsxBytes!.byteLength : byteLengthUtf8(input.csvText);
+  const fileHash = sourceSha256Hex(source);
+  const fileSizeBytes = sourceByteLength(source);
+  const sourceLabel = source.label;
 
   const profile = await loadSupplierProfile(supplier.id);
   let { parsed, resolution } = resolveSupplierFileMapping({
@@ -554,7 +557,15 @@ export async function previewSupplierImport(input: PreviewInput): Promise<Suppli
   const importRow = await db.transaction(async (tx) => {
     const [created] = await tx.insert(supplierImports).values({
       supplierId: supplier.id,
-      fileName: input.fileName.slice(0, 255),
+      fileName: sourceLabel.slice(0, 255),
+      // C.3.4.1 — a fonte configurada (supplier_sources) nasce na gestão de
+      // fontes; um upload manual ainda não tem linha de fonte (source_id NULL).
+      // O label é persistido como snapshot para o histórico sobreviver a
+      // renome/delete; os validadores HTTP ficam NULL no upload.
+      sourceId: null,
+      sourceLabel: sourceLabel.slice(0, 255),
+      httpEtag: source.etag ?? null,
+      httpLastModified: source.lastModified ?? null,
       fileHash,
       fileSizeBytes,
       rowCount: parsed.rows.length,
@@ -610,6 +621,8 @@ export async function previewSupplierImport(input: PreviewInput): Promise<Suppli
     supplierId: supplier.id,
     supplierName: supplier.name,
     fileName: importRow.fileName,
+    sourceId: importRow.sourceId,
+    sourceLabel: importRow.sourceLabel,
     fileHash,
     fileSizeBytes,
     delimiter: parsed.delimiter,

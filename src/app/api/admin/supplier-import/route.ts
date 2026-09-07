@@ -16,6 +16,7 @@ import { CSV_MAX_SIZE } from "@/lib/csv";
 import { SupplierCsvError, byteLengthUtf8 } from "@/lib/supplier-import/normalize";
 import { classifySupplierFileName } from "@/lib/supplier-import/file";
 import { XLSX_MAX_SIZE_BYTES, decodeBase64Strict } from "@/lib/supplier-import/xlsx";
+import { SupplierSourceError, uploadSource } from "@/lib/supplier-import/source";
 import {
   SupplierImportError,
   listSupplierImports,
@@ -41,6 +42,12 @@ function errorResponse(e: unknown): NextResponse {
   if (e instanceof SupplierImportError) {
     return NextResponse.json(
       { error: e.code, message: supplierImportErrorMessage(e.code, e.detail) },
+      { status: e.httpStatus }
+    );
+  }
+  if (e instanceof SupplierSourceError) {
+    return NextResponse.json(
+      { error: e.code, message: supplierImportErrorMessage(e.code) },
       { status: e.httpStatus }
     );
   }
@@ -149,8 +156,10 @@ export async function POST(req: NextRequest) {
       }, { status: 400 });
     }
     try {
+      // C.3.4.1 — o upload vira um SourcePayload no MESMO builder usado pelos
+      // testes: a rota nunca passa bytes avulsos ao serviço.
       const preview = await previewSupplierImport({
-        supplierId, fileName, csvText: "", xlsxBytes, mapping, userId: user.id, saveProfile,
+        supplierId, source: uploadSource({ fileName, xlsxBytes }), mapping, userId: user.id, saveProfile,
       });
       return NextResponse.json(preview);
     } catch (e) {
@@ -172,7 +181,10 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const preview = await previewSupplierImport({ supplierId, fileName, csvText: data, mapping, userId: user.id, saveProfile });
+    // C.3.4.1 — caminho CSV também passa pelo contrato SourcePayload.
+    const preview = await previewSupplierImport({
+      supplierId, source: uploadSource({ fileName, csvText: data }), mapping, userId: user.id, saveProfile,
+    });
     return NextResponse.json(preview);
   } catch (e) {
     return errorResponse(e);

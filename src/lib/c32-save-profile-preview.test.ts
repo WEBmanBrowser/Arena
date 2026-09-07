@@ -10,6 +10,7 @@ import { db } from "@/db";
 import { suppliers, supplierImports, users } from "@/db/schema";
 import { eq, sql } from "drizzle-orm";
 import { loadSupplierProfile, previewSupplierImport } from "@/lib/services/supplier-import-service";
+import { uploadSource } from "@/lib/supplier-import/source";
 
 const TAG = "C32-SAVEPREVIEW";
 const CSV = "skuFornecedor;nome;custo;stock;ean\nTEST-001;Produto A;10,00;5;5901234123457";
@@ -37,9 +38,7 @@ describe("C.3.2 — saveProfile no preview", () => {
 
     const preview = await previewSupplierImport({
       supplierId: supplier.id,
-      fileName: `${TAG}-1.csv`,
-      csvText: CSV,
-      userId: 1,
+      source: uploadSource({ fileName: `${TAG}-1.csv`, csvText: CSV }), userId: 1,
       saveProfile: true,
     });
 
@@ -59,12 +58,12 @@ describe("C.3.2 — saveProfile no preview", () => {
     const [supplier] = await db.insert(suppliers).values({ id: 211, name: `${TAG}-Reuse`, isActive: true }).returning();
 
     await previewSupplierImport({
-      supplierId: supplier.id, fileName: `${TAG}-2a.csv`, csvText: CSV, userId: 1, saveProfile: true,
+      supplierId: supplier.id, source: uploadSource({ fileName: `${TAG}-2a.csv`, csvText: CSV }), userId: 1, saveProfile: true,
     });
     const first = await loadSupplierProfile(supplier.id);
 
     const second = await previewSupplierImport({
-      supplierId: supplier.id, fileName: `${TAG}-2b.csv`, csvText: CSV, userId: 1,
+      supplierId: supplier.id, source: uploadSource({ fileName: `${TAG}-2b.csv`, csvText: CSV }), userId: 1,
     });
 
     expect(second.profileUsed).toBe("profile_valid");
@@ -76,7 +75,7 @@ describe("C.3.2 — saveProfile no preview", () => {
     const [supplier] = await db.insert(suppliers).values({ id: 212, name: `${TAG}-NoSave`, isActive: true }).returning();
 
     const preview = await previewSupplierImport({
-      supplierId: supplier.id, fileName: `${TAG}-3.csv`, csvText: CSV, userId: 1,
+      supplierId: supplier.id, source: uploadSource({ fileName: `${TAG}-3.csv`, csvText: CSV }), userId: 1,
     });
 
     expect(preview.profileUsed).toBe("no_profile");
