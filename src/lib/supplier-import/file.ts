@@ -18,30 +18,74 @@
  * agnóstica ao formato — o serviço deixa de conhecer o parser concreto.
  */
 import { parseSupplierCsv, type SupplierFileParse } from "./normalize";
+import { parseSupplierXlsx } from "./xlsx";
 
-/** Formatos de ficheiro de fornecedor suportados — apenas CSV nesta etapa. */
-export const SUPPLIER_FILE_FORMATS = ["csv"] as const;
+/**
+ * Formatos de ficheiro de fornecedor suportados.
+ * C.3.3 (etapa 1): apenas "csv". C.3.3 (etapa 2): + "xlsx". Nenhum outro.
+ */
+export const SUPPLIER_FILE_FORMATS = ["csv", "xlsx"] as const;
 export type SupplierFileFormat = (typeof SUPPLIER_FILE_FORMATS)[number];
 
 /**
- * Texto do ficheiro do fornecedor → contrato normalizado, seja qual for o
- * formato. O preview deve chamar SEMPRE esta função (nunca um parser concreto),
- * para que um segundo formato nasça já ligado ao mesmo pipeline.
+ * Texto (CSV) ou bytes (XLSX) do ficheiro do fornecedor → contrato
+ * normalizado, seja qual for o formato. O preview deve chamar SEMPRE esta
+ * função (nunca um parser concreto), para que um segundo formato nasça já
+ * ligado ao mesmo pipeline.
+ *
+ * `xlsxBytes` só é usado no ramo "xlsx" (e é obrigatório nesse ramo); no ramo
+ * "csv" é ignorado — o caminho CSV é EXATAMENTE o parser original C.3.1.
  */
 export function parseSupplierFile(
   text: string,
   overrides?: Record<string, string>,
-  format: SupplierFileFormat = "csv"
+  format: SupplierFileFormat = "csv",
+  xlsxBytes?: Uint8Array
 ): SupplierFileParse {
   switch (format) {
     case "csv":
       // Ramo CSV — delega no parser original C.3.1 (regras intocadas).
       return parseSupplierCsv(text, overrides);
+    case "xlsx":
+      // Ramo XLSX (C.3.3 etapa 2) — bytes originais do ficheiro; o mesmo
+      // contrato SupplierFileParse sai daqui (delimiter = null).
+      if (!xlsxBytes || xlsxBytes.byteLength === 0) {
+        throw new Error("FILE_FORMAT_NOT_SUPPORTED: xlsx requer bytes");
+      }
+      return parseSupplierXlsx(xlsxBytes, overrides);
     default: {
       // Inalcançável com o tipo fechado; guarda o valor fora da união em runtime.
       throw new Error(`FILE_FORMAT_NOT_SUPPORTED: ${String(format)}`);
     }
   }
+}
+
+// ─── Classificação do nome do ficheiro (rota da API) ──────
+
+/**
+ * Formatos de spreadsheet que NÃO são suportados nesta app e que devem ser
+ * recusados COM CLAREZA (FILE_TYPE_NOT_SUPPORTED) em vez de chegarem ao
+ * parser CSV como texto binário legível apenas como erro genérico.
+ * (.xls/.xlsm/.xltm/.xlsb/.xltx/.xlt e ODF — ver escopo C.3.3 etapa 2:
+ * apenas .xlsx, sem exceções.)
+ */
+export const UNSUPPORTED_SPREADSHEET_EXTENSIONS = [
+  "xls", "xlsm", "xltm", "xlsb", "xltx", "xlt", "ods", "fods", "ott",
+] as const;
+
+/**
+ * O formato é decidido pela extensão do nome enviado pelo browser e CONFIRMADO
+ * pela assinatura dos bytes no parser (ZIP/OOXML) — nunca só pela extensão.
+ *
+ *  - "xlsx"  → ramo binário (base64 → bytes → parseSupplierXlsx);
+ *  - "csv"   → ramo texto atual (mesmo para .txt, como sempre foi);
+ *  - "unsupported" → spreadsheet binário conhecido mas fora do escopo.
+ */
+export function classifySupplierFileName(fileName: string): "xlsx" | "csv" | "unsupported" {
+  const ext = (fileName.match(/\.([a-z0-9]+)$/i)?.[1] ?? "").toLowerCase();
+  if (ext === "xlsx") return "xlsx";
+  if ((UNSUPPORTED_SPREADSHEET_EXTENSIONS as readonly string[]).includes(ext)) return "unsupported";
+  return "csv";
 }
 
 /** O que a resolução precisa de saber sobre o perfil guardado (C.3.2). */

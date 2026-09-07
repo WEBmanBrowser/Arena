@@ -150,7 +150,12 @@ export interface NormalizedSupplierRow {
 
 export interface SupplierFileParse {
   headers: string[];
-  delimiter: string;
+  /**
+   * CSV: delimiter detetado. C.3.3 (etapa 2): XLSX não tem separador — null.
+   * O perfil persistido e o preview levam o valor tal como devolvido: null é
+   * a forma canónica de "não se aplica", nunca uma string vazia.
+   */
+  delimiter: string | null;
   /** Ficheiro header → canonical supplier field. */
   mapping: Record<string, string>;
   /** Headers recognised by the generic CSV vocabulary but not applicable here. */
@@ -176,6 +181,17 @@ export class SupplierCsvError extends Error {
 /** sha256 (hex) of the exact bytes the operator previewed. */
 export function sha256Hex(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex");
+}
+
+/**
+ * sha256 (hex) dos BYTES exatos de um ficheiro binário (C.3.3 etapa 2: XLSX).
+ *
+ * Para XLSX o fileHash é sempre o hash dos bytes originais do ficheiro —
+ * nunca da string base64 de transporte (que é outra sequência de bytes e
+ * daria um hash sem qualquer relação com o ficheiro real).
+ */
+export function sha256HexBytes(bytes: Uint8Array): string {
+  return createHash("sha256").update(Buffer.from(bytes)).digest("hex");
 }
 
 export function byteLengthUtf8(text: string): number {

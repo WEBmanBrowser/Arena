@@ -62,10 +62,12 @@ import {
 } from "@/lib/supplier-import/constants";
 import {
   sha256Hex,
+  sha256HexBytes,
   byteLengthUtf8,
   type NormalizedSupplierRow,
   type SupplierImportIssue,
 } from "@/lib/supplier-import/normalize";
+import { type SupplierFileFormat } from "@/lib/supplier-import/file";
 // C.3.3 (etapa 1) — o serviço já não chama o parser CSV diretamente: passa pelo
 // dispatcher de formatos e pelo resolvedor puro de mapping/perfil (C.3.2).
 import {
@@ -236,7 +238,8 @@ export interface SupplierImportPreview {
   fileName: string;
   fileHash: string;
   fileSizeBytes: number;
-  delimiter: string;
+  /** CSV: separador detetado. XLSX (C.3.3 etapa 2): null — não se aplica. */
+  delimiter: string | null;
   headers: string[];
   mapping: Record<string, string>;
   ignoredColumns: string[];
@@ -324,7 +327,21 @@ async function detectMissingProducts(
 export interface PreviewInput {
   supplierId: number;
   fileName: string;
+  /**
+   * CSV/TXT: texto completo do ficheiro (caminho atual, inalterado).
+   * C.3.3 (etapa 2): quando `xlsxBytes` está presente, este campo é ignorado
+   * — o ficheiro é o XLSX, em bytes originais.
+   */
   csvText: string;
+  /**
+   * C.3.3 (etapa 2) — XLSX: BYTES exatos do ficheiro (decodificados do base64
+   * de transporte na rota). Quando presente:
+   *  - fileHash = SHA-256 destes bytes (nunca da string base64);
+   *  - fileSizeBytes = comprimento destes bytes (teto de 5 MB aplicado antes);
+   *  - o parse passa pelo ramo "xlsx" do dispatcher;
+   *  - `csvText` é ignorado.
+   */
+  xlsxBytes?: Uint8Array;
   /**
    * Mapeamento manual header→campo. Vazio ({}) conta como AUSENTE: nessa caso,
    * um perfil válido guardado para o fornecedor tem prioridade e o CSV é
@@ -362,20 +379,30 @@ export async function previewSupplierImport(input: PreviewInput): Promise<Suppli
   // Mapping manual VAZIO é tratado como ausente: a UI envia sempre mapping:{},
   // e um objeto vazio não pode esconder um perfil guardado válido.
   //
-  // C.3.3 (etapa 1) — o parse passa pelo dispatcher parseSupplierFile (hoje
-  // apenas o ramo CSV) e a resolução perfil/mapping vive em
-  // resolveSupplierFileMapping (./supplier-import/file), com a MESMA semântica
-  // C.3.2: a ordem de execução mantém-se — parse inicial ANTES de carregar o
-  // perfil da base de dados, re-parse com o perfil só quando aplicável.
+  // C.3.3 (etapa 1) — o parse passa pelo dispatcher parseSupplierFile e a
+  // resolução perfil/mapping vive em resolveSupplierFileMapping
+  // (./supplier-import/file), com a MESMA semântica C.3.2: a ordem de
+  // execução mantém-se — parse inicial ANTES de carregar o perfil da base de
+  // dados, re-parse com o perfil só quando aplicável.
+  //
+  // C.3.3 (etapa 2) — o formato vem dos BYTES: se há xlsxBytes, o ficheiro é
+  // XLSX e o hash/tamanho são calculados sobre os bytes originais do ficheiro
+  // (NUNCA sobre a string base64 de transporte, que é outra sequência de
+  // bytes). O caminho CSV é exatamente o de sempre (texto → sha256/texto).
+  const isXlsx = input.xlsxBytes !== undefined && input.xlsxBytes.byteLength > 0;
+  const format: SupplierFileFormat = isXlsx ? "xlsx" : "csv";
+  const parseOne = (overrides?: Record<string, string>) =>
+    parseSupplierFile(input.csvText, overrides, format, input.xlsxBytes);
+
   const manualMapping = hasManualMappingEntries(input.mapping) ? input.mapping : undefined;
-  const initialParsed = parseSupplierFile(input.csvText, manualMapping);
-  const fileHash = sha256Hex(input.csvText);
-  const fileSizeBytes = byteLengthUtf8(input.csvText);
+  const initialParsed = parseOne(manualMapping);
+  const fileHash = isXlsx ? sha256HexBytes(input.xlsxBytes!) : sha256Hex(input.csvText);
+  const fileSizeBytes = isXlsx ? input.xlsxBytes!.byteLength : byteLengthUtf8(input.csvText);
 
   const profile = await loadSupplierProfile(supplier.id);
   let { parsed, resolution } = resolveSupplierFileMapping({
     initial: initialParsed,
-    reparse: (mapping) => parseSupplierFile(input.csvText, mapping),
+    reparse: parseOne,
     manualMapping,
     profile,
   });

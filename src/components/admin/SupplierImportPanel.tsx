@@ -46,7 +46,8 @@ type PreviewResult = {
   supplierName: string;
   fileName: string;
   fileHash: string;
-  delimiter: string;
+  // CSV: separador detetado. XLSX (C.3.3 etapa 2): null — não se aplica.
+  delimiter: string | null;
   mapping: Record<string, string>;
   ignoredColumns: string[];
   summary: {
@@ -111,6 +112,23 @@ async function readBody(res: Response): Promise<any> {
 }
 
 /**
+ * C.3.3 (etapa 2) — XLSX é lido como BYTES no browser e enviado em base64
+ * estrito no mesmo JSON (sem multipart). O servidor valida o base64 de forma
+ * canónica e aplica o teto de 5 MB / SHA-256 sobre os bytes decodificados.
+ */
+function arrayBufferToBase64(buf: ArrayBuffer): string {
+  const bytes = new Uint8Array(buf);
+  let binary = "";
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(binary);
+}
+
+const isXlsxName = (name: string) => name.toLowerCase().endsWith(".xlsx");
+
+/**
  * The server's own safe message wins; otherwise the shared API/UI table
  * translates the code (an unmapped code is shown as-is — machine-readable,
  * never raw internals). Never coerces the raw body.
@@ -159,6 +177,8 @@ export default function SupplierImportPanel() {
   const [supplierId, setSupplierId] = useState("");
   const [fileName, setFileName] = useState("");
   const [csvText, setCsvText] = useState("");
+  // C.3.3 (etapa 2) — conteúdo XLSX em base64 (binário); vazio quando não há XLSX.
+  const [fileB64, setFileB64] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [preview, setPreview] = useState<PreviewResult | null>(null);
@@ -230,6 +250,23 @@ export default function SupplierImportPanel() {
     if (!file) return;
     setFileName(file.name);
     setError("");
+    setCsvText("");
+    setFileB64("");
+    if (isXlsxName(file.name)) {
+      // C.3.3 (etapa 2) — XLSX: leitura binária → base64 estrito.
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        const buf = ev.target?.result;
+        if (!(buf instanceof ArrayBuffer)) {
+          setError("Não foi possível ler o ficheiro — tente novamente.");
+          return;
+        }
+        setFileB64(arrayBufferToBase64(buf));
+      };
+      reader.onerror = () => setError("Não foi possível ler o ficheiro — tente novamente.");
+      reader.readAsArrayBuffer(file);
+      return;
+    }
     const reader = new FileReader();
     reader.onload = (ev) => setCsvText(String(ev.target?.result ?? ""));
     reader.readAsText(file);
@@ -246,14 +283,16 @@ export default function SupplierImportPanel() {
   };
 
   const doPreview = async () => {
-    if (!supplierId || !csvText.trim()) return;
+    // CSV viaja como texto (comportamento atual); XLSX viaja como base64 de bytes.
+    const payloadData = fileB64 !== "" ? fileB64 : csvText;
+    if (!supplierId || !payloadData.trim()) return;
     setBusy(true);
     reset();
     try {
       const res = await fetch("/api/admin/supplier-import", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ supplierId: Number(supplierId), fileName, data: csvText, mapping: manualMapping, saveProfile: saveProfileChecked }),
+        body: JSON.stringify({ supplierId: Number(supplierId), fileName, data: payloadData, mapping: manualMapping, saveProfile: saveProfileChecked }),
       });
       const body = await readBody(res);
       if (!res.ok) {
@@ -346,19 +385,19 @@ export default function SupplierImportPanel() {
           </select>
         </div>
         <div>
-          <label className="text-xs text-slate-500 block mb-1">Ficheiro CSV</label>
-          <input type="file" accept=".csv,.txt" onChange={readFile} className="text-sm w-full" />
+          <label className="text-xs text-slate-500 block mb-1">Ficheiro (CSV/TXT ou Excel XLSX)</label>
+          <input type="file" accept=".csv,.txt,.xlsx" onChange={readFile} className="text-sm w-full" />
         </div>
         <div className="flex items-end gap-2">
           <button
             onClick={doPreview}
-            disabled={busy || !csvText.trim() || !supplierId}
+            disabled={busy || (!csvText.trim() && !fileB64) || !supplierId}
             className="px-4 py-2 bg-sky-600 text-white rounded-lg text-sm font-medium hover:bg-sky-700 disabled:opacity-50"
           >
             {busy && !preview ? "A processar..." : "Pré-visualizar"}
           </button>
           {preview && (
-            <button onClick={() => { reset(); setCsvText(""); setFileName(""); }} className="px-3 py-2 text-sm text-slate-500 hover:text-slate-700">
+            <button onClick={() => { reset(); setCsvText(""); setFileB64(""); setFileName(""); }} className="px-3 py-2 text-sm text-slate-500 hover:text-slate-700">
               limpar
             </button>
           )}
@@ -432,15 +471,24 @@ export default function SupplierImportPanel() {
         Colunas reconhecidas: <span className="font-mono">skuFornecedor</span>, <span className="font-mono">nome</span>/<span className="font-mono">designacao</span>,{" "}
         <span className="font-mono">custo</span>, <span className="font-mono">stock</span>, <span className="font-mono">ean</span>,{" "}
         <span className="font-mono">sku</span>/<span className="font-mono">codigo</span>, <span className="font-mono">prazoEntrega</span>.
-        Máx. 10.000 linhas. Separador , ou ; e decimals “10,00” são detetados automaticamente.
+        Máx. 10.000 linhas e 5 MB por ficheiro. Separador , ou ; e decimals “10,00” são detetados automaticamente no CSV;
+        no Excel usa-se a primeira folha com dados (headers na primeira linha útil).
       </p>
 
-      <textarea
-        value={csvText}
-        onChange={(e) => setCsvText(e.target.value)}
-        placeholder={"skuFornecedor;nome;custo;stock\nREF-001;Cabo HDMI;10,00;8"}
-        className="w-full border rounded px-3 py-2 text-xs font-mono h-24 mt-3"
-      />
+      {fileB64 !== "" ? (
+        <p className="mt-3 border rounded px-3 py-2 text-xs text-slate-500 bg-slate-50">
+          <span className="font-medium text-emerald-700">Excel (XLSX)</span> — ficheiro binário lido em base64
+          ({(fileB64.length * 0.75 / (1024 * 1024)).toFixed(1)} MB); o conteúdo é enviado ao servidor em base64 e o
+          SHA-256 é calculado sobre os bytes originais do ficheiro.
+        </p>
+      ) : (
+        <textarea
+          value={csvText}
+          onChange={(e) => setCsvText(e.target.value)}
+          placeholder={"skuFornecedor;nome;custo;stock\nREF-001;Cabo HDMI;10,00;8"}
+          className="w-full border rounded px-3 py-2 text-xs font-mono h-24 mt-3"
+        />
+      )}
 
       {error && (
         <div className="mt-3 bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700">{error}</div>
@@ -450,8 +498,9 @@ export default function SupplierImportPanel() {
         <div className="mt-5 border-t pt-4">
           <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500 mb-3">
             <span className="font-medium text-slate-700">{preview.fileName}</span>
+            {preview.delimiter === null && <span className="text-emerald-700">Excel (XLSX)</span>}
             <span>· {preview.supplierName}</span>
-            <span>· separador “{preview.delimiter}”</span>
+            {preview.delimiter !== null && <span>· separador “{preview.delimiter}”</span>}
             <span className="font-mono" title="SHA-256 do ficheiro">#{preview.fileHash.slice(0, 12)}</span>
           </div>
 

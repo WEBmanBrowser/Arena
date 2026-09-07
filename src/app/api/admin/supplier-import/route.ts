@@ -14,6 +14,8 @@ import { getCurrentUser, isManager, isStaff } from "@/lib/auth";
 import { csrfGuard } from "@/lib/csrf";
 import { CSV_MAX_SIZE } from "@/lib/csv";
 import { SupplierCsvError, byteLengthUtf8 } from "@/lib/supplier-import/normalize";
+import { classifySupplierFileName } from "@/lib/supplier-import/file";
+import { XLSX_MAX_SIZE_BYTES, decodeBase64Strict } from "@/lib/supplier-import/xlsx";
 import {
   SupplierImportError,
   listSupplierImports,
@@ -116,6 +118,47 @@ export async function POST(req: NextRequest) {
   if (!Number.isInteger(supplierId) || supplierId < 1) {
     return NextResponse.json({ error: "SUPPLIER_ID_REQUIRED", message: "Fornecedor obrigatório" }, { status: 400 });
   }
+
+  // C.3.3 (etapa 2) — o formato é escolhido pela extensão e confirmado pela
+  // assinatura dos bytes no parser (ZIP/OOXML), nunca só pela extensão.
+  const kind = classifySupplierFileName(fileName);
+  if (kind === "unsupported") {
+    return NextResponse.json(
+      { error: "FILE_TYPE_NOT_SUPPORTED", message: supplierImportErrorMessage("FILE_TYPE_NOT_SUPPORTED") },
+      { status: 400 }
+    );
+  }
+
+  if (kind === "xlsx") {
+    // XLSX viaja como base64 estrito no mesmo JSON (sem multipart nesta fase).
+    // A decodificação é estrita: charset/padding/canonicidade verificados, e
+    // tudo a seguir (teto de 5 MB, SHA-256) opera sobre os BYTES decodificados.
+    const xlsxBytes = decodeBase64Strict(data);
+    if (!xlsxBytes) {
+      return NextResponse.json(
+        { error: "XLSX_INVALID", message: supplierImportErrorMessage("XLSX_INVALID") },
+        { status: 400 }
+      );
+    }
+    // Recusado ANTES de qualquer parsing pesado — e medido em bytes.
+    if (xlsxBytes.length > XLSX_MAX_SIZE_BYTES) {
+      const limitMb = Math.round(XLSX_MAX_SIZE_BYTES / (1024 * 1024));
+      return NextResponse.json({
+        error: "XLSX_TOO_LARGE",
+        message: `Ficheiro com ${(xlsxBytes.length / (1024 * 1024)).toFixed(1)} MB — o limite é ${limitMb} MB`,
+      }, { status: 400 });
+    }
+    try {
+      const preview = await previewSupplierImport({
+        supplierId, fileName, csvText: "", xlsxBytes, mapping, userId: user.id, saveProfile,
+      });
+      return NextResponse.json(preview);
+    } catch (e) {
+      return errorResponse(e);
+    }
+  }
+
+  // ── CSV/TXT — caminho exatamente como antes da etapa 2 ──
   if (!data.trim()) return NextResponse.json({ error: "CSV_EMPTY", message: "CSV vazio" }, { status: 400 });
   // Bytes, not characters: a pt-PT file full of "§" and accents is several times
   // heavier than its string length claims, and the ceiling is a memory ceiling.
