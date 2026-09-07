@@ -13,13 +13,16 @@
  *  D) o fallback seguro devolve o MESMO objeto do parse inicial.
  */
 import { describe, expect, it, vi } from "vitest";
+import * as XLSX from "@e965/xlsx";
 import { parseSupplierCsv, SupplierCsvError } from "@/lib/supplier-import/normalize";
 import {
   SUPPLIER_FILE_FORMATS,
+  classifySupplierFileName,
   isProfileCompatibleWithHeaders,
   parseSupplierFile,
   resolveSupplierFileMapping,
 } from "@/lib/supplier-import/file";
+import { parseSupplierXlsx } from "@/lib/supplier-import/xlsx";
 
 const CSV_PT = "\uFEFFskuFornecedor;nome;custo;stock;ean\nREF-001;\"Cabo HDMI; 2m\";10,00;8;5901234123457\nREF-002;Rato;1.234,56;0;\n";
 const CSV_COMMA = "sku,name,cost,stock\nSKU-1,Widget,9.99,3\n";
@@ -91,8 +94,38 @@ describe("C.3.3 — parseSupplierFile (dispatcher)", () => {
     }
   });
 
-  it("nesta etapa existe APENAS o ramo csv", () => {
-    expect([...SUPPLIER_FILE_FORMATS]).toEqual(["csv"]);
+  it("etapa 2: os ramos existentes são exatamente csv e xlsx", () => {
+    expect([...SUPPLIER_FILE_FORMATS]).toEqual(["csv", "xlsx"]);
+  });
+
+  it('ramo "xlsx" delega em parseSupplierXlsx (mesmo contrato SupplierFileParse)', () => {
+    // Fixture mínimo: um ZIP/OOXML válido gerado pela mesma biblioteca.
+    const ws: any = {};
+    ws["A1"] = { t: "s", v: "sku" }; ws["B1"] = { t: "s", v: "nome" };
+    ws["A2"] = { t: "s", v: "REF-1" }; ws["B2"] = { t: "s", v: "Produto" };
+    ws["!ref"] = "A1:B2";
+    const bytes = new Uint8Array(
+      XLSX.write({ SheetNames: ["S"], Sheets: { S: ws } }, { type: "buffer", bookType: "xlsx" })
+    );
+    const viaDispatcher = parseSupplierFile("", undefined, "xlsx", bytes);
+    expect(viaDispatcher).toEqual(parseSupplierXlsx(bytes));
+    expect(viaDispatcher.delimiter).toBeNull();
+    expect(viaDispatcher.headers).toEqual(["sku", "nome"]);
+  });
+
+  it('ramo "xlsx" sem bytes → erro de formato, nunca parsing parcial', () => {
+    expect(() => parseSupplierFile("", undefined, "xlsx")).toThrow(/FILE_FORMAT_NOT_SUPPORTED/);
+  });
+
+  it("classificação do nome do ficheiro: xlsx / csv / unsupported", () => {
+    expect(classifySupplierFileName("lista.xlsx")).toBe("xlsx");
+    expect(classifySupplierFileName("LISTA.XLSX")).toBe("xlsx");
+    expect(classifySupplierFileName("lista.csv")).toBe("csv");
+    expect(classifySupplierFileName("lista.txt")).toBe("csv");
+    expect(classifySupplierFileName("sem_extensao")).toBe("csv");
+    for (const bad of ["lista.xls", "lista.xlsm", "lista.xltm", "lista.xlsb", "lista.ods"]) {
+      expect(classifySupplierFileName(bad)).toBe("unsupported");
+    }
   });
 });
 

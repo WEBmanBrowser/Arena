@@ -36,6 +36,21 @@ export const SUPPLIER_IMPORT_MESSAGES: Record<string, string> = {
   CSV_MISSING_KEY_COLUMN: "Ficheiro sem coluna de SKU do fornecedor, EAN ou SKU interno.",
   CSV_PARSE_ERROR: "Erro ao processar o CSV — verifique o formato do ficheiro.",
 
+  // ── supplier file format (C.3.3) ──
+  FILE_TYPE_NOT_SUPPORTED:
+    "Tipo de ficheiro não suportado: apenas CSV/TXT e XLSX são aceites (sem .xls, .xlsm, .ods ou outros).",
+
+  // ── XLSX file level (C.3.3 etapa 2) ──
+  // Nenhuma destas mensagens revela detalhes técnicos (mensagem da
+  // biblioteca, estrutura do ZIP, stack): o erro bruto fica no log do
+  // servidor, o operador recebe apenas a categoria segura.
+  XLSX_INVALID: "Ficheiro Excel (.xlsx) inválido — verifique se é um .xlsx legível e não protegido por palavra-passe.",
+  XLSX_CORRUPT: "Ficheiro Excel (.xlsx) corrompido — tente gerar o ficheiro novamente.",
+  XLSX_TOO_LARGE: "Ficheiro Excel (.xlsx) demasiado grande (máx. 5 MB).",
+  XLSX_TOO_MANY_ROWS: `Ficheiro Excel (.xlsx) com demasiadas linhas (máx. ${SUPPLIER_IMPORT_MAX_ROWS}).`,
+  XLSX_NO_USABLE_SHEET: "Ficheiro Excel (.xlsx) sem folhas com dados utilizáveis.",
+  XLSX_NO_DATA: "Ficheiro Excel (.xlsx) sem linhas de dados.",
+
   // ── token / state machine ──
   PREVIEW_TOKEN_REQUIRED: "Confirme o preview antes de aplicar.",
   PREVIEW_TOKEN_INVALID: "Token do preview inválido.",

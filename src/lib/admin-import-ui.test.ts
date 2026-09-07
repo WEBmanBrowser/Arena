@@ -65,10 +65,11 @@ describe("B — /admin/import presents the SupplierImportPanel", () => {
 describe("C — SupplierImportPanel requires a supplier before preview", () => {
   it("marks the supplier as required and disables preview without it", () => {
     expect(panel).toContain("Fornecedor *");
-    // Preview button disabled while no supplier and/or no CSV text.
-    expect(panel).toMatch(/disabled=\{busy \|\| !csvText\.trim\(\) \|\| !supplierId\}/);
-    // Server round-trip guard: never even send a preview without a supplier.
-    expect(panel).toContain("if (!supplierId || !csvText.trim()) return;");
+    // Preview button disabled while no supplier and/or no payload
+    // (CSV text or XLSX base64 bytes).
+    expect(panel).toMatch(/disabled=\{busy \|\| \(!csvText\.trim\(\) && !fileB64\) \|\| !supplierId\}/);
+    // Server round-trip guard: never even send a preview without a supplier/payload.
+    expect(panel).toContain("if (!supplierId || !payloadData.trim()) return;");
   });
 });
 
