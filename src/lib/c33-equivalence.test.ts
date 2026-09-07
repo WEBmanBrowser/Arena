@@ -31,6 +31,7 @@ import {
 } from "@/db/schema";
 import { eq, sql } from "drizzle-orm";
 import { previewSupplierImport } from "@/lib/services/supplier-import-service";
+import { uploadSource } from "@/lib/supplier-import/source";
 
 const TAG = "C33-EQUIV";
 const USER_ID = 1;
@@ -136,9 +137,7 @@ describe("C.3.3 — equivalência do preview antes/depois do refactor do parser"
 
     const preview = await previewSupplierImport({
       supplierId: supplier.id,
-      fileName: `${TAG}-lista.csv`,
-      csvText: CSV,
-      userId: USER_ID,
+      source: uploadSource({ fileName: `${TAG}-lista.csv`, csvText: CSV }), userId: USER_ID,
     });
 
     const projection = projectPreview(preview);

@@ -40,6 +40,18 @@ export const SUPPLIER_IMPORT_MESSAGES: Record<string, string> = {
   FILE_TYPE_NOT_SUPPORTED:
     "Tipo de ficheiro não suportado: apenas CSV/TXT e XLSX são aceites (sem .xls, .xlsm, .ods ou outros).",
 
+  // ── source abstraction (C.3.4.1) ──
+  SOURCE_PAYLOAD_INVALID:
+    "Fonte de importação inválida — é obrigatório exatamente um conteúdo (texto CSV ou bytes XLSX) com um nome identificador.",
+  SOURCE_URL_MALFORMED: "URL da fonte ilegível.",
+  SOURCE_URL_TOO_LONG: "URL da fonte demasiado longa.",
+  SOURCE_URL_SCHEME: "Apenas URLs HTTPS são permitidas por defeito.",
+  SOURCE_URL_CREDENTIALS: "Credenciais na URL da fonte são proibidas.",
+  SOURCE_URL_HOST: "URL da fonte sem host válido.",
+  SOURCE_URL_LOCAL_HOST: "Hostname local ou de metadados bloqueado.",
+  SOURCE_URL_PRIVATE_IP: "Endereço IP privado/especial bloqueado.",
+  SOURCE_URL_NUMERIC_HOST: "Host numérico não é permitido.",
+
   // ── XLSX file level (C.3.3 etapa 2) ──
   // Nenhuma destas mensagens revela detalhes técnicos (mensagem da
   // biblioteca, estrutura do ZIP, stack): o erro bruto fica no log do

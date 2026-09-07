@@ -32,6 +32,7 @@ import {
   loadSupplierProfile,
 } from "@/lib/services/supplier-import-service";
 import { sha256HexBytes } from "@/lib/supplier-import/normalize";
+import { uploadSource } from "@/lib/supplier-import/source";
 
 const TAG = "C33X";
 const USER_ID = 1;
@@ -141,9 +142,7 @@ describe("C.3.3 XLSX — preview e transporte (1, hash, snapshot)", () => {
     const bytes = buildXlsx();
     const preview = await previewSupplierImport({
       supplierId: supplier.id,
-      fileName: `${TAG}-lista.xlsx`,
-      csvText: "",
-      xlsxBytes: bytes,
+      source: uploadSource({ fileName: `${TAG}-lista.xlsx`, csvText: "", xlsxBytes: bytes }),
       userId: USER_ID,
     });
 
@@ -173,9 +172,7 @@ describe("C.3.3 XLSX — perfis C.3.2 (2–7)", () => {
     const supplier = await seedCatalog();
     const preview = await previewSupplierImport({
       supplierId: supplier.id,
-      fileName: `${TAG}-p1.xlsx`,
-      csvText: "",
-      xlsxBytes: buildXlsx(),
+      source: uploadSource({ fileName: `${TAG}-p1.xlsx`, csvText: "", xlsxBytes: buildXlsx() }),
       mapping: {},
       saveProfile: true,
       userId: USER_ID,
@@ -190,12 +187,10 @@ describe("C.3.3 XLSX — perfis C.3.2 (2–7)", () => {
   it("3: segundo XLSX com os mesmos headers → perfil reutilizado (profile_valid)", async () => {
     const supplier = await seedCatalog();
     await previewSupplierImport({
-      supplierId: supplier.id, fileName: `${TAG}-p2a.xlsx`, csvText: "",
-      xlsxBytes: buildXlsx(), saveProfile: true, userId: USER_ID,
+      supplierId: supplier.id, source: uploadSource({ fileName: `${TAG}-p2a.xlsx`, csvText: "", xlsxBytes: buildXlsx() }), saveProfile: true, userId: USER_ID,
     });
     const second = await previewSupplierImport({
-      supplierId: supplier.id, fileName: `${TAG}-p2b.xlsx`, csvText: "",
-      xlsxBytes: buildXlsx(), mapping: {}, userId: USER_ID,
+      supplierId: supplier.id, source: uploadSource({ fileName: `${TAG}-p2b.xlsx`, csvText: "", xlsxBytes: buildXlsx() }), mapping: {}, userId: USER_ID,
     });
     expect(second.profileUsed).toBe("profile_valid");
     const profile = await loadSupplierProfile(supplier.id);
@@ -205,8 +200,7 @@ describe("C.3.3 XLSX — perfis C.3.2 (2–7)", () => {
   it("4: perfil incompatível → fallback seguro (profile_invalid + auto mapping)", async () => {
     const supplier = await seedCatalog();
     await previewSupplierImport({
-      supplierId: supplier.id, fileName: `${TAG}-p3.xlsx`, csvText: "",
-      xlsxBytes: buildXlsx(), saveProfile: true, userId: USER_ID,
+      supplierId: supplier.id, source: uploadSource({ fileName: `${TAG}-p3.xlsx`, csvText: "", xlsxBytes: buildXlsx() }), saveProfile: true, userId: USER_ID,
     });
     // Perfura o perfil diretamente para um formato que o ficheiro não tem.
     const profile = await loadSupplierProfile(supplier.id);
@@ -215,8 +209,7 @@ describe("C.3.3 XLSX — perfis C.3.2 (2–7)", () => {
       .where(eq(supplierImportProfiles.id, profile!.id));
 
     const preview = await previewSupplierImport({
-      supplierId: supplier.id, fileName: `${TAG}-p4.xlsx`, csvText: "",
-      xlsxBytes: buildXlsx(), mapping: {}, userId: USER_ID,
+      supplierId: supplier.id, source: uploadSource({ fileName: `${TAG}-p4.xlsx`, csvText: "", xlsxBytes: buildXlsx() }), mapping: {}, userId: USER_ID,
     });
     expect(preview.profileUsed).toBe("profile_invalid");
     // Fallback: o parse usado é o auto-mapping (o do ficheiro), não o do perfil.
@@ -239,14 +232,12 @@ describe("C.3.3 XLSX — perfis C.3.2 (2–7)", () => {
     };
     // Perfil guardado do formato de 2 colunas (auto-mapping).
     await previewSupplierImport({
-      supplierId: supplier.id, fileName: `${TAG}-m1.xlsx`, csvText: "",
-      xlsxBytes: twoCol(), saveProfile: true, userId: USER_ID,
+      supplierId: supplier.id, source: uploadSource({ fileName: `${TAG}-m1.xlsx`, csvText: "", xlsxBytes: twoCol() }), saveProfile: true, userId: USER_ID,
     });
     // Manual: nome → internalSku (override; no auto-mapping seria "name").
     const manual = { nome: "internalSku" };
     const preview = await previewSupplierImport({
-      supplierId: supplier.id, fileName: `${TAG}-m2.xlsx`, csvText: "",
-      xlsxBytes: twoCol(), mapping: manual, userId: USER_ID,
+      supplierId: supplier.id, source: uploadSource({ fileName: `${TAG}-m2.xlsx`, csvText: "", xlsxBytes: twoCol() }), mapping: manual, userId: USER_ID,
     });
     expect(preview.profileUsed).toBe("profile_valid"); // perfil reportado…
     // …mas o parse usa o mapping do operador (o override venceu o perfil/auto).
@@ -259,14 +250,12 @@ describe("C.3.3 XLSX — perfis C.3.2 (2–7)", () => {
   it("6: perfil criado via CSV → reutilizado num XLSX equivalente", async () => {
     const supplier = await seedCatalog();
     await previewSupplierImport({
-      supplierId: supplier.id, fileName: `${TAG}-p7.csv`, csvText: CSV,
-      saveProfile: true, userId: USER_ID,
+      supplierId: supplier.id, source: uploadSource({ fileName: `${TAG}-p7.csv`, csvText: CSV }), saveProfile: true, userId: USER_ID,
     });
     const profile = await loadSupplierProfile(supplier.id);
     expect(profile!.delimiter).toBe(";");
     const preview = await previewSupplierImport({
-      supplierId: supplier.id, fileName: `${TAG}-p8.xlsx`, csvText: "",
-      xlsxBytes: buildXlsx(), mapping: {}, userId: USER_ID,
+      supplierId: supplier.id, source: uploadSource({ fileName: `${TAG}-p8.xlsx`, csvText: "", xlsxBytes: buildXlsx() }), mapping: {}, userId: USER_ID,
     });
     expect(preview.profileUsed).toBe("profile_valid");
     expect(preview.mapping).toEqual(profile!.mapping);
@@ -277,14 +266,12 @@ describe("C.3.3 XLSX — perfis C.3.2 (2–7)", () => {
   it("7: perfil criado via XLSX → reutilizado num CSV equivalente", async () => {
     const supplier = await seedCatalog();
     await previewSupplierImport({
-      supplierId: supplier.id, fileName: `${TAG}-p9.xlsx`, csvText: "",
-      xlsxBytes: buildXlsx(), saveProfile: true, userId: USER_ID,
+      supplierId: supplier.id, source: uploadSource({ fileName: `${TAG}-p9.xlsx`, csvText: "", xlsxBytes: buildXlsx() }), saveProfile: true, userId: USER_ID,
     });
     const profile = await loadSupplierProfile(supplier.id);
     expect(profile!.delimiter).toBeNull();
     const preview = await previewSupplierImport({
-      supplierId: supplier.id, fileName: `${TAG}-p10.csv`, csvText: CSV,
-      mapping: {}, userId: USER_ID,
+      supplierId: supplier.id, source: uploadSource({ fileName: `${TAG}-p10.csv`, csvText: CSV }), mapping: {}, userId: USER_ID,
     });
     expect(preview.profileUsed).toBe("profile_valid");
     expect(preview.mapping).toEqual(profile!.mapping);
@@ -298,11 +285,10 @@ describe("C.3.3 XLSX — equivalência CSV ↔ XLSX no pipeline (T)", () => {
     const bytes = buildXlsx();
 
     const csvPreview = await previewSupplierImport({
-      supplierId: supplier.id, fileName: `${TAG}-equiv.csv`, csvText: CSV, userId: USER_ID,
+      supplierId: supplier.id, source: uploadSource({ fileName: `${TAG}-equiv.csv`, csvText: CSV }), userId: USER_ID,
     });
     const xlsxPreview = await previewSupplierImport({
-      supplierId: supplier.id, fileName: `${TAG}-equiv.xlsx`, csvText: "",
-      xlsxBytes: bytes, userId: USER_ID,
+      supplierId: supplier.id, source: uploadSource({ fileName: `${TAG}-equiv.xlsx`, csvText: "", xlsxBytes: bytes }), userId: USER_ID,
     });
 
     // Os hashes SÃO diferentes (bytes diferentes) — e o XLSX é o dos bytes reais.

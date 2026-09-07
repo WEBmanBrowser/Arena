@@ -24,6 +24,7 @@ import {
 } from "@/db/schema";
 import { and, eq, sql } from "drizzle-orm";
 import { applySupplierImport, previewSupplierImport } from "@/lib/services/supplier-import-service";
+import { uploadSource } from "@/lib/supplier-import/source";
 
 const TAG = "C31A";
 
@@ -74,9 +75,7 @@ describe("BUG A — supplier import apply creates/updates productSuppliers (incl
     // Preview with EAN match.
     const previewResult = await previewSupplierImport({
       supplierId: supplier.id,
-      fileName: `${TAG}-ean.csv`,
-      csvText: "skuFornecedor;nome;custo;stock;ean\nSUP-EAN;Produto EAN;10,00;5;5901234123457",
-      userId: 1,
+      source: uploadSource({ fileName: `${TAG}-ean.csv`, csvText: "skuFornecedor;nome;custo;stock;ean\nSUP-EAN;Produto EAN;10,00;5;5901234123457" }), userId: 1,
     });
     expect(previewResult.status).toBe("preview");
     expect(previewResult.lines[0].status).toBe("ready");
@@ -124,9 +123,7 @@ describe("BUG A — supplier import apply creates/updates productSuppliers (incl
 
     const preview = await previewSupplierImport({
       supplierId: supplier.id,
-      fileName: `${TAG}-reimport.csv`,
-      csvText: "skuFornecedor;nome;custo;stock;ean\nSUP-RE-NEW;Produto Reimportado;8,00;2;4006381333931",
-      userId: 1,
+      source: uploadSource({ fileName: `${TAG}-reimport.csv`, csvText: "skuFornecedor;nome;custo;stock;ean\nSUP-RE-NEW;Produto Reimportado;8,00;2;4006381333931" }), userId: 1,
     });
     const apply = await applySupplierImport({ importId: preview.importId, previewToken: preview.previewToken, userId: 1 });
     expect(apply.status).toBe("completed");
