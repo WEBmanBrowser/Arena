@@ -20,8 +20,8 @@ export const IMPORT_HEARTBEAT_TTL_MS = 5 * 60 * 1000;
 /** Rows applied per committed transaction. ~500 keeps locks short. */
 export const SUPPLIER_IMPORT_BATCH_SIZE = 500;
 
-/** Hard row ceiling, inherited from the CSV parser limit (10 000 lines). */
-export const SUPPLIER_IMPORT_MAX_ROWS = 10000;
+/** Hard row ceiling, inherited from the CSV parser limit (20 000 lines — stock ALSO has ~15 255). */
+export const SUPPLIER_IMPORT_MAX_ROWS = 20000;
 
 /**
  * How many lines the preview payload returns to the browser. The full snapshot

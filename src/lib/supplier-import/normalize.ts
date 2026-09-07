@@ -132,6 +132,10 @@ export interface SupplierImportIssue {
  * The canonical unit of the supplier import pipeline. Every money/number here
  * is already validated and rounded to exactly what will be written, so the
  * preview and the apply can never disagree.
+ *
+ * C.3.4.3.1 — ALSO extension: optional ALSO-specific metadata preserved per row,
+ * even when the commercial apply (stock-only) does not use it. These fields are
+ * populated only by ALSO parsers (pricelist / stock) and stay null for CSV/XLSX.
  */
 export interface NormalizedSupplierRow {
   /** Line number in the source file (header = line 1), so reports point at the file. */
@@ -146,6 +150,19 @@ export interface NormalizedSupplierRow {
   stock: number | null;
   leadTimeDays: number | null;
   issues: SupplierImportIssue[];
+  // ── C.3.4.3.1 ALSO metadata (optional, preserved) ──
+  /** ALSO pricelist: ManufacturerPartNumber (referência do fabricante). */
+  alsoManufacturerPartNumber?: string | null;
+  /** ALSO pricelist: ManufacturerName (marca). */
+  alsoManufacturerName?: string | null;
+  /** ALSO pricelist: CategoryText1/2/3 joined (supplier category hierarchy). */
+  alsoCategoryPath?: string | null;
+  /** ALSO stock: AvailableNextDate (data prevista). Raw trimmed, YYYY-MM-DD or empty. */
+  alsoAvailableNextDate?: string | null;
+  /** ALSO stock: AvailableNextQuantity (-1 → null/unknown). Null when -1/empty. */
+  alsoAvailableNextQuantity?: number | null;
+  /** ALSO stock: AvailabilityDate + AvailabilityTime combined ISO-ish timestamp. */
+  alsoAvailabilityTimestamp?: string | null;
 }
 
 export interface SupplierFileParse {
@@ -524,7 +541,7 @@ export function parseSupplierCsv(csvText: string, overrides?: Record<string, str
 
   let parsed: ReturnType<typeof parseCSV>;
   try {
-    parsed = parseCSV(csvText);
+    parsed = parseCSV(csvText, { maxRows: SUPPLIER_IMPORT_MAX_ROWS });
   } catch (e) {
     throw new SupplierCsvError(e instanceof Error ? e.message : "CSV_PARSE_ERROR");
   }

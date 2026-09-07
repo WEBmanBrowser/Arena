@@ -143,7 +143,7 @@ describe("supplierImportErrorMessage — shared API/UI messages", () => {
   it("resolves known codes from the shared table", () => {
     expect(supplierImportErrorMessage("CSV_EMPTY")).toBe("CSV vazio.");
     expect(supplierImportErrorMessage("SUPPLIER_IMPORT_APPLY_FAILED")).toContain("pode retomar");
-    expect(supplierImportErrorMessage("CSV_TOO_MANY_ROWS")).toContain("10000");
+    expect(supplierImportErrorMessage("CSV_TOO_MANY_ROWS")).toContain("20000");
   });
 
   it("falls back to the code itself for unknown codes and a generic sentence without any code", () => {

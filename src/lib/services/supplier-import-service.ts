@@ -221,6 +221,13 @@ export interface SupplierImportPreviewLine {
   priceMode: "auto" | "manual" | null;
   priceMessage: string | null;
   isPreferredSupplier: boolean;
+  // C.3.4.3.1 ALSO metadata (optional)
+  alsoManufacturerPartNumber?: string | null;
+  alsoManufacturerName?: string | null;
+  alsoCategoryPath?: string | null;
+  alsoAvailableNextDate?: string | null;
+  alsoAvailableNextQuantity?: number | null;
+  alsoAvailabilityTimestamp?: string | null;
 }
 
 export interface MissingProductsReport {
@@ -439,7 +446,23 @@ export async function previewSupplierImport(input: PreviewInput): Promise<Suppli
   }
 
   const index = await buildIndexForRows(parsed.rows, supplier.id);
-  const plans = planSupplierRows(parsed.rows, index);
+  let plans = planSupplierRows(parsed.rows, index);
+  // C.3.4.3.1 stock-only: nunca cria produtos; ProductID desconhecido -> erro
+  const isStockOnly = format === "also_stock";
+  if (isStockOnly) {
+    plans = plans.map((p, i) => {
+      if (p.status === "new_product") {
+        const sku = parsed.rows[i]?.supplierSku ?? "";
+        return {
+          ...p,
+          status: "error" as const,
+          codes: [...p.codes, "STOCK_UNKNOWN_SKU"],
+          message: `ProductID "${sku}" desconhecido — stock não atualizado (stock-only nunca cria produto)`.slice(0, 500),
+        };
+      }
+      return p;
+    });
+  }
   const skuOwners = await findInternalSkuOwners(parsed.rows.map((r) => r.supplierSku));
 
   const matchedIds = [...new Set(plans.filter((p) => p.productId !== null).map((p) => p.productId as number))];
@@ -548,6 +571,12 @@ export async function previewSupplierImport(input: PreviewInput): Promise<Suppli
       priceMode: product ? (product.priceMode as "auto" | "manual") : plan.status === "new_product" ? "auto" : null,
       priceMessage,
       isPreferredSupplier: isPreferred,
+      alsoManufacturerPartNumber: (row as any).alsoManufacturerPartNumber ?? null,
+      alsoManufacturerName: (row as any).alsoManufacturerName ?? null,
+      alsoCategoryPath: (row as any).alsoCategoryPath ?? null,
+      alsoAvailableNextDate: (row as any).alsoAvailableNextDate ?? null,
+      alsoAvailableNextQuantity: (row as any).alsoAvailableNextQuantity ?? null,
+      alsoAvailabilityTimestamp: (row as any).alsoAvailabilityTimestamp ?? null,
     });
   });
 
@@ -607,6 +636,23 @@ export async function previewSupplierImport(input: PreviewInput): Promise<Suppli
         // not sink the preview INSERT the way an out-of-range value used to.
         priceMessage: line.priceMessage ? line.priceMessage.slice(0, 255) : null,
         isPreferredSupplier: line.isPreferredSupplier,
+        // C.3.4.3.1 snapshot histórico genérico — preserva exatamente o normalizado
+        manufacturerPartNumber: (line as any).alsoManufacturerPartNumber ?? null,
+        manufacturerName: (line as any).alsoManufacturerName ?? null,
+        supplierCategoryPath: (line as any).alsoCategoryPath ?? null,
+        availableNextDate: (line as any).alsoAvailableNextDate ? (line as any).alsoAvailableNextDate : null,
+        availableNextQuantity: (line as any).alsoAvailableNextQuantity ?? null,
+        availabilityTimestamp: (() => {
+          const raw: any = (line as any).alsoAvailabilityTimestamp;
+          if (!raw || typeof raw !== "string") return null;
+          const s = String(raw).trim();
+          if (!s) return null;
+          let iso = s.replace(" ", "T");
+          if (!iso.endsWith("Z") && !iso.includes("+") && iso.includes("T")) iso += "Z";
+          else if (!iso.includes("T")) iso += "T00:00:00Z";
+          const d = new Date(iso);
+          return isNaN(d.getTime()) ? null : d;
+        })(),
       })));
     }
     return created;
@@ -711,6 +757,12 @@ interface ClaimedRow {
   internal_sku: string | null;
   ean: string | null;
   name: string | null;
+  manufacturer_part_number: string | null;
+  manufacturer_name: string | null;
+  supplier_category_path: string | null;
+  available_next_date: string | null;
+  available_next_quantity: number | null;
+  availability_timestamp: string | null;
 }
 
 interface ApplyContext {
@@ -814,16 +866,55 @@ async function upsertSupplierLink(
     .where(preferredForProductQuery)
     .limit(1);
 
+  // ALSO generic: preparar valores para product_suppliers
+  // availableNextDate é date (YYYY-MM-DD string), availabilityTimestamp é timestamptz (Date)
+  let availTsDate: Date | null = null;
+  if ((row as any).availability_timestamp) {
+    const rawTs: any = (row as any).availability_timestamp;
+    if (rawTs instanceof Date) availTsDate = isNaN(rawTs.getTime()) ? null : rawTs;
+    else if (typeof rawTs === "string") {
+      const s = String(rawTs).trim();
+      if (s) {
+        // pg pode devolver "2026-09-18 11:00:00+00" ou ISO; tenta Date direto primeiro
+        let d = new Date(s);
+        if (isNaN(d.getTime())) {
+          let iso = s.replace(" ", "T");
+          if (!iso.endsWith("Z") && !iso.includes("+") && iso.includes("T")) iso += "Z";
+          else if (!iso.includes("T")) iso += "T00:00:00Z";
+          // normaliza +00 → +00:00 para JS
+          iso = iso.replace(/\+00$/, "+00:00").replace(/-00$/, "-00:00");
+          d = new Date(iso);
+        }
+        if (!isNaN(d.getTime())) availTsDate = d;
+      }
+    }
+  }
+  const nextDateVal: string | null = (row as any).available_next_date ?? null;
+  const nextQtyVal: number | null = (row as any).available_next_quantity ?? null;
+  const mpnVal: string | null = (row as any).manufacturer_part_number ?? null;
+  const catPathVal: string | null = (row as any).supplier_category_path ?? null;
+
+  const now = new Date();
+
   if (existing) {
     const newCost = row.cost_price ?? existing.costPrice;
-    const shouldBePreferred = existing.isPreferred ? true : !otherPreferred;
+    // Stock-only (cost null) nunca altera preferred — mantém o existente
+    const isStockRow = row.cost_price === null;
+    const shouldBePreferred = isStockRow ? existing.isPreferred : (existing.isPreferred ? true : !otherPreferred);
     await tx.update(productSuppliers).set({
       supplierSku: row.supplier_sku ?? existing.supplierSku,
       costPrice: newCost,
       lastCostPrice: newCost !== existing.costPrice ? existing.costPrice : existing.lastCostPrice,
       leadTimeDays: row.lead_time_days ?? existing.leadTimeDays,
       isPreferred: shouldBePreferred,
-      updatedAt: new Date(),
+      // C.3.4.3.1 generic — pricelist vs stock: só sobrescreve se snapshot trouxe valor
+      manufacturerPartNumber: mpnVal ?? (existing as any).manufacturerPartNumber,
+      supplierCategoryPath: catPathVal ?? (existing as any).supplierCategoryPath,
+      availableNextDate: nextDateVal ?? (existing as any).availableNextDate,
+      availableNextQuantity: nextQtyVal ?? (existing as any).availableNextQuantity,
+      availabilityTimestamp: availTsDate ?? (existing as any).availabilityTimestamp,
+      lastSyncAt: now,
+      updatedAt: now,
     }).where(eq(productSuppliers.id, existing.id));
     return;
   }
@@ -836,6 +927,12 @@ async function upsertSupplierLink(
     lastCostPrice: null,
     leadTimeDays: row.lead_time_days,
     isPreferred: !otherPreferred,
+    manufacturerPartNumber: mpnVal,
+    supplierCategoryPath: catPathVal,
+    availableNextDate: nextDateVal as any,
+    availableNextQuantity: nextQtyVal,
+    availabilityTimestamp: availTsDate,
+    lastSyncAt: now,
   });
 }
 
@@ -1158,7 +1255,9 @@ export async function applySupplierImport(input: ApplyInput): Promise<ApplyOutco
            FROM picked
           WHERE r.id = picked.id
           RETURNING r.id, r.row_number, r.status, r.product_id, r.cost_price, r.stock,
-                    r.lead_time_days, r.supplier_sku, r.internal_sku, r.ean, r.name
+                    r.lead_time_days, r.supplier_sku, r.internal_sku, r.ean, r.name,
+                    r.manufacturer_part_number, r.manufacturer_name, r.supplier_category_path,
+                    r.available_next_date, r.available_next_quantity, r.availability_timestamp
         `));
         if (claimed.length === 0) return { claimed: 0, effects: [] as RowEffect[] };
 
@@ -1442,6 +1541,12 @@ export async function reopenSupplierImportPreview(importId: number): Promise<Sup
       priceMode: supplierImportRows.priceMode,
       priceMessage: supplierImportRows.priceMessage,
       isPreferredSupplier: supplierImportRows.isPreferredSupplier,
+      manufacturerPartNumber: supplierImportRows.manufacturerPartNumber,
+      manufacturerName: supplierImportRows.manufacturerName,
+      supplierCategoryPath: supplierImportRows.supplierCategoryPath,
+      availableNextDate: supplierImportRows.availableNextDate,
+      availableNextQuantity: supplierImportRows.availableNextQuantity,
+      availabilityTimestamp: supplierImportRows.availabilityTimestamp,
       // Display only (LEFT JOIN): a product deleted since the preview simply
       // shows without a SKU — the row keeps its own persisted values.
       productSku: products.sku,
@@ -1464,6 +1569,12 @@ export async function reopenSupplierImportPreview(importId: number): Promise<Sup
     name: r.name,
     status: r.status as SupplierImportPreviewLine["status"],
     matchType: r.matchType as SupplierImportPreviewLine["matchType"],
+    alsoManufacturerPartNumber: (r as any).manufacturerPartNumber ?? null,
+    alsoManufacturerName: (r as any).manufacturerName ?? null,
+    alsoCategoryPath: (r as any).supplierCategoryPath ?? null,
+    alsoAvailableNextDate: (r as any).availableNextDate ? String((r as any).availableNextDate).slice(0, 10) : null,
+    alsoAvailableNextQuantity: (r as any).availableNextQuantity ?? null,
+    alsoAvailabilityTimestamp: (r as any).availabilityTimestamp ? ( (r as any).availabilityTimestamp instanceof Date ? (r as any).availabilityTimestamp.toISOString() : String((r as any).availabilityTimestamp)) : null,
     // Not persisted per row: the snapshot keeps the human message instead.
     codes: [],
     message: r.message,

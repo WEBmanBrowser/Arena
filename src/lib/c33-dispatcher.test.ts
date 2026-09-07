@@ -94,8 +94,8 @@ describe("C.3.3 — parseSupplierFile (dispatcher)", () => {
     }
   });
 
-  it("etapa 2: os ramos existentes são exatamente csv e xlsx", () => {
-    expect([...SUPPLIER_FILE_FORMATS]).toEqual(["csv", "xlsx"]);
+  it("etapa C.3.4.3.1: os ramos existentes são csv, xlsx, also_pricelist e also_stock", () => {
+    expect([...SUPPLIER_FILE_FORMATS]).toEqual(["csv", "xlsx", "also_pricelist", "also_stock"]);
   });
 
   it('ramo "xlsx" delega em parseSupplierXlsx (mesmo contrato SupplierFileParse)', () => {

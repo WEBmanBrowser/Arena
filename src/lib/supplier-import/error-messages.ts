@@ -92,6 +92,16 @@ export const SUPPLIER_IMPORT_MESSAGES: Record<string, string> = {
   XLSX_NO_USABLE_SHEET: "Ficheiro Excel (.xlsx) sem folhas com dados utilizáveis.",
   XLSX_NO_DATA: "Ficheiro Excel (.xlsx) sem linhas de dados.",
 
+  // ── ALSO Pricelist / Stock (C.3.4.3.1) ──
+  // Ficheiros ALSO são TSV .txt sem segundo motor: o snapshot é sempre
+  // SupplierFileParse; stock.txt nunca cria produto (stock-only).
+  STOCK_UNKNOWN_SKU:
+    "ProductID desconhecido — stock não atualizado (stock-only nunca cria produto).",
+  ALSO_MISSING_PRODUCTID: "Falta coluna ProductID no ficheiro ALSO.",
+  ALSO_MISSING_STOCK: "Falta coluna AvailableQuantity no ficheiro ALSO.",
+  ALSO_MISSING_HEADERS: "Ficheiro stock ALSO sem cabeçalho reconhecível.",
+  AVAILABLE_NEXT_QUANTITY_UNKNOWN: "Quantidade futura desconhecida (AvailableNextQuantity = -1).",
+
   // ── token / state machine ──
   PREVIEW_TOKEN_REQUIRED: "Confirme o preview antes de aplicar.",
   PREVIEW_TOKEN_INVALID: "Token do preview inválido.",

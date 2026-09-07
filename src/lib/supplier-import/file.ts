@@ -19,12 +19,14 @@
  */
 import { parseSupplierCsv, type SupplierFileParse } from "./normalize";
 import { parseSupplierXlsx } from "./xlsx";
+import { parseAlsoPricelist, parseAlsoStock } from "./also";
 
 /**
  * Formatos de ficheiro de fornecedor suportados.
- * C.3.3 (etapa 1): apenas "csv". C.3.3 (etapa 2): + "xlsx". Nenhum outro.
+ * C.3.3 (etapa 1): apenas "csv". C.3.3 (etapa 2): + "xlsx".
+ * C.3.4.3.1: + "also_pricelist" (pricelist-1.txt TSV sem header) + "also_stock" (stock.txt TSV com header).
  */
-export const SUPPLIER_FILE_FORMATS = ["csv", "xlsx"] as const;
+export const SUPPLIER_FILE_FORMATS = ["csv", "xlsx", "also_pricelist", "also_stock"] as const;
 export type SupplierFileFormat = (typeof SUPPLIER_FILE_FORMATS)[number];
 
 /**
@@ -53,6 +55,10 @@ export function parseSupplierFile(
         throw new Error("FILE_FORMAT_NOT_SUPPORTED: xlsx requer bytes");
       }
       return parseSupplierXlsx(xlsxBytes, overrides);
+    case "also_pricelist":
+      return parseAlsoPricelist(text, overrides);
+    case "also_stock":
+      return parseAlsoStock(text, overrides);
     default: {
       // Inalcançável com o tipo fechado; guarda o valor fora da união em runtime.
       throw new Error(`FILE_FORMAT_NOT_SUPPORTED: ${String(format)}`);
@@ -81,10 +87,16 @@ export const UNSUPPORTED_SPREADSHEET_EXTENSIONS = [
  *  - "csv"   → ramo texto atual (mesmo para .txt, como sempre foi);
  *  - "unsupported" → spreadsheet binário conhecido mas fora do escopo.
  */
-export function classifySupplierFileName(fileName: string): "xlsx" | "csv" | "unsupported" {
+export function classifySupplierFileName(fileName: string): "xlsx" | "csv" | "also_pricelist" | "also_stock" | "unsupported" {
   const ext = (fileName.match(/\.([a-z0-9]+)$/i)?.[1] ?? "").toLowerCase();
   if (ext === "xlsx") return "xlsx";
   if ((UNSUPPORTED_SPREADSHEET_EXTENSIONS as readonly string[]).includes(ext)) return "unsupported";
+  const lower = fileName.toLowerCase();
+  // ALSO explicit by filename (pricelist-1.txt, stock.txt) — .txt TSV
+  if (lower.endsWith(".txt")) {
+    if (lower.includes("stock")) return "also_stock";
+    if (lower.includes("pricelist")) return "also_pricelist";
+  }
   return "csv";
 }
 

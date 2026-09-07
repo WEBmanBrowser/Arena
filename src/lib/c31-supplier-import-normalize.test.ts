@@ -227,14 +227,14 @@ describe("C.3.1 — file level guards", () => {
     expect(() => parseSupplierCsv("nome,custo\nCabo,1")).toThrow(/CSV_MISSING_KEY_COLUMN/);
   });
 
-  it("rejects 10 001 data rows — the legacy 10 000 line ceiling still holds", () => {
-    const rows = Array.from({ length: 10001 }, (_, i) => `SUP-${i},linha,1,1`).join("\n");
+  it("rejects 20 001 data rows — C.3.4.3.1 raises the ceiling to 20 000 (regression: 10 001 must now succeed)", () => {
+    const rows = Array.from({ length: 20001 }, (_, i) => `SUP-${i},linha,1,1`).join("\n");
     expect(() => parseSupplierCsv(`${header}\n${rows}`)).toThrow(/CSV_TOO_MANY_ROWS/);
   });
 
-  it("accepts exactly 10 000 rows", () => {
-    const rows = Array.from({ length: 10000 }, (_, i) => `SUP-${i},linha,1,1`).join("\n");
-    expect(parseSupplierCsv(`${header}\n${rows}`).rows).toHaveLength(10000);
+  it("accepts exactly 20 000 rows (and therefore also 10 000)", () => {
+    const rows = Array.from({ length: 20000 }, (_, i) => `SUP-${i},linha,1,1`).join("\n");
+    expect(parseSupplierCsv(`${header}\n${rows}`).rows).toHaveLength(20000);
   });
 
   it("hashes the exact bytes and counts them in UTF-8", () => {

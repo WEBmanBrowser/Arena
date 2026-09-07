@@ -105,6 +105,26 @@ export function uploadSource(input: {
     if (!xlsxBytes) throw new SupplierSourceError("XLSX_INVALID");
     return { kind: "upload", label: fileName || "supplier-list.xlsx", format: "xlsx", bytes: xlsxBytes };
   }
+  if (kind === "also_pricelist") {
+    return { kind: "upload", label: fileName || "pricelist-1.txt", format: "also_pricelist", text: input.csvText ?? "" };
+  }
+  if (kind === "also_stock") {
+    return { kind: "upload", label: fileName || "stock.txt", format: "also_stock", text: input.csvText ?? "" };
+  }
+  // ALSO auto-detection when fileName is generic .txt but content is TSV ALSO stock (header-driven)
+  const txt = input.csvText ?? "";
+  if (txt.includes("\t")) {
+    const stripped = txt.replace(/^\uFEFF/, "").trim();
+    const firstLine = stripped.split(/\r?\n/)[0] ?? "";
+    const firstCells = firstLine.split("\t").map((s) => s.trim().toLowerCase());
+    const normFirst = firstCells.join("|");
+    // stock.txt header contains productid + availablequantity + availabilitydate
+    if (firstCells.includes("productid") && firstCells.includes("availablequantity")) {
+      return { kind: "upload", label: fileName || "stock.txt", format: "also_stock", text: txt };
+    }
+    // pricelist-1.txt has no header but contains tabs and many columns; fallback to pricelist if generic txt with tabs and not stock
+    // We keep csv for generic txt unless explicitly pricelist filename; do not auto-detect pricelist to avoid breaking CSV with tabs
+  }
   return { kind: "upload", label: fileName || "supplier-list.csv", format: "csv", text: input.csvText ?? "" };
 }
 
@@ -139,6 +159,15 @@ export function sourceFormat(payload: SourcePayload): SupplierFileFormat {
     bytes[0] === 0x50 && bytes[1] === 0x4b && bytes[2] === 0x03 && bytes[3] === 0x04
   ) {
     return "xlsx";
+  }
+  const text = payload.text ?? "";
+  if (text.includes("\t")) {
+    const stripped = text.replace(/^\uFEFF/, "").trim();
+    const firstLine = stripped.split(/\r?\n/)[0] ?? "";
+    const cells = firstLine.split("\t").map((s) => s.trim().toLowerCase());
+    if (cells.includes("productid") && cells.includes("availablequantity")) {
+      return "also_stock";
+    }
   }
   return "csv";
 }
