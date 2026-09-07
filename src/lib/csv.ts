@@ -5,6 +5,7 @@
 import { parse } from "csv-parse/sync";
 
 export const CSV_MAX_SIZE = 5 * 1024 * 1024; // 5 MB
+/** C.3.4.3.1 review — keep legacy CSV limit at 10 000; ALSO uses SUPPLIER_IMPORT_MAX_ROWS=20000 via supplier-import pipeline. */
 export const CSV_MAX_ROWS = 10000;
 
 /** Detect delimiter from first line */
@@ -26,7 +27,7 @@ export interface ParsedCSV {
 }
 
 /** Parse CSV text into structured records */
-export function parseCSV(text: string): ParsedCSV {
+export function parseCSV(text: string, opts?: { maxRows?: number }): ParsedCSV {
   const cleaned = stripBOM(text.trim());
   if (!cleaned) throw new Error("CSV_EMPTY");
 
@@ -42,7 +43,8 @@ export function parseCSV(text: string): ParsedCSV {
   });
 
   if (records.length < 2) throw new Error("CSV_NO_DATA");
-  if (records.length - 1 > CSV_MAX_ROWS) throw new Error("CSV_TOO_MANY_ROWS");
+  const limit = opts?.maxRows ?? CSV_MAX_ROWS;
+  if (records.length - 1 > limit) throw new Error("CSV_TOO_MANY_ROWS");
 
   const headers = records[0].map(h => h.replace(/^['"]|['"]$/g, "").trim());
   const rows = records.slice(1).map(row => {

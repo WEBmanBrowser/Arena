@@ -245,8 +245,8 @@ describe("C.3.1 — preview is a read-only snapshot", () => {
     expect(row.price).toBe("100.00");
   });
 
-  it("rejects a 10 001 line file and an empty file", async () => {
-    const big = csvFile(...Array.from({ length: 10001 }, (_, i) => line({ sku: `SUP-${i}`, name: "linha", cost: "1,00" })));
+  it("rejects a 20 001 line file and an empty file (C.3.4.3.1 raises ceiling to 20 000)", async () => {
+    const big = csvFile(...Array.from({ length: 20001 }, (_, i) => line({ sku: `SUP-${i}`, name: "linha", cost: "1,00" })));
     const tooBig = await preview(big);
     expect(tooBig.status).toBe(400);
     expect(tooBig.json.error).toBe("CSV_TOO_MANY_ROWS");

@@ -92,6 +92,13 @@
       "when": 1788745561181,
       "tag": "0012_woozy_paper_doll",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1788787713348,
+      "tag": "0013_nostalgic_shinko_yamashiro",
+      "breakpoints": true
     }
   ]
 }

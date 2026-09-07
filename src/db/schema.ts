@@ -1,5 +1,5 @@
 import {
-  pgTable, serial, varchar, text, integer, boolean, timestamp, decimal,
+  pgTable, serial, varchar, text, integer, boolean, timestamp, date, decimal,
   jsonb, index, uniqueIndex, check, pgSequence
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
@@ -390,9 +390,17 @@ export const productSuppliers = pgTable("product_suppliers", {
   leadTimeDays: integer("lead_time_days"),
   isPreferred: boolean("is_preferred").notNull().default(false),
   lastPurchaseAt: timestamp("last_purchase_at"),
+  // ── C.3.4.3.1 ALSO genérico (associação produto-fornecedor) ──
+  manufacturerPartNumber: varchar("manufacturer_part_number", { length: 100 }),
+  supplierCategoryPath: text("supplier_category_path"),
+  availableNextDate: date("available_next_date"),
+  availableNextQuantity: integer("available_next_quantity"),
+  availabilityTimestamp: timestamp("availability_timestamp", { withTimezone: true }),
+  lastSyncAt: timestamp("last_sync_at", { withTimezone: true }),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
 }, (t) => [
+  check("ps_available_next_quantity_non_negative", sql`${t.availableNextQuantity} IS NULL OR ${t.availableNextQuantity} >= 0`),
   index("ps_product_idx").on(t.productId),
   index("ps_supplier_idx").on(t.supplierId),
   uniqueIndex("ps_product_supplier_unique").on(t.productId, t.supplierId),
@@ -1010,6 +1018,13 @@ export const supplierImportRows = pgTable("supplier_import_rows", {
   leadTimeDays: integer("lead_time_days"),
   applied: boolean("applied").notNull().default(false),
   message: varchar("message", { length: 500 }),
+  // ── C.3.4.3.1 snapshot histórico ALSO (genérico) ──
+  manufacturerPartNumber: varchar("manufacturer_part_number", { length: 100 }),
+  manufacturerName: varchar("manufacturer_name", { length: 255 }),
+  supplierCategoryPath: text("supplier_category_path"),
+  availableNextDate: date("available_next_date"),
+  availableNextQuantity: integer("available_next_quantity"),
+  availabilityTimestamp: timestamp("availability_timestamp", { withTimezone: true }),
   // ── Price snapshot (read-only for the operator; apply never takes prices
   //    from the browser, and never writes products.price for manual products)
   currentPrice: decimal("current_price", { precision: 10, scale: 2 }),
@@ -1037,6 +1052,7 @@ export const supplierImportRows = pgTable("supplier_import_rows", {
   // deliberately NOT constrained: the product_id FK is ON DELETE SET NULL, and
   // a check requiring a target would make deleting an imported product fail.
   check("supplier_import_rows_target_matches_status", sql`${t.status} <> 'new_product' OR ${t.productId} IS NULL`),
+  check("supplier_import_rows_available_next_quantity_non_negative", sql`${t.availableNextQuantity} IS NULL OR ${t.availableNextQuantity} >= 0`),
 ]);
 
 /**
