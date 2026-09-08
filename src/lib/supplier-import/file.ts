@@ -19,7 +19,7 @@
  */
 import { parseSupplierCsv, type SupplierFileParse } from "./normalize";
 import { parseSupplierXlsx } from "./xlsx";
-import { parseAlsoPricelist, parseAlsoStock } from "./also";
+import { ALSO_PRICELIST_HEADERS, parseAlsoPricelist, parseAlsoStock } from "./also";
 
 /**
  * Formatos de ficheiro de fornecedor suportados.
@@ -98,6 +98,46 @@ export function classifySupplierFileName(fileName: string): "xlsx" | "csv" | "al
     if (lower.includes("pricelist")) return "also_pricelist";
   }
   return "csv";
+}
+
+/**
+ * C.3.4.3.1 — formato EFETIVO de um snapshot persistido (reabertura): o
+ * conteúdo do ficheiro não faz parte do snapshot, pelo que a decisão usa a
+ * ASSINATURA DO MAPPING PERSISTIDO + o nome do ficheiro:
+ *
+ *  - todas as chaves do mapping dentro dos nomes fixos do pricelist ALSO
+ *    (e com ProductID→supplierSku) → "also_pricelist" — esse mapping só é
+ *    produzido pelo parser ALSO pricelist (posicional, sem header);
+ *  - o mapping normaliza para ProductID + AvailableQuantity (as duas colunas
+ *    obrigatórias do stock ALSO, resolvidas por nome) → "also_stock";
+ *  - caso contrário, o nome do ficheiro decide como no upload
+ *    (xlsx → "xlsx"; qualquer outro texto → "csv").
+ *
+ * É o MESMO formato que o preview original usou, de forma a a UI reaberta
+ * mostrar exatamente o mecanismo efetivo (e não o mapeamento C.3.2).
+ */
+export function inferSupplierImportFormat(
+  fileName: string,
+  mapping: Record<string, string>
+): SupplierFileFormat {
+  const keys = Object.keys(mapping);
+  if (keys.length > 0) {
+    const norm = keys.map((k) => k.toLowerCase().trim());
+    // O conjunto fixo É a assinatura: qualquer chave fora dele (headers
+    // genéricas, aliases C.3.2) descarta a hipótese do pricelist ALSO.
+    const pricelistHeaderSet = new Set(
+      (ALSO_PRICELIST_HEADERS as readonly string[]).map((h) => h.toLowerCase().trim())
+    );
+    const isAlsoPricelist =
+      mapping["ProductID"] === "supplierSku" && norm.every((k) => pricelistHeaderSet.has(k));
+    if (isAlsoPricelist) return "also_pricelist";
+    // Stock: o parser resolve as colunas por NOME — ProductID +
+    // AvailableQuantity são as duas obrigatórias (note: o mapping do
+    // pricelist também as contém, por isso a verificação anterior vem antes).
+    if (norm.includes("productid") && norm.includes("availablequantity")) return "also_stock";
+  }
+  const byName = classifySupplierFileName(fileName);
+  return byName === "unsupported" ? "csv" : byName;
 }
 
 /** O que a resolução precisa de saber sobre o perfil guardado (C.3.2). */

@@ -75,6 +75,7 @@ import { type SupplierFileFormat } from "@/lib/supplier-import/file";
 // C.3.3 (etapa 1) — o serviço já não chama o parser CSV diretamente: passa pelo
 // dispatcher de formatos e pelo resolvedor puro de mapping/perfil (C.3.2).
 import {
+  inferSupplierImportFormat,
   isProfileCompatibleWithHeaders,
   parseSupplierFile,
   resolveSupplierFileMapping,
@@ -253,6 +254,12 @@ export interface SupplierImportPreview {
   sourceLabel: string | null;
   fileHash: string;
   fileSizeBytes: number;
+  /**
+   * C.3.4.3.1 — formato EFETIVO do parser que produziu este preview
+   * (also_pricelist/also_stock/csv/xlsx). É o que a UI usa para mostrar o
+   * mecanismo real e NUNCA induzir o mapeamento C.3.2 num ficheiro ALSO.
+   */
+  format: SupplierFileFormat;
   /** CSV: separador detetado. XLSX (C.3.3 etapa 2): null — não se aplica. */
   delimiter: string | null;
   headers: string[];
@@ -679,6 +686,7 @@ export async function previewSupplierImport(input: PreviewInput): Promise<Suppli
     sourceLabel: importRow.sourceLabel,
     fileHash,
     fileSizeBytes,
+    format,
     delimiter: parsed.delimiter,
     headers: parsed.headers,
     mapping: parsed.mapping,
@@ -1618,6 +1626,11 @@ export async function reopenSupplierImportPreview(importId: number): Promise<Sup
     sourceLabel: row.sourceLabel,
     fileHash: row.fileHash,
     fileSizeBytes: row.fileSizeBytes,
+    // C.3.4.3.1 — o formato efetivo é rederivado do snapshot (o conteúdo do
+    // ficheiro não é persistido): assinatura do mapping + nome do ficheiro.
+    // A UI reaberta mostra o MESMO mecanismo do preview original — nunca o
+    // mapeamento C.3.2 num snapshot ALSO.
+    format: inferSupplierImportFormat(row.fileName, mapping),
     // Headers/delimiter are not part of the snapshot: only the mapping is.
     // The panel already treats `delimiter: null` as "not applicable".
     delimiter: null,
