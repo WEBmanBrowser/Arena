@@ -224,7 +224,13 @@ export function looksLikeAlsoStock(rawText: string | Uint8Array): boolean {
 
 // ─── Pricelist (no header, positional) ────────────────────────
 
-const PRICELIST_HEADERS = [
+/**
+ * Nomes fixos (sintéticos) das colunas do pricelist — são os `headers` do
+ * SupplierFileParse E as chaves do mapping persistido no snapshot. A
+ * assinatura exata deste conjunto identifica um preview ALSO pricelist no
+ * reopen (o conteúdo do ficheiro não faz parte do snapshot).
+ */
+export const ALSO_PRICELIST_HEADERS = [
   "ProductID",
   "EuropeanArticleNumber",
   "CategoryText1",
@@ -383,7 +389,7 @@ export function parseAlsoPricelist(
   }
 
   // For pricelist, headers are synthetic fixed list (for display/mapping audit)
-  const headers = [...PRICELIST_HEADERS];
+  const headers = [...ALSO_PRICELIST_HEADERS];
   const mapping: Record<string, string> = {
     ProductID: "supplierSku",
     EuropeanArticleNumber: "ean",

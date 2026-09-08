@@ -68,6 +68,12 @@ type PreviewResult = {
   };
   previewToken: string;
   batchesTotal: number;
+  /**
+   * C.3.4.3.1 — formato EFETIVO do parser (also_pricelist/also_stock/csv/xlsx).
+   * A UI mostra o mecanismo real: num ficheiro ALSO o mapeamento C.3.2 NÃO é
+   * o mecanismo utilizado e não deve ser mostrado/ativado como tal.
+   */
+  format?: "csv" | "xlsx" | "also_pricelist" | "also_stock";
   profileUsed?: string; // "profile_valid", "profile_invalid", "no_profile", "manual"
   profileName?: string; // nome do perfil guardado, se usado
   // C.3.4.2 — fonte configurada que produziu o snapshot (null no upload manual).
@@ -418,6 +424,10 @@ export default function SupplierImportPanel({ openImportId = null }: { openImpor
 
   const running = progress?.status === "applying";
   const shownLines = preview?.lines ?? [];
+  // C.3.4.3.1 — preview de formato ALSO: o parser é fixo (posicional/header
+  // ALSO) — o mapeamento C.3.2 e o perfil do fornecedor NÃO são o mecanismo
+  // utilizado e a UI não pode sugerir o contrário.
+  const isAlsoFormat = preview?.format === "also_pricelist" || preview?.format === "also_stock";
   // Which CSV column was read as which reference. Worth showing: the supplier's
   // code and MDTech's internal SKU are different concepts and only an explicit
   // internal column may fill the second one.
@@ -478,8 +488,11 @@ export default function SupplierImportPanel({ openImportId = null }: { openImpor
       </div>
 
       <>
-        {/* C.3.2 — Manual column mapping + save profile */}
-      <div className="mt-3 border-l-2 border-emerald-400 bg-emerald-50/50 rounded-r-lg px-3 py-2">
+        {/* C.3.2 — Manual column mapping + save profile.
+            C.3.4.3.1 — oculto quando o preview é de formato ALSO: o parser ALSO
+            é fixo (posicional/header) e este mapeamento NÃO é o mecanismo
+            utilizado — mostrá-lo induziria o utilizador a pensar em C.3.2. */}
+      {!isAlsoFormat && <div className="mt-3 border-l-2 border-emerald-400 bg-emerald-50/50 rounded-r-lg px-3 py-2">
         <p className="text-xs font-medium text-slate-700 mb-1">C.3.2 — Mapeamento manual e perfil</p>
         <div className="text-[11px] text-slate-500 mb-2">
           Se o ficheiro não corresponde ao perfil guardado do fornecedor, pode ajustar aqui. O mapeamento usado será guardado se marcar a opção abaixo.
@@ -521,10 +534,13 @@ export default function SupplierImportPanel({ openImportId = null }: { openImpor
           />
           <span className="font-medium text-emerald-700">Guardar este mapeamento para este fornecedor</span>
         </label>
-      </div>
+      </div>}
 
-      {/* C.3.2 — Profile used indicator */}
-      {preview && preview.profileUsed && (
+      {/* C.3.2 — Profile used indicator.
+          C.3.4.3.1 — oculto num preview ALSO: o perfil do fornecedor não se
+          aplica a um formato de layout fixo; "perfil inválido — usou fallback"
+          descrevia na prática o próprio parser ALSO (o fallback era correto). */}
+      {preview && preview.profileUsed && !isAlsoFormat && (
         <div className="mt-2 border-l-2 border-emerald-400 bg-emerald-50/50 rounded-r-lg px-3 py-2 text-[11px] text-slate-600">
           <span className="font-medium text-emerald-700">C.3.2 — Perfil utilizado: </span>
           {preview.profileName ? `“${preview.profileName}”` : `perfil #${preview.profileUsed}`}
@@ -540,6 +556,7 @@ export default function SupplierImportPanel({ openImportId = null }: { openImpor
         </p>
       </div>
 
+      {!isAlsoFormat && (
       <p className="text-[11px] text-slate-400 mt-2">
         Colunas reconhecidas: <span className="font-mono">skuFornecedor</span>, <span className="font-mono">nome</span>/<span className="font-mono">designacao</span>,{" "}
         <span className="font-mono">custo</span>, <span className="font-mono">stock</span>, <span className="font-mono">ean</span>,{" "}
@@ -547,6 +564,7 @@ export default function SupplierImportPanel({ openImportId = null }: { openImpor
         Máx. 10.000 linhas e 5 MB por ficheiro. Separador , ou ; e decimals “10,00” são detetados automaticamente no CSV;
         no Excel usa-se a primeira folha com dados (headers na primeira linha útil).
       </p>
+      )}
 
       {fileB64 !== "" ? (
         <p className="mt-3 border rounded px-3 py-2 text-xs text-slate-500 bg-slate-50">
@@ -580,9 +598,21 @@ export default function SupplierImportPanel({ openImportId = null }: { openImpor
             ) : (
               preview.delimiter === null && <span className="text-emerald-700">Excel (XLSX)</span>
             )}
+            {/* C.3.4.3.1 — formato efetivo: a UI diz qual o parser utilizado
+                (ALSO) em vez de deixar o utilizador adivinhar pelo "separador". */}
+            {preview.format === "also_pricelist" && (
+              <span className="text-emerald-800 bg-emerald-100 border border-emerald-300 rounded px-1.5 py-0.5 font-medium" title="Parser ALSO pricelist (TSV sem header, colunas fixas) — sem mapeamento C.3.2">
+                Formato detetado: ALSO Pricelist
+              </span>
+            )}
+            {preview.format === "also_stock" && (
+              <span className="text-emerald-800 bg-emerald-100 border border-emerald-300 rounded px-1.5 py-0.5 font-medium" title="Parser ALSO stock (TSV com header) — sem mapeamento C.3.2">
+                Formato detetado: ALSO Stock
+              </span>
+            )}
             <span>· {preview.supplierName}</span>
             {preview.sourceLabel && preview.sourceLabel !== preview.fileName && <span>· fonte {preview.sourceLabel}</span>}
-            {preview.delimiter !== null && <span>· separador “{preview.delimiter}”</span>}
+            {preview.delimiter !== null && !isAlsoFormat && <span>· separador “{preview.delimiter}”</span>}
             <span className="font-mono" title="SHA-256 do ficheiro">#{preview.fileHash.slice(0, 12)}</span>
           </div>
 
