@@ -139,6 +139,25 @@ function parseAvailabilityTimestamp(dateRaw: string, timeRaw: string, issues: Su
 export const ALSO_PRICELIST_MIN_COLUMNS = 10;
 
 /**
+ * Os pricelist reais do ALSO envolvem TODOS os campos em aspas duplas
+ * (`"1203837"\t"4017858000003"\t...`). As aspas são transporte, não dados:
+ * remove-se UM par de aspas que delimita o campo inteiro (e desescapa
+ * `""` → `"`). Um campo que não começa E termina com aspas é mantido como
+ * está — nunca se altera silenciosamente (uma aspa solta continua a falhar
+ * na validação por linha, visível no preview, em vez de corromper o valor).
+ *
+ * Nota: TABs DENTRO de um campo entre aspas não são suportados — nunca
+ * observados num export real; a divisão continua a ser por TAB simples.
+ */
+function unquoteAlsoCell(raw: string): string {
+  const t = raw.trim();
+  if (t.length >= 2 && t.startsWith('"') && t.endsWith('"')) {
+    return t.slice(1, -1).replace(/""/g, '"').trim();
+  }
+  return t;
+}
+
+/**
  * Plausible ProductID (column 0): a single identifier token (no spaces),
  * at least one digit, within the snapshot SKU limit. This alone already
  * rejects a header row ("ProductID" has no digits) and generic text cells.
@@ -192,7 +211,9 @@ export function looksLikeAlsoPricelist(
   for (const raw of lines) {
     const cols = raw.split("\t");
     if (cols.length < ALSO_PRICELIST_MIN_COLUMNS) return false;
-    const get = (i: number): string => cols[i] ?? "";
+    // O export real envolve os campos em aspas — a assinatura lê o valor
+    // LÓGICO da célula (unquoteAlsoCell), nunca a aspa de transporte.
+    const get = (i: number): string => unquoteAlsoCell(cols[i] ?? "");
     if (!isPlausibleProductIdentifier(get(0))) return false;
     const ean = get(1).replace(/[\s\u00a0]/g, "");
     if (ean !== "" && !/^\d{8,14}$/.test(ean)) return false;
@@ -269,13 +290,15 @@ export function parseAlsoPricelist(
   const ignoredColumns: string[] = [];
 
   for (const { idx, raw } of lines) {
-    // Pricelist: tab-separated, preserve empty, no quoting needed.
-    // Using simple split is correct for ALSO TSV (no quoted tabs observed).
+    // Pricelist: tab-separated, preserve empty. O export real envolve cada
+    // campo em aspas duplas — unquoteAlsoCell remove a aspa de transporte
+    // (ver helper). Tabs dentro de aspas não são suportados (nunca
+    // observados num export real): a divisão continua a ser por TAB simples.
     const cols = raw.split("\t");
     // If fewer than 10 cols, treat missing as empty; if more, extra are ignored (11+)
     // But if cols length < 10 and the line has no tabs at all, it's malformed TSV
     // We still produce a row with error, not fail file.
-    const get = (i: number) => (cols[i] ?? "").trim();
+    const get = (i: number) => unquoteAlsoCell(cols[i] ?? "");
 
     const rawSku = get(0);
     const rawEan = get(1);
