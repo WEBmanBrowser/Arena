@@ -30,6 +30,7 @@
  * SourcePayload idêntico ao do upload e nada mais.
  */
 import { classifySupplierFileName, type SupplierFileFormat } from "./file";
+import { looksLikeAlsoPricelist, looksLikeAlsoStock } from "./also";
 import { byteLengthUtf8, sha256Hex, sha256HexBytes } from "./normalize";
 import { CSV_MAX_SIZE } from "@/lib/csv";
 
@@ -83,6 +84,18 @@ export class SupplierSourceError extends Error {
  * Upload CSV/XLSX → SourcePayload, com a MESMA classificação da rota C.3.3:
  * extensão decide, os bytes confirmam no parser (nunca se confia na extensão).
  *
+ * Formatos ALSO (C.3.4.3.1), em duas camadas:
+ *  1. NOME CANÓNICO ("pricelist*" / "stock*" num .txt — classifySupplier-
+ *     FileName): contrato C.3.4.3.1, inalterado — o parser valida a estrutura
+ *     linha a linha e reporta erros no preview;
+ *  2. NOME GENÉRICO: decisão pela ASSINATURA ESTRUTURAL do CONTEÚDO
+ *     (looksLikeAlsoPricelist/looksLikeAlsoStock em ./also) — nunca pela
+ *     extensão .txt sozinha. É isto que apanha o bug de staging: um
+ *     pricelist ALSO real (TSV sem header, ≥ 10 colunas, estrutura estável
+ *     em várias linhas) com qualquer nome genérico deixa de cair no parser
+ *     CSV/TXT genérico. Um TXT/CSV arbitrário nunca bate na assinatura e
+ *     mantém o caminho genérico.
+ *
  * Compatibilidade:
  *  - .xlsx com `xlsxBytes` → payload binário (bytes exatos);
  *  - qualquer outro nome (CSV/TXT) → payload texto;
@@ -105,27 +118,31 @@ export function uploadSource(input: {
     if (!xlsxBytes) throw new SupplierSourceError("XLSX_INVALID");
     return { kind: "upload", label: fileName || "supplier-list.xlsx", format: "xlsx", bytes: xlsxBytes };
   }
+
+  const txt = input.csvText ?? "";
+
+  // ── Camada 1: nome canónico ALSO (contrato C.3.4.3.1, inalterado) ──
   if (kind === "also_pricelist") {
-    return { kind: "upload", label: fileName || "pricelist-1.txt", format: "also_pricelist", text: input.csvText ?? "" };
+    return { kind: "upload", label: fileName || "pricelist-1.txt", format: "also_pricelist", text: txt };
   }
   if (kind === "also_stock") {
-    return { kind: "upload", label: fileName || "stock.txt", format: "also_stock", text: input.csvText ?? "" };
+    return { kind: "upload", label: fileName || "stock.txt", format: "also_stock", text: txt };
   }
-  // ALSO auto-detection when fileName is generic .txt but content is TSV ALSO stock (header-driven)
-  const txt = input.csvText ?? "";
-  if (txt.includes("\t")) {
-    const stripped = txt.replace(/^\uFEFF/, "").trim();
-    const firstLine = stripped.split(/\r?\n/)[0] ?? "";
-    const firstCells = firstLine.split("\t").map((s) => s.trim().toLowerCase());
-    const normFirst = firstCells.join("|");
-    // stock.txt header contains productid + availablequantity + availabilitydate
-    if (firstCells.includes("productid") && firstCells.includes("availablequantity")) {
-      return { kind: "upload", label: fileName || "stock.txt", format: "also_stock", text: txt };
-    }
-    // pricelist-1.txt has no header but contains tabs and many columns; fallback to pricelist if generic txt with tabs and not stock
-    // We keep csv for generic txt unless explicitly pricelist filename; do not auto-detect pricelist to avoid breaking CSV with tabs
+
+  // ── Camada 2: nome genérico → assinatura estrutural do conteúdo ──
+  // Stock: a assinatura é o header com nomes (driven by header — 1 linha
+  // chega, e nunca false positive: cabeçalhos genéricos não coincidem).
+  if (looksLikeAlsoStock(txt)) {
+    return { kind: "upload", label: fileName || "stock.txt", format: "also_stock", text: txt };
   }
-  return { kind: "upload", label: fileName || "supplier-list.csv", format: "csv", text: input.csvText ?? "" };
+  // Pricelist: sem header (posicional) — a estrutura tem de ser compatível
+  // em VÁRIAS linhas (≥ 2) para nenhum TXT arbitrário ser classificado como
+  // ALSO (o bug de staging: 10 linhas TSV com nome genérico → parser genérico).
+  if (looksLikeAlsoPricelist(txt, { minDataLines: 2 })) {
+    return { kind: "upload", label: fileName || "pricelist-1.txt", format: "also_pricelist", text: txt };
+  }
+
+  return { kind: "upload", label: fileName || "supplier-list.csv", format: "csv", text: txt };
 }
 
 /** Valida o contrato do payload: exatamente um de `text`/`bytes` + label. */
@@ -147,7 +164,9 @@ export function assertSourcePayload(payload: SourcePayload): void {
 
 /**
  * Formato efetivo do payload: o `format` explícito vence; "auto" deteta pelos
- * bytes (assinatura ZIP/OOXML PK\x03\x04 → xlsx) ou assume CSV (texto).
+ * bytes (assinatura ZIP/OOXML PK\x03\x04 → xlsx) ou pela assinatura estrutural
+ * do texto (ALSO stock header-driven → also_stock; pricelist ALSO posicional
+ * sem header → also_pricelist) e só então assume CSV (texto genérico).
  * O sniffing XML será adicionado na C.3.4.3 sem tocar no motor.
  */
 export function sourceFormat(payload: SourcePayload): SupplierFileFormat {
@@ -161,14 +180,8 @@ export function sourceFormat(payload: SourcePayload): SupplierFileFormat {
     return "xlsx";
   }
   const text = payload.text ?? "";
-  if (text.includes("\t")) {
-    const stripped = text.replace(/^\uFEFF/, "").trim();
-    const firstLine = stripped.split(/\r?\n/)[0] ?? "";
-    const cells = firstLine.split("\t").map((s) => s.trim().toLowerCase());
-    if (cells.includes("productid") && cells.includes("availablequantity")) {
-      return "also_stock";
-    }
-  }
+  if (looksLikeAlsoStock(text)) return "also_stock";
+  if (looksLikeAlsoPricelist(text)) return "also_pricelist";
   return "csv";
 }
 

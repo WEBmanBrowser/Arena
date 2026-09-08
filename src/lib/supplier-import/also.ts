@@ -24,7 +24,7 @@ import {
   SNAPSHOT_LIMITS,
   byteLengthUtf8,
 } from "./normalize";
-import { parseInteger, parseMoney } from "./normalize";
+import { extractNumericToken, parseInteger, parseMoney } from "./normalize";
 import { SUPPLIER_IMPORT_MAX_ROWS, SNAPSHOT_INT4_MAX, SNAPSHOT_COST_MAX } from "./constants";
 
 // ─── Helpers ─────────────────────────────────────────────────
@@ -116,6 +116,110 @@ function parseAvailabilityTimestamp(dateRaw: string, timeRaw: string, issues: Su
   // time alone without date is not a valid timestamptz — treat as warning and null (or keep raw? spec says AvailabilityDate+Time combined)
   issues.push({ field: "alsoAvailabilityTimestamp", value: t, code: "INVALID_AVAILABILITY_TIMESTAMP", message: `Hora sem data "${t}" — ignorada`, severity: "warning" });
   return null;
+}
+
+// ─── Structural detection (format gate, NOT a parser) ─────────
+//
+// These pure predicates decide whether the CONTENT of a text payload is an
+// ALSO file so the dispatcher routes it to the right parser. They are not
+// parsers: no row is produced, no validation is duplicated — the real
+// parsing and per-row validation stay in parseAlsoPricelist/parseAlsoStock
+// (one engine, one engine only).
+//
+// Policy (C.3.4.3.1 fix — manual upload detection):
+//  - a canonical ALSO name ("pricelist"/"stock" in a .txt) routes to the
+//    ALSO parser — C.3.4.3.1 contract, parser validates structure per row;
+//  - any OTHER name is decided by the CONTENT signature — never by the
+//    .txt extension alone;
+//  - the signature is strong enough that an arbitrary TXT is NEVER
+//    classified as ALSO (no tabs, < 10 columns, header row, text in the
+//    numeric positions, ID without digits → all stay on the generic path).
+
+/** Fixed positional width of the pricelist (ProductID…ManufacturerName). */
+export const ALSO_PRICELIST_MIN_COLUMNS = 10;
+
+/**
+ * Plausible ProductID (column 0): a single identifier token (no spaces),
+ * at least one digit, within the snapshot SKU limit. This alone already
+ * rejects a header row ("ProductID" has no digits) and generic text cells.
+ */
+function isPlausibleProductIdentifier(raw: string): boolean {
+  const v = raw.trim();
+  if (!v || v.length > SNAPSHOT_LIMITS.sku) return false;
+  if (!/^[A-Za-z0-9][A-Za-z0-9._/\-]*$/.test(v)) return false;
+  return /\d/.test(v);
+}
+
+/** True when the cell looks numeric at all (same token rules the parsers use). */
+function isNumericLike(raw: string): boolean {
+  return extractNumericToken(raw).value !== null;
+}
+
+/**
+ * Structural signature of the headerless ALSO pricelist (TSV, fixed
+ * positional columns, 10+ per line — columns 11+ exist in real exports and
+ * are ignored by the parser, so extra columns never break the signature):
+ *
+ *  - every non-empty line is tab-separated with at least
+ *    ALSO_PRICELIST_MIN_COLUMNS columns (TSV, not comma/semicolon);
+ *  - column 0 (ProductID): plausible identifier (token with at least one
+ *    digit, ≤ 100 chars);
+ *  - column 1 (EuropeanArticleNumber): empty or a GTIN-width digit string
+ *    (8–14 digits — the parser still validates the checksum per row);
+ *  - column 5 (Description): empty or textual (at least one letter);
+ *  - column 6 (AvailableQuantity): empty or numeric (the -1 sentinel is
+ *    numeric too; the parser applies the strict integer/sentinel rules per
+ *    row, so a single malformed cell cannot bounce a real 15k-line export);
+ *  - column 7 (NetPrice): empty or numeric (same rule);
+ *  - the signature must hold for EVERY non-empty line across
+ *    `minDataLines` (default 2) — structural compatibility across the
+ *    whole file, not a single lucky line. The bar keeps any arbitrary TXT
+ *    out of the ALSO parsers (see uploadSource for the routing layers).
+ */
+export function looksLikeAlsoPricelist(
+  rawText: string | Uint8Array,
+  opts: { minDataLines?: number } = {}
+): boolean {
+  const minDataLines = opts.minDataLines ?? 2;
+  const text = typeof rawText === "string" ? rawText : new TextDecoder("utf-8").decode(rawText);
+  const cleaned = stripBOM(text);
+  const lines: string[] = [];
+  for (const line of cleaned.split(/\r?\n/)) {
+    if (line.trim() !== "") lines.push(line);
+  }
+  if (lines.length < minDataLines) return false;
+
+  for (const raw of lines) {
+    const cols = raw.split("\t");
+    if (cols.length < ALSO_PRICELIST_MIN_COLUMNS) return false;
+    const get = (i: number): string => cols[i] ?? "";
+    if (!isPlausibleProductIdentifier(get(0))) return false;
+    const ean = get(1).replace(/[\s\u00a0]/g, "");
+    if (ean !== "" && !/^\d{8,14}$/.test(ean)) return false;
+    const desc = get(5).trim();
+    if (desc !== "" && !/[A-Za-zÀ-ÖØ-öø-ÿ]/.test(desc)) return false;
+    const qty = get(6).trim();
+    if (qty !== "" && !isNumericLike(qty)) return false;
+    const price = get(7).trim();
+    if (price !== "" && !isNumericLike(price)) return false;
+  }
+  return true;
+}
+
+/**
+ * Structural signature of the header-driven ALSO stock file: the first
+ * non-empty line is a tab-separated header containing ProductID AND
+ * AvailableQuantity (the parser's two required columns, resolved by name).
+ */
+export function looksLikeAlsoStock(rawText: string | Uint8Array): boolean {
+  const text = typeof rawText === "string" ? rawText : new TextDecoder("utf-8").decode(rawText);
+  const cleaned = stripBOM(text);
+  for (const line of cleaned.split(/\r?\n/)) {
+    if (line.trim() === "") continue;
+    const cells = line.split("\t").map((c) => c.trim().toLowerCase());
+    return cells.includes("productid") && cells.includes("availablequantity");
+  }
+  return false;
 }
 
 // ─── Pricelist (no header, positional) ────────────────────────
