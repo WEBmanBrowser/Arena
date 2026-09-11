@@ -281,7 +281,9 @@ export function summarizePlan(rows: NormalizedSupplierRow[], plans: SupplierImpo
     else summary.errors += 1;
     summary.matchedBy[plan.matchType] += 1;
     if (rows[i]?.costPrice) summary.withCost += 1;
-    if (rows[i]?.stock !== null && rows[i]?.stock !== undefined) summary.withStock += 1;
+    // C.3.4.4: linhas ALSO stock-only trazem o stock em `supplierStock`
+    // (`stock` físico fica null) — continuam a contar como "com stock".
+    if (rows[i]?.stock != null || rows[i]?.supplierStock != null) summary.withStock += 1;
   });
   return summary;
 }

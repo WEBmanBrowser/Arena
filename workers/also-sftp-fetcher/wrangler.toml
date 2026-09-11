@@ -1,0 +1,18 @@
+# C.3.4.4 — also-sftp-fetcher: transporte SFTP READ-ONLY (TCP/SSH/SFTP).
+#
+# Chamado EXCLUSIVAMENTE via Cloudflare Service Binding `ALSO_SFTP_FETCHER`
+# (ver wrangler.jsonc da app Arena). NÃO adicionar routes/domínios públicos.
+#
+# Segredos (nunca neste ficheiro — `wrangler secret put` por ambiente):
+#   ALSO_SFTP_PASSWORD   (password do utilizador SFTP na ALSO)
+# O NOME do secret é o que vive na BD da app (supplier_sources.secret_reference).
+
+name = "also-sftp-fetcher"
+main = "src/index.ts"
+compatibility_date = "2025-04-01"
+
+# Zero dependências npm: só WebCrypto + cloudflare:sockets (sem nodejs_compat).
+
+[vars]
+# Allowlist exata de hosts (csv). Fail-closed: qualquer outro host é recusado.
+SFTP_ALLOWED_HOSTS = "paco.also.com"

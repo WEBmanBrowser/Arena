@@ -397,10 +397,16 @@ export const productSuppliers = pgTable("product_suppliers", {
   availableNextQuantity: integer("available_next_quantity"),
   availabilityTimestamp: timestamp("availability_timestamp", { withTimezone: true }),
   lastSyncAt: timestamp("last_sync_at", { withTimezone: true }),
+  // ── C.3.4.4: stock do FORNECEDOR (ALSO), separado do stock físico ──
+  // products.stock é o stock físico MDTech e NUNCA é escrito pelo sync ALSO.
+  // NULL = desconhecido/nunca sincronizado; o sentinel -1 do feed significa
+  // "não atualizar" e nunca limpa este valor.
+  supplierStock: integer("supplier_stock"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
 }, (t) => [
   check("ps_available_next_quantity_non_negative", sql`${t.availableNextQuantity} IS NULL OR ${t.availableNextQuantity} >= 0`),
+  check("ps_supplier_stock_non_negative", sql`${t.supplierStock} IS NULL OR ${t.supplierStock} >= 0`),
   index("ps_product_idx").on(t.productId),
   index("ps_supplier_idx").on(t.supplierId),
   uniqueIndex("ps_product_supplier_unique").on(t.productId, t.supplierId),
@@ -1025,6 +1031,12 @@ export const supplierImportRows = pgTable("supplier_import_rows", {
   availableNextDate: date("available_next_date"),
   availableNextQuantity: integer("available_next_quantity"),
   availabilityTimestamp: timestamp("availability_timestamp", { withTimezone: true }),
+  // ── C.3.4.4: stock de fornecedor + diff incremental (só linhas ALSO stock) ──
+  // `stock` (físico) nunca transporta stock ALSO; o diff (new/changed/
+  // unchanged/error) decide claim/apply por linha (UNCHANGED = zero writes).
+  supplierStock: integer("supplier_stock"),
+  diffStatus: varchar("diff_status", { length: 20 }),
+  changedFields: jsonb("changed_fields").$type<string[] | null>(),
   // ── Price snapshot (read-only for the operator; apply never takes prices
   //    from the browser, and never writes products.price for manual products)
   currentPrice: decimal("current_price", { precision: 10, scale: 2 }),
@@ -1053,6 +1065,8 @@ export const supplierImportRows = pgTable("supplier_import_rows", {
   // a check requiring a target would make deleting an imported product fail.
   check("supplier_import_rows_target_matches_status", sql`${t.status} <> 'new_product' OR ${t.productId} IS NULL`),
   check("supplier_import_rows_available_next_quantity_non_negative", sql`${t.availableNextQuantity} IS NULL OR ${t.availableNextQuantity} >= 0`),
+  check("supplier_import_rows_supplier_stock_non_negative", sql`${t.supplierStock} IS NULL OR ${t.supplierStock} >= 0`),
+  check("supplier_import_rows_diff_status_valid", sql`${t.diffStatus} IS NULL OR ${t.diffStatus} IN ('new','changed','unchanged','error')`),
 ]);
 
 /**
@@ -1108,7 +1122,7 @@ export const supplierSources = pgTable("supplier_sources", {
   supplierId: integer("supplier_id").notNull().references(() => suppliers.id, { onDelete: "cascade" }),
   /** Nome legível para o admin (único por fornecedor). */
   name: varchar("name", { length: 100 }).notNull(),
-  /** upload | url (aditivo futuro: api). */
+  /** upload | url | sftp (C.3.4.4: SFTP via worker also-sftp-fetcher). */
   sourceType: varchar("source_type", { length: 20 }).notNull().default("upload"),
   /** auto → detetar; csv/xlsx explícitos vencem o sniffing. */
   format: varchar("format", { length: 10 }).notNull().default("auto"),
@@ -1151,6 +1165,19 @@ export const supplierSources = pgTable("supplier_sources", {
   lastHttpStatus: integer("last_http_status"),
   lastEtag: varchar("last_etag", { length: 500 }),
   lastModified: varchar("last_modified", { length: 100 }),
+  // ── C.3.4.4: configuração SFTP (só usada quando source_type='sftp') ──
+  // A password NUNCA vive aqui: só `secretReference` (o NOME do secret no
+  // worker also-sftp-fetcher). O pin da host key é OBRIGATÓRIO (TOFU proibido).
+  sftpHost: varchar("sftp_host", { length: 255 }),
+  sftpPort: integer("sftp_port"),
+  sftpRemotePath: varchar("sftp_remote_path", { length: 1000 }),
+  /** Pin OpenSSH SHA256 da host key (formato `SHA256:<base64-sem-padding>`). */
+  sftpHostKeyFingerprint: varchar("sftp_host_key_fingerprint", { length: 255 }),
+  // ── C.3.4.4: validadores remotos SFTP (otimização; identidade = hash) ──
+  // size+mtime do último stat bem-sucedido: iguais → no_change sem transferir.
+  // Quando o conteúdo é transferido, o SHA-256 decide (igual → no_change).
+  lastRemoteSize: integer("last_remote_size"),
+  lastRemoteMtime: varchar("last_remote_mtime", { length: 100 }),
   createdBy: integer("created_by").references(() => users.id),
   updatedBy: integer("updated_by").references(() => users.id),
   createdAt: timestamp("created_at").notNull().defaultNow(),
@@ -1160,8 +1187,8 @@ export const supplierSources = pgTable("supplier_sources", {
   // Scheduling: "quais fontes estão due" sem varrer tudo.
   index("ss_due_idx").on(t.enabled, t.nextRunAt),
   uniqueIndex("ss_supplier_name_unique").on(t.supplierId, t.name),
-  check("ss_source_type_valid", sql`${t.sourceType} IN ('upload','url')`),
-  check("ss_format_valid", sql`${t.format} IN ('auto','csv','xlsx')`),
+  check("ss_source_type_valid", sql`${t.sourceType} IN ('upload','url','sftp')`),
+  check("ss_format_valid", sql`${t.format} IN ('auto','csv','xlsx','also_stock','also_pricelist')`),
   check("ss_auth_type_valid", sql`${t.authType} IN ('none','basic','bearer','header')`),
   check("ss_apply_policy_valid", sql`${t.applyPolicy} IN ('preview_only','auto_if_clean')`),
   // Apenas HTTPS nesta fase; credenciais na URL são sempre proibidas.
@@ -1169,6 +1196,8 @@ export const supplierSources = pgTable("supplier_sources", {
   check("ss_url_no_credentials", sql`${t.url} IS NULL OR ${t.url} !~ '//[^@/]+@'`),
   check("ss_non_negative", sql`${t.lastDurationMs} IS NULL OR ${t.lastDurationMs} >= 0`),
   check("ss_row_count_non_negative", sql`${t.lastRowCount} IS NULL OR ${t.lastRowCount} >= 0`),
+  check("ss_sftp_port_valid", sql`${t.sftpPort} IS NULL OR (${t.sftpPort} >= 1 AND ${t.sftpPort} <= 65535)`),
+  check("ss_last_remote_size_non_negative", sql`${t.lastRemoteSize} IS NULL OR ${t.lastRemoteSize} >= 0`),
 ]);
 
 /**
@@ -1194,6 +1223,9 @@ export const supplierSourceRuns = pgTable("supplier_source_runs", {
   httpStatus: integer("http_status"),
   etag: varchar("etag", { length: 500 }),
   lastModified: varchar("last_modified", { length: 100 }),
+  // ── C.3.4.4: size+mtime observados (SFTP; NULL em HTTPS) ──
+  remoteSize: integer("remote_size"),
+  remoteMtime: varchar("remote_mtime", { length: 100 }),
   /** Snapshot que esta run produziu (NULL em no_change/erro). */
   importId: integer("import_id").references(() => supplierImports.id, { onDelete: "set null" }),
   errorCode: varchar("error_code", { length: 80 }),
@@ -1204,6 +1236,7 @@ export const supplierSourceRuns = pgTable("supplier_source_runs", {
   check("ssr_status_valid", sql`${t.status} IN ('running','success','no_change','error','skipped')`),
   check("ssr_duration_non_negative", sql`${t.durationMs} IS NULL OR ${t.durationMs} >= 0`),
   check("ssr_counts_non_negative", sql`${t.rowCount} IS NULL OR ${t.rowCount} >= 0`),
+  check("ssr_remote_size_non_negative", sql`${t.remoteSize} IS NULL OR ${t.remoteSize} >= 0`),
 ]);
 
 export const productInternalSkuSeq = pgSequence("product_internal_sku_seq", {

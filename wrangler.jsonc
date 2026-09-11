@@ -45,6 +45,19 @@
     }
   ],
 
+  // C.3.4.4 — Service Binding para o worker read-only `also-sftp-fetcher`
+  // (transporte SSH/SFTP isolado; a app NUNCA fala SSH diretamente).
+  // The binding name ALSO_SFTP_FETCHER is required by
+  // src/lib/supplier-import/sftp.ts. No local dev (sem contexto
+  // Cloudflare) o binding é null e o sync SFTP falha fechado com
+  // SFTP_BINDING_UNAVAILABLE (os testes injetam `fetcherImpl`).
+  "services": [
+    {
+      "binding": "ALSO_SFTP_FETCHER",
+      "service": "also-sftp-fetcher"
+    }
+  ],
+
   // Observability
   "observability": {
     "enabled": true

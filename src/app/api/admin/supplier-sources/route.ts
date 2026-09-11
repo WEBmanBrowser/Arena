@@ -17,8 +17,8 @@ import { getCurrentUser, isManager, isStaff } from "@/lib/auth";
 import { csrfGuard } from "@/lib/csrf";
 import { SupplierSourceError } from "@/lib/supplier-import/source";
 import { supplierImportErrorMessage, classifyImportStorageFailure } from "@/lib/supplier-import/error-messages";
-import { supplierSourceCreateSchema } from "@/lib/supplier-source-schemas";
-import { createSupplierSource, listSupplierSources } from "@/lib/services/supplier-source-service";
+import { sftpSourceCreateSchema, supplierSourceCreateSchema } from "@/lib/supplier-source-schemas";
+import { createSftpSource, createSupplierSource, listSupplierSources } from "@/lib/services/supplier-source-service";
 
 export async function GET(req: NextRequest) {
   const user = await getCurrentUser();
@@ -45,6 +45,30 @@ export async function POST(req: NextRequest) {
     raw = await req.json();
   } catch {
     return NextResponse.json({ error: "INVALID_BODY", message: supplierImportErrorMessage("INVALID_BODY") }, { status: 400 });
+  }
+
+  // C.3.4.4: o corpo escolhe o tipo de fonte (omissão = HTTPS, como antes).
+  const requestedType = (raw as { sourceType?: unknown } | null)?.sourceType;
+  if (requestedType === "sftp") {
+    const parsed = sftpSourceCreateSchema.safeParse(raw);
+    if (!parsed.success) {
+      return NextResponse.json(
+        { error: "VALIDATION_ERROR", message: "Dados da fonte inválidos", details: parsed.error.issues.map((i) => ({ path: i.path.join("."), message: i.message })) },
+        { status: 400 }
+      );
+    }
+    try {
+      const source = await createSftpSource({ ...parsed.data, profileId: parsed.data.profileId ?? null }, user.id);
+      return NextResponse.json({ source });
+    } catch (e) {
+      if (e instanceof SupplierSourceError) {
+        return NextResponse.json({ error: e.code, message: supplierImportErrorMessage(e.code) }, { status: e.httpStatus });
+      }
+      console.error("supplier source create:", e);
+      const storage = classifyImportStorageFailure(e);
+      if (storage) return NextResponse.json({ error: storage.code, message: storage.message }, { status: 500 });
+      return NextResponse.json({ error: "SOURCE_RUN_FAILED", message: supplierImportErrorMessage("SOURCE_RUN_FAILED") }, { status: 500 });
+    }
   }
 
   const parsed = supplierSourceCreateSchema.safeParse(raw);

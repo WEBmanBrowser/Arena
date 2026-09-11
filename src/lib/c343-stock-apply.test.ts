@@ -2,9 +2,10 @@
  * C.3.4.3.1 — stock-only apply integração real (DB) + duplicados
  *
  * Prova com PostgreSQL real:
- *  - also_stock atualiza stock de associação existente
+ *  - also_stock atualiza supplier_stock da associação existente (C.3.4.4)
  *  - NÃO cria produto nem associação para ProductID desconhecido
- *  - NÃO altera products.sku / price / costPrice / name / ean
+ *  - NÃO altera products.stock / sku / price / costPrice / name / ean
+ *  - NÃO cria stock movements (stock ALSO não é físico)
  *  - NÃO interfere com preferredSupplier
  *  - NÃO dispara recálculo de preço (stock-only não é custo)
  *  - duplicado ProductID no mesmo stock.txt → conflict determinístico, nunca "last wins"
@@ -88,7 +89,7 @@ beforeEach(async () => {
 });
 
 describe("C.3.4.3.1 — stock-only apply real", () => {
-  it("atualiza stock de associação existente e NÃO cria para desconhecido", async () => {
+  it("atualiza supplier_stock da associação existente e NÃO cria para desconhecido", async () => {
     // cria produto com associação ALSO
     const sku = `${TAG}-PROD-1`;
     const [product] = await db.insert(products).values({
@@ -125,7 +126,11 @@ describe("C.3.4.3.1 — stock-only apply real", () => {
     const ready = preview.lines.find((l) => l.supplierSku === "PID-ALSO-001");
     const unknown = preview.lines.find((l) => l.supplierSku === "PID-DESCONHECIDO-999");
     expect(ready?.status).toBe("ready");
-    expect(ready?.stock).toBe(25);
+    // C.3.4.4: o preview transporta o stock ALSO em supplierStock (o físico é null).
+    expect(ready?.supplierStock).toBe(25);
+    expect(ready?.stock).toBeNull();
+    expect(ready?.diffStatus).toBe("changed");
+    expect(ready?.changedFields).toContain("supplierStock");
     // unknown deve ser error, nunca new_product, e não deve ter productId
     expect(unknown?.status).toBe("error");
     expect(unknown?.codes).toContain("STOCK_UNKNOWN_SKU");
@@ -141,20 +146,28 @@ describe("C.3.4.3.1 — stock-only apply real", () => {
     const outcome = await applySupplierImport({ importId: preview.importId, previewToken: preview.previewToken, userId: MANAGER.id });
     expect(outcome.applied).toBeGreaterThan(0);
 
-    // verifica produto: stock atualizado, mas sku/price/cost/name/ean inalterados
+    // C.3.4.4 — autoridade de stock: o produto físico NÃO é tocado (nem
+    // stock, nem movimentos); o stock ALSO vive só na associação.
     const [after] = await db.select().from(products).where(eq(products.id, product.id)).limit(1);
-    expect(after.stock).toBe(25);
+    expect(after.stock).toBe(5);
     expect(after.sku).toBe(sku);
     expect(after.price).toBe("100.00"); // não repriced por stock-only
     expect(after.costPrice).toBe("60.00");
     expect(after.name).toBe("Produto ALSO 1");
     expect(after.ean).toBe("4006381333931");
+    const movements = await db.execute(sql`SELECT count(*)::int AS c FROM stock_movements WHERE product_id = ${product.id}`);
+    expect(Number((movements.rows as { c: number }[])[0].c)).toBe(0);
 
-    // productSuppliers: cost não alterado, still preferred, supplierSku mantido
+    // productSuppliers: supplier_stock + datas atualizados; cost/preferred/sku intactos.
     const [link] = await db.select().from(productSuppliers).where(and(eq(productSuppliers.productId, product.id), eq(productSuppliers.supplierId, supplierId))).limit(1);
+    expect(link.supplierStock).toBe(25);
     expect(link.costPrice).toBe("60.00");
     expect(link.isPreferred).toBe(true);
     expect(link.supplierSku).toBe("PID-ALSO-001");
+    expect(String(link.availableNextDate).slice(0, 10)).toBe("2026-10-01");
+    expect(link.availableNextQuantity).toBe(5);
+    expect(link.availabilityTimestamp).not.toBeNull();
+    expect(link.lastSyncAt).not.toBeNull();
 
     // NÃO criou produto para desconhecido
     const unknownProducts = await db.select().from(products).where(sql`sku LIKE ${`${TAG}-UNKNOWN%`}`);
@@ -193,12 +206,15 @@ describe("C.3.4.3.1 — stock-only apply real", () => {
 
     await applySupplierImport({ importId: preview.importId, previewToken: preview.previewToken, userId: MANAGER.id });
 
+    // C.3.4.4: físico intacto; o 99 vive só no supplier_stock da associação ALSO.
     const [after] = await db.select().from(products).where(eq(products.id, product.id)).limit(1);
-    expect(after.stock).toBe(99);
+    expect(after.stock).toBe(10);
     expect(after.price).toBe("50.00"); // não repriced (stock-only, non-preferred)
 
     const [linkAlso] = await db.select().from(productSuppliers).where(and(eq(productSuppliers.productId, product.id), eq(productSuppliers.supplierId, supplierId))).limit(1);
     const [linkOther] = await db.select().from(productSuppliers).where(and(eq(productSuppliers.productId, product.id), eq(productSuppliers.supplierId, otherSupplierId))).limit(1);
+    expect(linkAlso.supplierStock).toBe(99);
+    expect(linkOther.supplierStock).toBeNull(); // o outro fornecedor não é tocado
     expect(linkAlso.isPreferred).toBe(false);
     expect(linkOther.isPreferred).toBe(true);
     expect(linkAlso.costPrice).toBe("20.00"); // não alterado por stock
@@ -241,6 +257,10 @@ describe("C.3.4.3.1 — duplicados no stock.txt", () => {
 
     const [after] = await db.select().from(products).where(eq(products.id, product.id)).limit(1);
     expect(after.stock).toBe(7); // intacto, last row não venceu
+    // …e a associação também não foi tocada (conflicts nunca escrevem).
+    const [link] = await db.select().from(productSuppliers).where(and(eq(productSuppliers.productId, product.id), eq(productSuppliers.supplierId, supplierId))).limit(1);
+    expect(link.supplierStock).toBeNull();
+    expect(link.lastSyncAt).toBeNull();
   });
 
   it("duplicado desconhecido → também não cria e não fica last-wins", async () => {

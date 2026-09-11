@@ -212,6 +212,19 @@ export interface SupplierImportPreviewLine {
   costBefore: string | null;
   stock: number | null;
   stockBefore: number | null;
+  /**
+   * C.3.4.4 — stock do FORNECEDOR (só linhas ALSO stock-only; null no resto).
+   * `stock` NUNCA transporta stock ALSO: products.stock é o stock físico MDTech.
+   */
+  supplierStock?: number | null;
+  supplierStockBefore?: number | null;
+  /**
+   * C.3.4.4 — diff incremental persistido (só ALSO stock-only; null no resto).
+   * new/changed/unchanged/error; changedFields lista os campos de fornecedor
+   * efetivamente diferentes (auditoria do preview).
+   */
+  diffStatus?: "new" | "changed" | "unchanged" | "error" | null;
+  changedFields?: string[] | null;
   reservedStock: number | null;
   leadTimeDays: number | null;
   productId: number | null;
@@ -382,6 +395,83 @@ interface ProductInfo {
   priceMode: string; categoryId: number | null; brandId: number | null;
 }
 
+// ─── C.3.4.4: diff incremental ALSO stock-only ─────────────
+
+/** Normaliza date (Date|string) para 'YYYY-MM-DD' (ou null). */
+function toISODate(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? null : value.toISOString().slice(0, 10);
+  }
+  const s = String(value).trim();
+  return s ? s.slice(0, 10) : null;
+}
+
+/**
+ * Epoch (ms) de um timestamp ALSO — a MESMA conversão do snapshot (UTC).
+ * Formatos observados: Date (drizzle select), 'YYYY-MM-DD HH:MM[:SS]' (ALSO,
+ * UTC), 'YYYY-MM-DD' (UTC meia-noite), ISO com T/Z/offset e o texto do pg
+ * 'YYYY-MM-DD HH:MM:SS+00' (leituras raw do claim). Null quando ausente ou
+ * inválido. Sem offset explícito assume-se SEMPRE UTC (nunca hora local).
+ */
+function alsoTimestampEpoch(value: unknown): number | null {
+  if (value === null || value === undefined) return null;
+  if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value.getTime();
+  const s = String(value).trim();
+  if (!s) return null;
+  if (s.includes("T") || s.endsWith("Z") || /[+-]\d{2}:?\d{2}$/.test(s) || /[+-]\d{2}$/.test(s)) {
+    // ISO ou texto do pg: direto (o V8 não aceita offset "+00" sem minutos).
+    const d = new Date(s.replace(" ", "T").replace(/\+00$/, "+00:00").replace(/-00$/, "-00:00"));
+    return Number.isNaN(d.getTime()) ? null : d.getTime();
+  }
+  const t = s.replace(" ", "T");
+  const d = new Date(t.includes("T") ? `${t}Z` : `${t}T00:00:00Z`);
+  return Number.isNaN(d.getTime()) ? null : d.getTime();
+}
+
+interface AlsoLinkState {
+  supplierStock: number | null;
+  availableNextDate: string | Date | null;
+  availableNextQuantity: number | null;
+  availabilityTimestamp: Date | string | null;
+}
+
+/**
+ * Compara UMA linha ALSO normalizada com o estado atual do link.
+ *
+ * Regras (§8–§9): incoming null (incl. sentinel -1 → null) significa
+ * "desconhecido / não atualizar" — é EXCLUÍDO da comparação e nunca gera
+ * changedField. Ordem estável dos campos.
+ */
+export function diffAlsoStockRow(
+  row: NormalizedSupplierRow,
+  link: AlsoLinkState | undefined
+): { diffStatus: "new" | "changed" | "unchanged" | "error"; changedFields: string[] | null } {
+  const changed: string[] = [];
+  const incomingStock = row.supplierStock ?? null;
+  if (incomingStock !== null && (!link || link.supplierStock !== incomingStock)) {
+    changed.push("supplierStock");
+  }
+  const incomingNextDate = row.alsoAvailableNextDate ?? null;
+  if (incomingNextDate !== null && (!link || toISODate(link.availableNextDate) !== toISODate(incomingNextDate))) {
+    changed.push("availableNextDate");
+  }
+  const incomingNextQty = row.alsoAvailableNextQuantity ?? null;
+  if (incomingNextQty !== null && (!link || link.availableNextQuantity !== incomingNextQty)) {
+    changed.push("availableNextQuantity");
+  }
+  const incomingTs = row.alsoAvailabilityTimestamp ?? null;
+  if (incomingTs !== null) {
+    const incomingEpoch = alsoTimestampEpoch(incomingTs);
+    const linkEpoch = link ? alsoTimestampEpoch(link.availabilityTimestamp) : null;
+    if (incomingEpoch !== null && (!link || linkEpoch !== incomingEpoch)) {
+      changed.push("availabilityTimestamp");
+    }
+  }
+  if (changed.length === 0) return { diffStatus: "unchanged", changedFields: null };
+  return { diffStatus: "changed", changedFields: changed };
+}
+
 /**
  * Parse + match + persist the snapshot.
  * Writes ONLY supplier_imports and supplier_import_rows — never products,
@@ -476,6 +566,13 @@ export async function previewSupplierImport(input: PreviewInput): Promise<Suppli
   const productInfo = new Map<number, ProductInfo>();
   const preferredByProduct = new Map<number, number>();
   const linkCost = new Map<number, string | null>();
+  // C.3.4.4: estado de fornecedor por produto (diff incremental ALSO stock).
+  const linkSupplierState = new Map<number, {
+    supplierStock: number | null;
+    availableNextDate: string | Date | null;
+    availableNextQuantity: number | null;
+    availabilityTimestamp: Date | string | null;
+  }>();
 
   if (matchedIds.length) {
     for (const group of chunk(matchedIds, SUPPLIER_IMPORT_KEY_CHUNK)) {
@@ -490,10 +587,23 @@ export async function previewSupplierImport(input: PreviewInput): Promise<Suppli
     const links = await db.select({
       productId: productSuppliers.productId, supplierId: productSuppliers.supplierId,
       isPreferred: productSuppliers.isPreferred, costPrice: productSuppliers.costPrice,
+      // C.3.4.4: estado de fornecedor para o diff incremental (só ALSO stock).
+      supplierStock: productSuppliers.supplierStock,
+      availableNextDate: productSuppliers.availableNextDate,
+      availableNextQuantity: productSuppliers.availableNextQuantity,
+      availabilityTimestamp: productSuppliers.availabilityTimestamp,
     }).from(productSuppliers).where(inArray(productSuppliers.productId, matchedIds));
     for (const link of links) {
       if (link.isPreferred) preferredByProduct.set(link.productId, link.supplierId);
-      if (link.supplierId === supplier.id) linkCost.set(link.productId, link.costPrice);
+      if (link.supplierId === supplier.id) {
+        linkCost.set(link.productId, link.costPrice);
+        linkSupplierState.set(link.productId, {
+          supplierStock: link.supplierStock,
+          availableNextDate: link.availableNextDate,
+          availableNextQuantity: link.availableNextQuantity,
+          availabilityTimestamp: link.availabilityTimestamp,
+        });
+      }
     }
   }
 
@@ -553,6 +663,29 @@ export async function previewSupplierImport(input: PreviewInput): Promise<Suppli
       priceMessage = computation.priced ? null : computation.message ?? null;
     }
 
+    // C.3.4.4 — diff incremental: SÓ linhas ALSO stock-only ganham diffStatus
+    // (NULL em tudo o resto — imports genéricos inalterados). ready compara
+    // com o link; conflict/error mapeiam para error; new_product (impossível
+    // em stock-only após a reescrita acima) mapeia para new.
+    let supplierStock: number | null = null;
+    let supplierStockBefore: number | null = null;
+    let diffStatus: "new" | "changed" | "unchanged" | "error" | null = null;
+    let changedFields: string[] | null = null;
+    if (isStockOnly) {
+      supplierStock = row.supplierStock ?? null;
+      if (plan.status === "ready" && plan.productId !== null) {
+        const link = linkSupplierState.get(plan.productId);
+        supplierStockBefore = link?.supplierStock ?? null;
+        const diff = diffAlsoStockRow(row, link);
+        diffStatus = diff.diffStatus;
+        changedFields = diff.changedFields;
+      } else if (plan.status === "new_product") {
+        diffStatus = "new";
+      } else {
+        diffStatus = "error";
+      }
+    }
+
     lines.push({
       rowNumber: row.rowNumber,
       supplierSku: row.supplierSku,
@@ -567,7 +700,13 @@ export async function previewSupplierImport(input: PreviewInput): Promise<Suppli
       costPrice: row.costPrice,
       costBefore: product ? linkCost.get(product.id) ?? null : null,
       stock: row.stock,
-      stockBefore: product?.stock ?? null,
+      // Em stock-only o `stock` físico é sempre null (não transporta ALSO) e
+      // o "antes" físico não é mostrado (evita sugerir uma escrita física).
+      stockBefore: isStockOnly ? null : (product?.stock ?? null),
+      supplierStock,
+      supplierStockBefore,
+      diffStatus,
+      changedFields,
       reservedStock: product?.reservedStock ?? null,
       leadTimeDays: row.leadTimeDays,
       productId: plan.productId,
@@ -588,7 +727,11 @@ export async function previewSupplierImport(input: PreviewInput): Promise<Suppli
   });
 
   const planSummary = summarizePlan(parsed.rows, plans);
-  const actionable = planSummary.ready + planSummary.newProducts;
+  // C.3.4.4: linhas UNCHANGED nunca são claimed/applied — saem do actionable
+  // (0 em imports genéricos: comportamento idêntico ao anterior).
+  const unchangedCount = lines.filter((l) => l.diffStatus === "unchanged").length;
+  const changedCount = lines.filter((l) => l.diffStatus === "changed").length;
+  const actionable = planSummary.ready + planSummary.newProducts - unchangedCount;
   const batchesTotal = Math.ceil(actionable / SUPPLIER_IMPORT_BATCH_SIZE);
   const missing = await detectMissingProducts(supplier.id, lines);
 
@@ -615,7 +758,11 @@ export async function previewSupplierImport(input: PreviewInput): Promise<Suppli
       rowCount: parsed.rows.length,
       status: "preview",
       mapping: parsed.mapping,
-      summary: { ...planSummary, actionable, batchesTotal, ignoredColumns: parsed.ignoredColumns, missingProducts: missing },
+      summary: {
+        ...planSummary, actionable, batchesTotal, ignoredColumns: parsed.ignoredColumns, missingProducts: missing,
+        // C.3.4.4: contagens do diff — SÓ em also_stock (genéricos inalterados).
+        ...(isStockOnly ? { diffChanged: changedCount, diffUnchanged: unchangedCount } : {}),
+      },
       batchesTotal,
       batchesDone: 0,
       userId: input.userId,
@@ -634,6 +781,10 @@ export async function previewSupplierImport(input: PreviewInput): Promise<Suppli
         status: line.status,
         costPrice: line.costPrice,
         stock: line.stock,
+        // C.3.4.4: snapshot do stock de fornecedor + diff (null fora de ALSO stock).
+        supplierStock: line.supplierStock ?? null,
+        diffStatus: line.diffStatus ?? null,
+        changedFields: line.changedFields ?? null,
         leadTimeDays: line.leadTimeDays,
         message: line.message ? line.message.slice(0, 500) : null,
         currentPrice: line.currentPrice,
@@ -760,6 +911,9 @@ interface ClaimedRow {
   product_id: number | null;
   cost_price: string | null;
   stock: number | null;
+  supplier_stock: number | null;
+  diff_status: "new" | "changed" | "unchanged" | "error" | null;
+  changed_fields: string[] | null;
   lead_time_days: number | null;
   supplier_sku: string | null;
   internal_sku: string | null;
@@ -1036,10 +1190,75 @@ async function createProductFromRow(tx: NodePgDatabase, row: ClaimedRow, context
 }
 
 /**
+ * C.3.4.4 — aplica UMA linha ALSO stock-only (diff_status não-nulo).
+ *
+ * Autoridade ABSOLUTA de stock: esta função NUNCA escreve products.stock,
+ * NUNCA cria stock movements, NUNCA altera custo/preço/preferred e NUNCA cria
+ * links. Só escreve na associação existente os campos de fornecedor com valor
+ * não-nulo no snapshot E diferente do estado atual (+ lastSyncAt/updatedAt).
+ * Snapshot null (incl. sentinel -1) = "desconhecido / não atualizar".
+ */
+async function applyAlsoStockRow(tx: NodePgDatabase, row: ClaimedRow, context: ApplyContext): Promise<RowEffect> {
+  if (row.product_id === null) {
+    await markRow(tx, row.id, "error", "Produto não encontrado ao aplicar");
+    return "skipped";
+  }
+  if (row.diff_status === "unchanged") {
+    // Defesa em profundidade: o claim exclui-as, mas se alguma chegar aqui
+    // (corrida antiga/nova) consome-se sem NENHUM write.
+    return "skipped";
+  }
+  const [link] = await tx.select().from(productSuppliers)
+    .where(and(eq(productSuppliers.productId, row.product_id), eq(productSuppliers.supplierId, context.supplierId)))
+    .limit(1);
+  if (!link) {
+    // Stock-only nunca cria associações: se o link desapareceu entre o
+    // preview e o apply, a linha é recusada em vez de o recriar.
+    await markRow(tx, row.id, "error", "A associação produto-fornecedor foi removida entretanto — linha não aplicada");
+    return "skipped";
+  }
+
+  // O delta é recomputado contra o estado ATUAL do link (não se confia
+  // cegamente no changedFields do preview: outra importação pode ter
+  // convergido entretanto — nesse caso: zero writes).
+  const patch: {
+    supplierStock?: number;
+    availableNextDate?: string;
+    availableNextQuantity?: number;
+    availabilityTimestamp?: Date;
+  } = {};
+  if (row.supplier_stock !== null && row.supplier_stock !== undefined && row.supplier_stock !== link.supplierStock) {
+    patch.supplierStock = row.supplier_stock;
+  }
+  const snapNextDate = toISODate(row.available_next_date);
+  if (snapNextDate !== null && snapNextDate !== toISODate(link.availableNextDate)) {
+    patch.availableNextDate = snapNextDate;
+  }
+  if (row.available_next_quantity !== null && row.available_next_quantity !== undefined && row.available_next_quantity !== link.availableNextQuantity) {
+    patch.availableNextQuantity = row.available_next_quantity;
+  }
+  const snapEpoch = alsoTimestampEpoch(row.availability_timestamp);
+  if (snapEpoch !== null && snapEpoch !== alsoTimestampEpoch(link.availabilityTimestamp)) {
+    patch.availabilityTimestamp = new Date(snapEpoch);
+  }
+
+  if (Object.keys(patch).length === 0) return "updated";
+  const now = new Date();
+  await tx.update(productSuppliers).set({ ...patch, lastSyncAt: now, updatedAt: now }).where(eq(productSuppliers.id, link.id));
+  return "updated";
+}
+
+/**
  * Apply one claimed row. The claim already flipped `applied`, so every branch
  * here runs exactly once per row for the life of the import.
  */
 async function applyRow(tx: NodePgDatabase, row: ClaimedRow, context: ApplyContext): Promise<RowEffect> {
+  // C.3.4.4: linhas ALSO stock-only (diff_status não-nulo) seguem o ramo
+  // separado — o caminho genérico abaixo (stock físico, movimentos, pricing)
+  // nunca as vê.
+  if (row.diff_status !== null && row.diff_status !== undefined) {
+    return applyAlsoStockRow(tx, row, context);
+  }
   let productId = row.product_id;
   let createdProduct = false;
 
@@ -1139,7 +1358,9 @@ export async function countRows(importId: number): Promise<RowCounts> {
   const [row] = await db.select({
     total: sql<string>`count(*)`,
     applied: sql<string>`count(*) FILTER (WHERE applied)`,
-    pending: sql<string>`count(*) FILTER (WHERE applied = false AND status IN ('ready','new_product'))`,
+    // C.3.4.4: UNCHANGED nunca é claimed — também não conta como pending
+    // (senão a importação nunca fecharia como completed).
+    pending: sql<string>`count(*) FILTER (WHERE applied = false AND status IN ('ready','new_product') AND (diff_status IS NULL OR diff_status <> 'unchanged'))`,
     conflicts: sql<string>`count(*) FILTER (WHERE status = 'conflict')`,
     errors: sql<string>`count(*) FILTER (WHERE status = 'error')`,
     newProducts: sql<string>`count(*) FILTER (WHERE status = 'new_product')`,
@@ -1254,6 +1475,7 @@ export async function applySupplierImport(input: ApplyInput): Promise<ApplyOutco
              WHERE import_id = ${snapshot.id}
                AND applied = false
                AND status IN ('ready','new_product')
+               AND (diff_status IS NULL OR diff_status <> 'unchanged')
              ORDER BY row_number
              LIMIT ${SUPPLIER_IMPORT_BATCH_SIZE}
              FOR UPDATE SKIP LOCKED
@@ -1263,6 +1485,7 @@ export async function applySupplierImport(input: ApplyInput): Promise<ApplyOutco
            FROM picked
           WHERE r.id = picked.id
           RETURNING r.id, r.row_number, r.status, r.product_id, r.cost_price, r.stock,
+                    r.supplier_stock, r.diff_status, r.changed_fields,
                     r.lead_time_days, r.supplier_sku, r.internal_sku, r.ean, r.name,
                     r.manufacturer_part_number, r.manufacturer_name, r.supplier_category_path,
                     r.available_next_date, r.available_next_quantity, r.availability_timestamp
@@ -1348,6 +1571,7 @@ export async function applySupplierImport(input: ApplyInput): Promise<ApplyOutco
           WHERE pending_row.import_id = ${snapshot.id}
             AND pending_row.applied = false
             AND pending_row.status IN ('ready','new_product')
+            AND (pending_row.diff_status IS NULL OR pending_row.diff_status <> 'unchanged')
        )
     RETURNING id
   `));
@@ -1542,6 +1766,9 @@ export async function reopenSupplierImportPreview(importId: number): Promise<Sup
       status: supplierImportRows.status,
       costPrice: supplierImportRows.costPrice,
       stock: supplierImportRows.stock,
+      supplierStock: supplierImportRows.supplierStock,
+      diffStatus: supplierImportRows.diffStatus,
+      changedFields: supplierImportRows.changedFields,
       leadTimeDays: supplierImportRows.leadTimeDays,
       message: supplierImportRows.message,
       currentPrice: supplierImportRows.currentPrice,
@@ -1593,6 +1820,12 @@ export async function reopenSupplierImportPreview(importId: number): Promise<Sup
     costBefore: null,
     stock: r.stock,
     stockBefore: null,
+    // C.3.4.4: o snapshot ALSO é reaberto tal como persistido (stock de
+    // fornecedor + diff); o "antes" não faz parte do snapshot.
+    supplierStock: r.supplierStock,
+    supplierStockBefore: null,
+    diffStatus: (r.diffStatus as SupplierImportPreviewLine["diffStatus"]) ?? null,
+    changedFields: (r.changedFields as string[] | null) ?? null,
     reservedStock: null,
     leadTimeDays: r.leadTimeDays,
     productId: r.productId,

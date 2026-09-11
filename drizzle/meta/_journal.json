@@ -99,6 +99,13 @@
       "when": 1788787713348,
       "tag": "0013_nostalgic_shinko_yamashiro",
       "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1789085759402,
+      "tag": "0014_c344_also_sftp_stock",
+      "breakpoints": true
     }
   ]
 }
