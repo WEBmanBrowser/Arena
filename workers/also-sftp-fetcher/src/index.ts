@@ -61,7 +61,7 @@ export type SftpWorkerResponse =
   | { ok: false; code: SftpErrorCode; message: string };
 
 /** Deadline default por operaÃ§Ã£o (handshake+auth+transferÃªncia â‰¤5 MB). */
-export const SFTP_OP_TIMEOUT_MS = 60_000;
+const SFTP_OP_TIMEOUT_MS = 60_000;
 /** Teto absoluto do deadline pedido pelo chamador. */
 const SFTP_OP_TIMEOUT_MAX_MS = 120_000;
 /** MÃ¡ximo de tentativas (sÃ³ transitÃ³rios de rede sÃ£o repetidos). */

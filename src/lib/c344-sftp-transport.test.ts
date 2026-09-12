@@ -11,6 +11,8 @@
  *    scripted âŠ† SFTP_READONLY_SENT_TYPES; OPEN sempre em modo READ;
  *  - texto do servidor / segredos / paths nunca vazam para erros nem logs.
  */
+import { Buffer } from "node:buffer";
+import { Client } from "ssh2";
 import { describe, expect, it, vi } from "vitest";
 import {
   SftpError,
@@ -40,6 +42,7 @@ import {
   type SftpChannel,
 } from "../../workers/also-sftp-fetcher/src/sftp";
 import { concatBytes, decodeU32, encodeString, encodeU32 } from "../../workers/also-sftp-fetcher/src/ssh";
+import { fingerprintFromHostKey, runSsh2SftpOp } from "../../workers/also-sftp-fetcher/src/ssh2-transport";
 
 const HOST = "ftp.fornecedor.com";
 const FINGERPRINT = `SHA256:${"A".repeat(43)}`;
@@ -484,5 +487,74 @@ describe("C.3.4.4 [D] â€” mensagens seguras", () => {
     const e = new SftpError("SFTP_AUTH_FAILED");
     expect(e.message).toBe("SFTP_AUTH_FAILED");
     expect(e.retryable).toBe(false);
+  });
+});
+
+describe("C.3.4.4 [P0] - ssh2 host-key fingerprint", () => {
+  const fixtures = [
+    {
+      name: "ED25519",
+      blob: "AAAAC3NzaC1lZDI1NTE5AAAAIBuD+6j6+Wk/Evca3c/kUflfQGlI/4s3CiVrHOEVb84l",
+      fingerprint: "SHA256:Z1Dm+tIIm1MhduHOVZczA9XFnCwCoTTYV1nSbjSkWfc",
+    },
+    {
+      name: "RSA",
+      blob: "AAAAB3NzaC1yc2EAAAADAQABAAABgQDjwqEPjRQrPlCp0TAvdavPWoIAVV9av/0YLVnSOJBZYQpw+6J2RG5AuCRfl1BGp6T650NnxlRXebQ8Tt3WdCt4i7OucgPd9I/++2R5bYnwgsNm4mgtIrdoweK76DuWBlOmmzwbPZu97loVoIfz19vQjipy4N+yxalv0ovnl36isMa/pik7wtkeBRuXEcAoOawUHIpX8+9KWrZpqpW29MBTx1iwsV3lvNViiR0GTU0+Ny/PspjmoMYS3sb1NptzrZg4eddDMexDGfctianKRQQuetKixy6wVMLPXkXVJKN/PwDeGnitXRwbbqyQJmxxvOAG/BQgNBij47X/3748w7KOLJZczCQpwlLxdIn27GNLCox9GTmzAV53Q5kn7UCrvA2ovf+b6vecyFVugzgeNzaYvSJosuwhUb2DmQUhdSP8RlF42Ib+hv05cVXkTDmYqNba5ICdSTbDXodxApWTzqyxmfei/hg45QC/45HSmcKtDqeSt9rwX8s/JzzxHjLemqs=",
+      fingerprint: "SHA256:XsEohIe7Dnlnzkeom9THwAMD2pXfuFBf1avf2LbGlTc",
+    },
+    {
+      name: "ECDSA",
+      blob: "AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBG2qLAguQLSE3GxLIBPrUYz2vxqpT4J0uGt7E/rUhvHXhGATJnPwl0+KXXmqRShcnJsAimfA7vgByKTPi2O2OhY=",
+      fingerprint: "SHA256:mHiC+DM4VGW39nlzIGmHEDHDFrQWbqZmPBYqO4eLFr8",
+    },
+  ] as const;
+
+  for (const fixture of fixtures) {
+    it(`matches ssh-keygen SHA256 for ${fixture.name}`, () => {
+      expect(fingerprintFromHostKey(Buffer.from(fixture.blob, "base64"))).toBe(fixture.fingerprint);
+    });
+  }
+
+  it("returns null for malformed or truncated host-key blobs", () => {
+    expect(fingerprintFromHostKey(Buffer.alloc(3))).toBeNull();
+    expect(fingerprintFromHostKey(Buffer.from([0, 0, 0, 11, 0x73, 0x73, 0x68, 0x2d, 0x65]))).toBeNull();
+  });
+});
+
+describe("C.3.4.4 [P0] - ssh2 cipher allowlist", () => {
+  it("passes exactly AES-CTR ciphers to Client.connect", async () => {
+    let captured: Parameters<Client["connect"]>[0] | undefined;
+
+    const connectSpy = vi.spyOn(Client.prototype, "connect").mockImplementation(function (config) {
+      captured = config;
+      throw new Error("P0_CONNECT_CAPTURE");
+    });
+    const endSpy = vi.spyOn(Client.prototype, "end").mockImplementation(function (this: Client) {
+      return this;
+    });
+
+    try {
+      await expect(
+        runSsh2SftpOp(
+          {
+            host: "ftp.fornecedor.com",
+            port: 22,
+            username: "test-user",
+            remotePath: "/stock.txt",
+            secretName: "TEST_SECRET",
+            hostKeyFingerprint: `SHA256:${"A".repeat(43)}`,
+          },
+          "stat",
+          "test-password",
+          { maxBytes: 5 * 1024 * 1024, timeoutMs: 1_000 }
+        )
+      ).rejects.toBeInstanceOf(SftpError);
+
+      expect(captured).toBeDefined();
+      expect(captured?.algorithms?.cipher).toEqual(["aes128-ctr", "aes256-ctr"]);
+    } finally {
+      connectSpy.mockRestore();
+      endSpy.mockRestore();
+    }
   });
 });

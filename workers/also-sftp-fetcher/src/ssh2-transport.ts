@@ -13,17 +13,17 @@ function normalizePin(pin: string): string {
   return pin.replace(/=+$/, "");
 }
 
-function fingerprintFromHostKey(key: Buffer): string | null {
+export function fingerprintFromHostKey(key: Buffer): string | null {
   try {
     if (!Buffer.isBuffer(key) || key.length <= 8) return null;
 
-    const typeLen = key.readUInt32BE(4);
-    if (typeLen <= 0 || 8 + typeLen > key.length) return null;
+    const typeLen = key.readUInt32BE(0);
+    if (typeLen <= 0 || 4 + typeLen > key.length) return null;
 
     return (
       "SHA256:" +
       createHash("sha256")
-        .update(key.subarray(4))
+        .update(key)
         .digest("base64")
         .replace(/=+$/, "")
     );
@@ -244,6 +244,7 @@ export async function runSsh2SftpOp(
         username: cfg.username,
         password,
         readyTimeout: Math.min(opts.timeoutMs, 15_000),
+        algorithms: { cipher: ["aes128-ctr", "aes256-ctr"] },
         hostVerifier: (key: Buffer) => {
           const actual = fingerprintFromHostKey(key);
           const expected = normalizePin(cfg.hostKeyFingerprint);

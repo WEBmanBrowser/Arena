@@ -626,7 +626,7 @@ export async function previewSupplierImport(input: PreviewInput): Promise<Suppli
           field: "supplierSku",
           value: row.supplierSku,
           code: "SUPPLIER_SKU_IS_FOREIGN_INTERNAL_SKU",
-          message: `O cÃ³digo do fornecedor "${row.supplierSku}" já é o SKU interno do produto #${skuClash}; não é usado para o identificar — será criado um produto novo com SKU interno próprio`,
+          message: `O código do fornecedor "${row.supplierSku}" já é o SKU interno do produto #${skuClash}; não é usado para o identificar — será criado um produto novo com SKU interno próprio`,
           severity: "warning",
         }
       : null;
