@@ -36,8 +36,8 @@ import { CSV_MAX_SIZE } from "@/lib/csv";
 
 // ─── Tipos ────────────────────────────────────────────────
 
-/** Formas de obtenção suportadas. `api` é aditivo futuro (adapter). */
-export const SOURCE_KINDS = ["upload", "url"] as const;
+/** Formas de obtenção suportadas. `sftp` (C.3.4.4) via worker also-sftp-fetcher. */
+export const SOURCE_KINDS = ["upload", "url", "sftp"] as const;
 export type SourceKind = (typeof SOURCE_KINDS)[number];
 
 /**

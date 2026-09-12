@@ -43,7 +43,7 @@ describe("C.3.1 — Preferred Supplier Policy (reproduz bug antes da correção)
     }).returning();
 
     // Criar fornecedor para a importação.
-    const [supplier] = await db.insert(suppliers).values({ id: 10, name: `${TAG}-Fornecimento-A`, isActive: true }).returning();
+    const [supplier] = await db.insert(suppliers).values({ name: `${TAG}-Fornecimento-A`, isActive: true }).returning();
 
     // Criar associação existente com isPreferred=false.
     await db.insert(productSuppliers).values({

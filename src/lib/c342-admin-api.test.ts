@@ -324,6 +324,189 @@ describe("C.3.4.2 — POST /sync (ligação à rota + serviço único)", () => {
   });
 });
 
+// ─── C.3.4.4: rotas SFTP + semântica PATCH do PUT ─────────
+
+describe("C.3.4.4 — API de fontes SFTP (coleção + detalhe)", () => {
+  const FINGERPRINT = `SHA256:${"D".repeat(43)}`;
+  const sftpBody = (over: Record<string, unknown> = {}) => ({
+    supplierId,
+    sourceType: "sftp",
+    name: `${TAG}-ALSO stock`,
+    sftpHost: "ftp.fornecedor.com",
+    sftpPort: 2222,
+    sftpRemotePath: "/out/stock.txt",
+    username: "also_user",
+    secretReference: "ALSO_SFTP_PASSWORD",
+    sftpHostKeyFingerprint: FINGERPRINT,
+    format: "also_stock",
+    ...over,
+  });
+
+  it("POST sftp: cria desativada + preview_only; nunca aceita password", async () => {
+    getCurrentUserMock.mockResolvedValue(user("manager"));
+    const res = await collectionPOST(
+      req("/api/admin/supplier-sources", {
+        method: "POST",
+        body: { ...sftpBody(), password: "PASSWORD-NUNCA-ACEITE", enabled: true },
+      })
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.source.sourceType).toBe("sftp");
+    expect(body.source.enabled).toBe(false);
+    expect(body.source.applyPolicy).toBe("preview_only");
+    expect(body.source.sftpHost).toBe("ftp.fornecedor.com");
+    expect(body.source.sftpPort).toBe(2222);
+    expect(body.source.secretReference).toBe("ALSO_SFTP_PASSWORD");
+    expect(JSON.stringify(body)).not.toContain("PASSWORD-NUNCA-ACEITE");
+    const [row] = await db.select().from(supplierSources).where(eq(supplierSources.id, body.source.id));
+    expect(row.url).toBeNull();
+    expect(row.authType).toBe("basic");
+    expect(JSON.stringify(row)).not.toContain("PASSWORD-NUNCA-ACEITE");
+  });
+
+  it("POST sftp: config inválida → 400 (host, porta, path, fingerprint, secret)", async () => {
+    getCurrentUserMock.mockResolvedValue(user("manager"));
+    for (const over of [
+      { sftpHost: "localhost" },
+      { sftpHost: "1.2.3.4" },
+      { sftpPort: 0 },
+      { sftpPort: 70000 },
+      { sftpRemotePath: "relativo/stock.txt" },
+      { sftpHostKeyFingerprint: "SHA256:curto" },
+      { secretReference: "minusculas" },
+      { username: "" },
+      { format: "also_pricelist", sftpHostKeyFingerprint: "" }, // formato válido não salva pin mau
+    ]) {
+      const res = await collectionPOST(req("/api/admin/supplier-sources", { method: "POST", body: sftpBody(over) }));
+      expect(res.status, JSON.stringify(over)).toBe(400);
+    }
+  });
+
+  it("PUT sftp parcial (só nome) PRESERVA porta/formato/auth (sem reset de defaults)", async () => {
+    getCurrentUserMock.mockResolvedValue(user("manager"));
+    const created = await (
+      await collectionPOST(req("/api/admin/supplier-sources", { method: "POST", body: sftpBody() }))
+    ).json();
+    const sourceId = created.source.id as number;
+
+    const res = await detailPUT(
+      req(`/api/admin/supplier-sources/${sourceId}`, { method: "PUT", body: { name: `${TAG}-ALSO renomeada` } }),
+      asId(sourceId)
+    );
+    expect(res.status).toBe(200);
+    const [row] = await db.select().from(supplierSources).where(eq(supplierSources.id, sourceId));
+    expect(row.name).toBe(`${TAG}-ALSO renomeada`);
+    expect(row.sftpPort).toBe(2222); // NÃO foi reposto a 22
+    expect(row.format).toBe("also_stock"); // NÃO foi reposto a auto
+    expect(row.username).toBe("also_user");
+    expect(row.secretReference).toBe("ALSO_SFTP_PASSWORD");
+    expect(row.sftpHostKeyFingerprint).toBe(FINGERPRINT);
+  });
+
+  it("PUT sftp: edição válida grava; fingerprint mau → 400 sem gravar; tipo é imutável", async () => {
+    getCurrentUserMock.mockResolvedValue(user("manager"));
+    const created = await (
+      await collectionPOST(req("/api/admin/supplier-sources", { method: "POST", body: sftpBody() }))
+    ).json();
+    const sourceId = created.source.id as number;
+
+    const ok = await detailPUT(
+      req(`/api/admin/supplier-sources/${sourceId}`, {
+        method: "PUT",
+        body: { sftpRemotePath: "/out/stock2.txt", format: "auto", sourceType: "url" },
+      }),
+      asId(sourceId)
+    );
+    expect(ok.status).toBe(200);
+    const okBody = await ok.json();
+    expect(okBody.source.sftpRemotePath).toBe("/out/stock2.txt");
+    expect(okBody.source.format).toBe("auto");
+    expect(okBody.source.sourceType).toBe("sftp"); // sourceType no corpo é ignorado
+
+    const bad = await detailPUT(
+      req(`/api/admin/supplier-sources/${sourceId}`, { method: "PUT", body: { sftpHostKeyFingerprint: "invalido" } }),
+      asId(sourceId)
+    );
+    expect(bad.status).toBe(400);
+    const [row] = await db.select().from(supplierSources).where(eq(supplierSources.id, sourceId));
+    expect(row.sftpHostKeyFingerprint).toBe(FINGERPRINT);
+    expect(row.sftpRemotePath).toBe("/out/stock2.txt");
+  });
+
+  it("PUT url parcial (só nome) PRESERVA formato/auth/secret (contrato PATCH)", async () => {
+    getCurrentUserMock.mockResolvedValue(user("manager"));
+    const created = await (
+      await collectionPOST(
+        req("/api/admin/supplier-sources", {
+          method: "POST",
+          body: {
+            supplierId,
+            name: `${TAG}-Com auth`,
+            url: URL_OK,
+            format: "csv",
+            authType: "basic",
+            username: "bot",
+            secretReference: "SUPPLIER_SRC_9_TOKEN",
+          },
+        })
+      )
+    ).json();
+    const sourceId = created.source.id as number;
+
+    const res = await detailPUT(
+      req(`/api/admin/supplier-sources/${sourceId}`, { method: "PUT", body: { name: `${TAG}-Com auth v2` } }),
+      asId(sourceId)
+    );
+    expect(res.status).toBe(200);
+    const [row] = await db.select().from(supplierSources).where(eq(supplierSources.id, sourceId));
+    expect(row.name).toBe(`${TAG}-Com auth v2`);
+    expect(row.format).toBe("csv"); // NÃO foi reposto a auto
+    expect(row.authType).toBe("basic"); // NÃO foi reposto a none
+    expect(row.username).toBe("bot");
+    expect(row.secretReference).toBe("SUPPLIER_SRC_9_TOKEN");
+  });
+
+  it("PATCH enable numa fonte SFTP válida ativa; inválida recusa com código SFTP", async () => {
+    getCurrentUserMock.mockResolvedValue(user("manager"));
+    const created = await (
+      await collectionPOST(req("/api/admin/supplier-sources", { method: "POST", body: sftpBody() }))
+    ).json();
+    const sourceId = created.source.id as number;
+    const ok = await detailPATCH(
+      req(`/api/admin/supplier-sources/${sourceId}`, { method: "PATCH", body: { enabled: true } }),
+      asId(sourceId)
+    );
+    expect(ok.status).toBe(200);
+    expect((await ok.json()).source.enabled).toBe(true);
+
+    // Linha inválida injetada na BD (pin mau) não é ativável.
+    const [raw] = await db
+      .insert(supplierSources)
+      .values({
+        supplierId,
+        name: `${TAG}-SftpMau`,
+        sourceType: "sftp",
+        format: "also_stock",
+        authType: "basic",
+        username: "u",
+        secretReference: "ALSO_SFTP_PASSWORD",
+        sftpHost: "ftp.fornecedor.com",
+        sftpPort: 22,
+        sftpRemotePath: "/out/stock.txt",
+        sftpHostKeyFingerprint: "SHA256:mau",
+        enabled: false,
+      })
+      .returning();
+    const denied = await detailPATCH(
+      req(`/api/admin/supplier-sources/${raw.id}`, { method: "PATCH", body: { enabled: true } }),
+      asId(raw.id)
+    );
+    expect(denied.status).toBe(400);
+    expect((await denied.json()).error).toBe("SFTP_CONFIG_INVALID");
+  });
+});
+
 // ─── Detalhe: histórico mínimo + estado ──────────────────
 
 describe("C.3.4.2 — GET detalhe expõe último estado/histórico", () => {

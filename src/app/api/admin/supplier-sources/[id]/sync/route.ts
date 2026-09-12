@@ -1,5 +1,5 @@
 /**
- * C.3.4.2 — POST "Sincronizar agora" para uma fonte HTTPS.
+ * C.3.4.2 — POST "Sincronizar agora" para uma fonte (HTTPS ou SFTP C.3.4.4).
  *
  * Autorização idêntica ao resto de suppliers/import (mutação = manager +
  * CSRF) e rate limit com o padrão administrativo (fixed-window Postgres,
@@ -61,6 +61,8 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         missingCount: outcome.missingCount,
         etag: outcome.etag,
         lastModified: outcome.lastModified,
+        remoteSize: outcome.remoteSize,
+        remoteMtime: outcome.remoteMtime,
         fileHash: outcome.fileHash,
         // A resposta do preview é deliberadamente resumida (e SEM token): a
         // revisão reabre o snapshot persistido no painel existente via

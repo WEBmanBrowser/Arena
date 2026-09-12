@@ -176,7 +176,9 @@ describe("C.3.4.3.1 — parseAlsoStock (com header, resolução por nome)", () =
     expect(parsed.headers).toEqual(baseHeader);
     expect(parsed.delimiter).toBe("\t");
     expect(parsed.rows[0].supplierSku).toBe("PID123");
-    expect(parsed.rows[0].stock).toBe(10);
+    // C.3.4.4: AvailableQuantity é stock do FORNECEDOR — o físico fica null.
+    expect(parsed.rows[0].supplierStock).toBe(10);
+    expect(parsed.rows[0].stock).toBeNull();
     expect(parsed.rows[0].alsoAvailableNextDate).toBe("2026-10-01");
     expect(parsed.rows[0].alsoAvailableNextQuantity).toBe(5);
     expect(parsed.rows[0].alsoAvailabilityTimestamp).toBe("2026-09-07 14:30");
@@ -189,7 +191,8 @@ describe("C.3.4.3.1 — parseAlsoStock (com header, resolução por nome)", () =
     const txt = `${stockHeader(shuffledHeader)}\n${shuffledRow.join("\t")}`;
     const parsed = parseAlsoStock(txt);
     expect(parsed.rows[0].supplierSku).toBe("PID123");
-    expect(parsed.rows[0].stock).toBe(10);
+    expect(parsed.rows[0].supplierStock).toBe(10);
+    expect(parsed.rows[0].stock).toBeNull();
     expect(parsed.rows[0].alsoAvailableNextDate).toBe("2026-10-01");
     expect(parsed.rows[0].alsoAvailableNextQuantity).toBe(5);
     expect(parsed.rows[0].alsoAvailabilityTimestamp).toBe("2026-09-07 14:30");
@@ -199,7 +202,8 @@ describe("C.3.4.3.1 — parseAlsoStock (com header, resolução por nome)", () =
     const txt = `${stockHeader(["productid", "availablequantity", "availablenextdate", "availablenextquantity"])}\nPID1\t7\t2026-12-01\t-1`;
     const parsed = parseAlsoStock(txt);
     expect(parsed.rows[0].supplierSku).toBe("PID1");
-    expect(parsed.rows[0].stock).toBe(7);
+    expect(parsed.rows[0].supplierStock).toBe(7);
+    expect(parsed.rows[0].stock).toBeNull();
   });
 
   it("BOM removido no header", () => {
@@ -240,6 +244,8 @@ describe("C.3.4.3.1 — parseAlsoStock (com header, resolução por nome)", () =
     const txt = `${stockHeader(["ProductID", "AvailableQuantity"])}\nPID1\t-1`;
     const parsed = parseAlsoStock(txt);
     expect(parsed.rows[0].stock).toBeNull();
+    // C.3.4.4: o -1 dissolve-se em supplierStock=null (nunca -1, nunca físico).
+    expect(parsed.rows[0].supplierStock).toBeNull();
     expect(parsed.rows[0].issues.some((i) => i.code === "AVAILABLE_NEXT_QUANTITY_UNKNOWN")).toBe(true);
   });
 
@@ -271,6 +277,7 @@ describe("C.3.4.3.1 — parseAlsoStock (com header, resolução por nome)", () =
     const txt = `${stockHeader(["ProductID", "AvailableQuantity"])}\nPID1\tabc`;
     const parsed = parseAlsoStock(txt);
     expect(parsed.rows[0].stock).toBeNull();
+    expect(parsed.rows[0].supplierStock).toBeNull();
     expect(parsed.rows[0].issues.some((i) => i.code === "INVALID_STOCK")).toBe(true);
   });
 

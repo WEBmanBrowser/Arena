@@ -17,6 +17,10 @@ import { assertSeedAllowed } from "@/db/seed";
 
 const root = path.resolve(__dirname, "..", "..");
 const SEED = path.join("src", "db", "seed.ts");
+const NODE = process.execPath;
+const TSX_PKG = require.resolve("tsx/package.json");
+const TSX_CLI = path.join(path.dirname(TSX_PKG), "dist", "cli.mjs");
+const DRIZZLE_CLI = path.join(root, "node_modules", "drizzle-kit", "bin.cjs");
 const DB_NAME = `b52_seed_guard_${Date.now()}`;
 
 const baseUrl = process.env.DATABASE_URL ?? "";
@@ -41,7 +45,7 @@ async function countsOn(url: string) {
 }
 
 function runSeed(nodeEnv: string) {
-  return spawnSync("npx", ["tsx", SEED], {
+  return spawnSync(NODE, [TSX_CLI, SEED], {
     cwd: root,
     encoding: "utf8",
     env: { ...process.env, NODE_ENV: nodeEnv as NodeJS.ProcessEnv["NODE_ENV"], DATABASE_URL: freshUrl },
@@ -51,14 +55,14 @@ function runSeed(nodeEnv: string) {
 
 beforeAll(async () => {
   await db.execute(sql.raw(`CREATE DATABASE ${DB_NAME}`));
-  const migrate = spawnSync("npx", ["drizzle-kit", "migrate", "--config=drizzle.config.ts"], {
+  const migrate = spawnSync(NODE, [DRIZZLE_CLI, "migrate", "--config=drizzle.config.ts"], {
     cwd: root,
     encoding: "utf8",
     env: { ...process.env, DATABASE_URL: freshUrl },
     timeout: 180_000,
   });
   if (migrate.status !== 0) {
-    throw new Error(`migration of fresh DB failed: ${migrate.stdout}\n${migrate.stderr}`);
+    throw new Error(`migration of fresh DB failed: status=${migrate.status} signal=${migrate.signal} error=${migrate.error?.message ?? "none"}\nstdout=${migrate.stdout ?? ""}\nstderr=${migrate.stderr ?? ""}`);
   }
 }, 240_000);
 

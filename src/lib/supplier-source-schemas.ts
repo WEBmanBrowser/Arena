@@ -25,6 +25,16 @@ import {
   SOURCE_SECRET_HEADER_KEY,
   guardSupplierSourceUrl,
 } from "@/lib/supplier-import/source";
+import {
+  SftpError,
+  guardSftpFingerprint,
+  guardSftpHost,
+  guardSftpPath,
+  guardSftpPort,
+  guardSftpSecretName,
+  guardSftpUsername,
+} from "@/lib/supplier-import/sftp";
+import { supplierImportErrorMessage } from "@/lib/supplier-import/error-messages";
 
 /** Nome de env: exatamente o que `resolveSourceSecret` aceitará ler. */
 export const SECRET_REFERENCE_RE = /^[A-Z][A-Z0-9_]{0,254}$/;
@@ -58,8 +68,14 @@ const headersConfigSchema = z
     }
   });
 
-/** Campos partilhados por create/update (update aplica .partial() em cima). */
-const sourceFields = {
+/**
+ * Campos partilhados por create/update — SEM defaults aqui: o update aplica
+ * .partial() em cima e o zod aplica .default() mesmo a chaves omitidas, o
+ * que transformaria um PUT parcial (ex.: só `name`) num reset silencioso de
+ * `format`/`authType` (violaria a semântica PATCH documentada abaixo). Os
+ * defaults vivem SÓ no schema de create.
+ */
+const sourceFieldsBase = {
   supplierId: z.coerce.number().int().positive(),
   name: z.string().trim().min(1).max(100),
   /**
@@ -77,8 +93,8 @@ const sourceFields = {
         ctx.addIssue({ code: "custom", message: guard.message });
       }
     }),
-  format: z.enum(["auto", "csv", "xlsx"]).default("auto"),
-  authType: z.enum(SOURCE_AUTH_TYPES).default("none"),
+  format: z.enum(["auto", "csv", "xlsx"]),
+  authType: z.enum(SOURCE_AUTH_TYPES),
   /** Não-secreto: só o username do Basic Auth. A password NUNCA é aceite aqui. */
   username: z.string().trim().min(1).max(255).nullish(),
   /** APENAS a referência (nome de env). O valor vive no runtime, nunca na BD. */
@@ -117,7 +133,13 @@ function requireAuth(config: {
   }
 }
 
-export const supplierSourceCreateSchema = z.object(sourceFields).superRefine(requireAuth);
+export const supplierSourceCreateSchema = z
+  .object({
+    ...sourceFieldsBase,
+    format: sourceFieldsBase.format.default("auto"),
+    authType: sourceFieldsBase.authType.default("none"),
+  })
+  .superRefine(requireAuth);
 
 /**
  * Update: só os campos enviados mudam (PATCH-semântica); `supplierId` é
@@ -128,9 +150,69 @@ export const supplierSourceCreateSchema = z.object(sourceFields).superRefine(req
  *     verificadas sobre a combinação real (ex.: trocar authType para "bearer"
  *     numa linha sem secret_reference falha aqui, não em runtime).
  */
-export const supplierSourceUpdateSchema = z.object(sourceFields).omit({ supplierId: true }).partial();
+export const supplierSourceUpdateSchema = z.object(sourceFieldsBase).omit({ supplierId: true }).partial();
 
 export const supplierSourceEnabledSchema = z.object({ enabled: z.boolean() });
 
 export type SupplierSourceCreateInput = z.infer<typeof supplierSourceCreateSchema>;
 export type SupplierSourceUpdateInput = z.infer<typeof supplierSourceUpdateSchema>;
+
+// ─── C.3.4.4: fontes SFTP ──────────────────────────────────
+//
+// As MESMAS guardas puras partilhadas com o worker (a API falha rápido com
+// 400; o worker revalida tudo e nunca confia no chamador). Password NUNCA é
+// aceite: só `secretReference` (o NOME do secret no runtime do fetcher). O
+// pin da host key (`SHA256:…`) é obrigatório (TOFU proibido).
+//
+// `sourceType` NÃO é campo editável: a rota escolhe a schema pelo tipo da
+// linha existente (create) / pelo tipo pedido (a coleção distingue pelo corpo).
+
+/** Corre uma guarda pura (lança SftpError) dentro de superRefine. */
+function sftpGuarded(guard: (value: never) => unknown) {
+  return (value: unknown, ctx: z.RefinementCtx): void => {
+    try {
+      (guard as (v: unknown) => unknown)(value);
+    } catch (e) {
+      ctx.addIssue({
+        code: "custom",
+        message: e instanceof SftpError ? supplierImportErrorMessage(e.code) : "Configuração SFTP inválida",
+      });
+    }
+  };
+}
+
+/**
+ * Base SEM defaults (mesma razão do bloco URL acima: o update é .partial()
+ * e o zod aplicaria os defaults a chaves omitidas, fazendo reset silencioso
+ * de `sftpPort`/`format` num PUT parcial). O create repõe os defaults.
+ */
+const sftpFieldsBase = {
+  supplierId: z.coerce.number().int().positive(),
+  name: z.string().trim().min(1).max(100),
+  sftpHost: z.string().trim().min(1).max(255).superRefine(sftpGuarded(guardSftpHost)),
+  sftpPort: z.coerce.number().int().min(1).max(65535).superRefine(sftpGuarded(guardSftpPort)),
+  sftpRemotePath: z.string().trim().min(1).max(1000).superRefine(sftpGuarded(guardSftpPath)),
+  /** Não-secreto: o username SSH. A password NUNCA é aceite aqui. */
+  username: z.string().trim().min(1).max(255).superRefine(sftpGuarded(guardSftpUsername)),
+  /** APENAS a referência (nome de env no runtime do fetcher). */
+  secretReference: z
+    .string()
+    .regex(SECRET_REFERENCE_RE, "Use um nome de variável de ambiente (ex.: ALSO_SFTP_PASSWORD)")
+    .superRefine(sftpGuarded(guardSftpSecretName)),
+  /** Pin `SHA256:…` da host key — obrigatório, sem TOFU. */
+  sftpHostKeyFingerprint: z.string().trim().min(1).max(200).superRefine(sftpGuarded(guardSftpFingerprint)),
+  format: z.enum(["auto", "csv", "xlsx", "also_stock", "also_pricelist"]),
+  /** NULL = perfil normal do fornecedor (C.3.2) — o default da UI. */
+  profileId: z.coerce.number().int().positive().nullish(),
+};
+
+export const sftpSourceCreateSchema = z.object({
+  ...sftpFieldsBase,
+  sftpPort: sftpFieldsBase.sftpPort.default(22),
+  format: sftpFieldsBase.format.default("auto"),
+});
+
+export const sftpSourceUpdateSchema = z.object(sftpFieldsBase).omit({ supplierId: true }).partial();
+
+export type SftpSourceCreateInput = z.infer<typeof sftpSourceCreateSchema>;
+export type SftpSourceUpdateInput = z.infer<typeof sftpSourceUpdateSchema>;

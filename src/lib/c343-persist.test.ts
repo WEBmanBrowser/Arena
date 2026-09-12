@@ -168,7 +168,7 @@ describe("C: apply pricelist persiste MPN/path em product_suppliers e lastSyncAt
 });
 
 describe("D: apply stock persiste dates", () => {
-  it("stock apply atualiza stock + nextDate/qty/timestamp+lastSyncAt mantendo stock-only invariants", async () => {
+  it("stock apply atualiza supplier_stock + nextDate/qty/timestamp+lastSyncAt mantendo stock-only invariants", async () => {
     const sku = `${TAG}-STOCK-D`;
     const [product] = await db.insert(products).values({
       name: "Prod Stock D", slug: `${sku.toLowerCase()}-${Date.now()}`, sku, price: "100.00", costPrice: "60.00", vatRate: "23.00", priceMode: "auto", stock: 5, ean: "4006381333931",
@@ -181,11 +181,13 @@ describe("D: apply stock persiste dates", () => {
     expect(beforeLink.costPrice).toBe("60.00");
     await applySupplierImport({ importId: preview.importId, previewToken: preview.previewToken, userId: MANAGER.id });
     const [afterProd] = await db.select().from(products).where(eq(products.id, product.id)).limit(1);
-    expect(afterProd.stock).toBe(22);
+    // C.3.4.4: o físico NÃO é tocado pelo sync ALSO (era 5, fica 5).
+    expect(afterProd.stock).toBe(5);
     expect(afterProd.price).toBe("100.00"); // não reprica
     expect(afterProd.costPrice).toBe("60.00");
     expect(afterProd.sku).toBe(sku);
     const [afterLink] = await db.select().from(productSuppliers).where(and(eq(productSuppliers.productId, product.id), eq(productSuppliers.supplierId, supplierId))).limit(1);
+    expect(afterLink.supplierStock).toBe(22);
     expect(String(afterLink.availableNextDate).slice(0,10)).toBe("2026-11-01");
     expect(afterLink.availableNextQuantity).toBe(8);
     expect(afterLink.availabilityTimestamp).not.toBeNull();
@@ -244,10 +246,14 @@ describe("F: data inválida → warning+null", () => {
     const [snap] = await db.select().from(supplierImportRows).where(eq(supplierImportRows.importId, preview.importId)).limit(1);
     expect(snap.availableNextDate).toBeNull();
     expect(snap.availabilityTimestamp).toBeNull();
-    // apply não quebra, stock ainda atualiza?
+    // apply não quebra: o supplier_stock atualiza, o físico fica intacto.
     await applySupplierImport({ importId: preview.importId, previewToken: preview.previewToken, userId: MANAGER.id });
     const [after] = await db.select().from(products).where(eq(products.id, product.id)).limit(1);
-    expect(after.stock).toBe(5);
+    expect(after.stock).toBe(1);
+    const [afterLink] = await db.select().from(productSuppliers).where(and(eq(productSuppliers.productId, product.id), eq(productSuppliers.supplierId, supplierId))).limit(1);
+    expect(afterLink.supplierStock).toBe(5);
+    expect(afterLink.availableNextDate).toBeNull();
+    expect(afterLink.availabilityTimestamp).toBeNull();
   });
 });
 

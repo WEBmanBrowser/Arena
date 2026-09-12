@@ -1,36 +1,36 @@
 /**
- * C.3.1 — Supplier import engine.
+ * C.3.1 â€” Supplier import engine.
  *
  * Official pipeline (C.3.2 will hang XML/feed sources off the same
  * NormalizedSupplierRow, so there must be exactly one of these):
  *
- *   CSV → NormalizedSupplierRow → matching → preview persistido → apply em batches
+ *   CSV â†’ NormalizedSupplierRow â†’ matching â†’ preview persistido â†’ apply em batches
  *
- * ── Why the preview is persisted ──
+ * â”€â”€ Why the preview is persisted â”€â”€
  * Preview writes supplier_imports + supplier_import_rows and returns a signed
  * token. Apply reads the SNAPSHOT BACK FROM THE DATABASE: cost, stock and price
  * are never accepted from the browser again. Truncating the preview response
  * therefore never truncates the work.
  *
- * ── Why apply is idempotent ──
+ * â”€â”€ Why apply is idempotent â”€â”€
  * Every batch runs in ONE transaction that (a) claims pending rows with an
- * atomic `UPDATE … WHERE applied = false … RETURNING` and (b) performs all the
- * effects of those rows. A committed line can never fire twice — no second
- * product, no second cost write, no second stock movement — because a re-run
+ * atomic `UPDATE â€¦ WHERE applied = false â€¦ RETURNING` and (b) performs all the
+ * effects of those rows. A committed line can never fire twice â€” no second
+ * product, no second cost write, no second stock movement â€” because a re-run
  * finds nothing to claim. A crash rolls the claim back together with the
  * effects, so the rows become pending again and resume continues where it
  * stopped.
  *
- * ── Liveness ──
+ * â”€â”€ Liveness â”€â”€
  * `heartbeat_at` (never started_at) decides abandonment, through the single
  * IMPORT_HEARTBEAT_TTL_MS constant: refreshed on claim and after every
  * committed batch. Reclaim is a conditional UPDATE, so with two workers exactly
  * one wins and a fresh heartbeat cannot be stolen.
  *
- * ── Price ownership (absolute) ──
+ * â”€â”€ Price ownership (absolute) â”€â”€
  * A supplier list never writes products.price directly. The only writer is the
  * C.1/C.2 engine, reached through syncProductCost / recalculateProductPrice,
- * which refuse manual products themselves — so the protection lives in one
+ * which refuse manual products themselves â€” so the protection lives in one
  * place and formulas are never duplicated here.
  */
 import { and, asc, desc, eq, inArray, or, sql } from "drizzle-orm";
@@ -45,6 +45,7 @@ import {
   supplierImportProfiles,
 } from "@/db/schema";
 import { syncProductCost } from "@/lib/services/product-supplier-service";
+import { supplierImportApplyCheckpoint } from "@/lib/supplier-import/apply-checkpoint";
 import { computeAutomaticPrice, loadPricingContext } from "@/lib/services/pricing-engine-service";
 import { createAuditLog } from "@/lib/audit";
 import { slugify } from "@/lib/utils";
@@ -72,7 +73,7 @@ import {
   type SourcePayload,
 } from "@/lib/supplier-import/source";
 import { type SupplierFileFormat } from "@/lib/supplier-import/file";
-// C.3.3 (etapa 1) — o serviço já não chama o parser CSV diretamente: passa pelo
+// C.3.3 (etapa 1) â€” o serviÃ§o jÃ¡ nÃ£o chama o parser CSV diretamente: passa pelo
 // dispatcher de formatos e pelo resolvedor puro de mapping/perfil (C.3.2).
 import {
   inferSupplierImportFormat,
@@ -116,7 +117,7 @@ function chunk<T>(items: T[], size: number): T[][] {
   return out;
 }
 
-/** Postgres-side staleness test — the browser never computes this. */
+/** Postgres-side staleness test â€” the browser never computes this. */
 function staleHeartbeatCondition() {
   return sql`(
     ${supplierImports.heartbeatAt} IS NULL
@@ -124,7 +125,7 @@ function staleHeartbeatCondition() {
   )`;
 }
 
-// ─── Matching index ──────────────────────────────────────
+// â”€â”€â”€ Matching index â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 interface IndexSeed {
   productId: number;
@@ -136,7 +137,7 @@ interface IndexSeed {
 /**
  * Load only the catalogue keys this file actually contains: a 10 000-line
  * supplier list must not cost 10 000 queries, nor a full catalogue scan. Level 1
- * is filtered by supplier on purpose — a supplier's own SKU only means
+ * is filtered by supplier on purpose â€” a supplier's own SKU only means
  * something inside that supplier.
  */
 async function buildIndexForRows(rows: NormalizedSupplierRow[], supplierId: number): Promise<ProductMatchIndex> {
@@ -195,7 +196,7 @@ async function findInternalSkuOwners(supplierSkus: (string | null)[]): Promise<M
   return owners;
 }
 
-// ─── Preview types ───────────────────────────────────────
+// â”€â”€â”€ Preview types â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export interface SupplierImportPreviewLine {
   rowNumber: number;
@@ -212,6 +213,19 @@ export interface SupplierImportPreviewLine {
   costBefore: string | null;
   stock: number | null;
   stockBefore: number | null;
+  /**
+   * C.3.4.4 â€” stock do FORNECEDOR (sÃ³ linhas ALSO stock-only; null no resto).
+   * `stock` NUNCA transporta stock ALSO: products.stock Ã© o stock fÃ­sico MDTech.
+   */
+  supplierStock?: number | null;
+  supplierStockBefore?: number | null;
+  /**
+   * C.3.4.4 â€” diff incremental persistido (sÃ³ ALSO stock-only; null no resto).
+   * new/changed/unchanged/error; changedFields lista os campos de fornecedor
+   * efetivamente diferentes (auditoria do preview).
+   */
+  diffStatus?: "new" | "changed" | "unchanged" | "error" | null;
+  changedFields?: string[] | null;
   reservedStock: number | null;
   leadTimeDays: number | null;
   productId: number | null;
@@ -248,19 +262,19 @@ export interface SupplierImportPreview {
   supplierId: number;
   supplierName: string;
   fileName: string;
-  /** C.3.4.1 — fonte configurada que produziu o snapshot (NULL no upload manual). */
+  /** C.3.4.1 â€” fonte configurada que produziu o snapshot (NULL no upload manual). */
   sourceId: number | null;
   /** Snapshot do nome da fonte no momento do preview (sobrevive a rename). */
   sourceLabel: string | null;
   fileHash: string;
   fileSizeBytes: number;
   /**
-   * C.3.4.3.1 — formato EFETIVO do parser que produziu este preview
-   * (also_pricelist/also_stock/csv/xlsx). É o que a UI usa para mostrar o
+   * C.3.4.3.1 â€” formato EFETIVO do parser que produziu este preview
+   * (also_pricelist/also_stock/csv/xlsx). Ã‰ o que a UI usa para mostrar o
    * mecanismo real e NUNCA induzir o mapeamento C.3.2 num ficheiro ALSO.
    */
   format: SupplierFileFormat;
-  /** CSV: separador detetado. XLSX (C.3.3 etapa 2): null — não se aplica. */
+  /** CSV: separador detetado. XLSX (C.3.3 etapa 2): null â€” nÃ£o se aplica. */
   delimiter: string | null;
   headers: string[];
   mapping: Record<string, string>;
@@ -277,7 +291,7 @@ export interface SupplierImportPreview {
   profileName?: string;
 }
 
-// ─── Missing products (detection only) ───────────────────
+// â”€â”€â”€ Missing products (detection only) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /**
  * Compare ONLY with the last COMPLETED import of the SAME supplier, keyed on
@@ -303,7 +317,7 @@ async function detectMissingProducts(
     .limit(1);
   if (!previous) return { ...empty, skippedReason: "NO_PREVIOUS_COMPLETED_IMPORT" };
 
-  // Every key present in the new file counts as seen — including rows that ended
+  // Every key present in the new file counts as seen â€” including rows that ended
   // in conflict or error. A duplicated reference still proves the supplier lists
   // the article, so it must never be reported as a disappearance: ambiguity is
   // reported as ambiguity, "gone" is reserved for keys that are really absent.
@@ -325,7 +339,7 @@ async function detectMissingProducts(
   const seenMissing = new Set<number>();
   for (const row of before) {
     const key = row.supplierSku;
-    // Absent key, repeated key, or no product behind it → not evidence.
+    // Absent key, repeated key, or no product behind it â†’ not evidence.
     if (!key || (occurrences.get(key) ?? 0) > 1 || row.productId === null) { ambiguous += 1; continue; }
     if (seenHere.has(key)) continue;
     if (seenMissing.has(row.productId)) continue;
@@ -344,34 +358,34 @@ async function detectMissingProducts(
   };
 }
 
-// ─── Preview ─────────────────────────────────────────────
+// â”€â”€â”€ Preview â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export interface PreviewInput {
   supplierId: number;
   /**
-   * C.3.4.1 — FONTE única de conteúdo (contrato SourcePayload). O upload
+   * C.3.4.1 â€” FONTE Ãºnica de conteÃºdo (contrato SourcePayload). O upload
    * CSV/XLSX chega aqui via `uploadSource()` (./supplier-import/source) e o
-   * serviço já não conhece `csvText` nem `xlsxBytes`: só o contrato da fonte.
+   * serviÃ§o jÃ¡ nÃ£o conhece `csvText` nem `xlsxBytes`: sÃ³ o contrato da fonte.
    * `label` alimenta supplier_imports.file_name + source_label; `text`/`bytes`
    * alimentam o dispatcher de formatos (SupplierFileParse nunca muda).
    */
   source: SourcePayload;
   /**
-   * Mapeamento manual header→campo. Vazio ({}) conta como AUSENTE: nesse caso,
-   * um perfil válido guardado para o fornecedor tem prioridade e o CSV é
+   * Mapeamento manual headerâ†’campo. Vazio ({}) conta como AUSENTE: nesse caso,
+   * um perfil vÃ¡lido guardado para o fornecedor tem prioridade e o CSV Ã©
    * parseado com o mapping do perfil.
    */
   mapping?: Record<string, string>;
   userId: number;
   /**
-   * C.3.2 — quando true e o mapping efetivamente usado for válido, o perfil do
-   * fornecedor é gravado durante o próprio PREVIEW (e reutilizado no seguinte).
+   * C.3.2 â€” quando true e o mapping efetivamente usado for vÃ¡lido, o perfil do
+   * fornecedor Ã© gravado durante o prÃ³prio PREVIEW (e reutilizado no seguinte).
    */
   saveProfile?: boolean;
   /**
-   * C.3.4.2 — id da `supplier_sources` que produziu este payload (runSource).
-   * Persistido em `supplier_imports.source_id` para o histórico ligar a fonte.
-   * Upload manual continua a não passar nada → NULL (comportamento inalterado).
+   * C.3.4.2 â€” id da `supplier_sources` que produziu este payload (runSource).
+   * Persistido em `supplier_imports.source_id` para o histÃ³rico ligar a fonte.
+   * Upload manual continua a nÃ£o passar nada â†’ NULL (comportamento inalterado).
    */
   sourceId?: number | null;
 }
@@ -382,9 +396,86 @@ interface ProductInfo {
   priceMode: string; categoryId: number | null; brandId: number | null;
 }
 
+// â”€â”€â”€ C.3.4.4: diff incremental ALSO stock-only â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+/** Normaliza date (Date|string) para 'YYYY-MM-DD' (ou null). */
+function toISODate(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? null : value.toISOString().slice(0, 10);
+  }
+  const s = String(value).trim();
+  return s ? s.slice(0, 10) : null;
+}
+
+/**
+ * Epoch (ms) de um timestamp ALSO â€” a MESMA conversÃ£o do snapshot (UTC).
+ * Formatos observados: Date (drizzle select), 'YYYY-MM-DD HH:MM[:SS]' (ALSO,
+ * UTC), 'YYYY-MM-DD' (UTC meia-noite), ISO com T/Z/offset e o texto do pg
+ * 'YYYY-MM-DD HH:MM:SS+00' (leituras raw do claim). Null quando ausente ou
+ * invÃ¡lido. Sem offset explÃ­cito assume-se SEMPRE UTC (nunca hora local).
+ */
+function alsoTimestampEpoch(value: unknown): number | null {
+  if (value === null || value === undefined) return null;
+  if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value.getTime();
+  const s = String(value).trim();
+  if (!s) return null;
+  if (s.includes("T") || s.endsWith("Z") || /[+-]\d{2}:?\d{2}$/.test(s) || /[+-]\d{2}$/.test(s)) {
+    // ISO ou texto do pg: direto (o V8 nÃ£o aceita offset "+00" sem minutos).
+    const d = new Date(s.replace(" ", "T").replace(/\+00$/, "+00:00").replace(/-00$/, "-00:00"));
+    return Number.isNaN(d.getTime()) ? null : d.getTime();
+  }
+  const t = s.replace(" ", "T");
+  const d = new Date(t.includes("T") ? `${t}Z` : `${t}T00:00:00Z`);
+  return Number.isNaN(d.getTime()) ? null : d.getTime();
+}
+
+interface AlsoLinkState {
+  supplierStock: number | null;
+  availableNextDate: string | Date | null;
+  availableNextQuantity: number | null;
+  availabilityTimestamp: Date | string | null;
+}
+
+/**
+ * Compara UMA linha ALSO normalizada com o estado atual do link.
+ *
+ * Regras (Â§8â€“Â§9): incoming null (incl. sentinel -1 â†’ null) significa
+ * "desconhecido / nÃ£o atualizar" â€” Ã© EXCLUÃDO da comparaÃ§Ã£o e nunca gera
+ * changedField. Ordem estÃ¡vel dos campos.
+ */
+export function diffAlsoStockRow(
+  row: NormalizedSupplierRow,
+  link: AlsoLinkState | undefined
+): { diffStatus: "new" | "changed" | "unchanged" | "error"; changedFields: string[] | null } {
+  const changed: string[] = [];
+  const incomingStock = row.supplierStock ?? null;
+  if (incomingStock !== null && (!link || link.supplierStock !== incomingStock)) {
+    changed.push("supplierStock");
+  }
+  const incomingNextDate = row.alsoAvailableNextDate ?? null;
+  if (incomingNextDate !== null && (!link || toISODate(link.availableNextDate) !== toISODate(incomingNextDate))) {
+    changed.push("availableNextDate");
+  }
+  const incomingNextQty = row.alsoAvailableNextQuantity ?? null;
+  if (incomingNextQty !== null && (!link || link.availableNextQuantity !== incomingNextQty)) {
+    changed.push("availableNextQuantity");
+  }
+  const incomingTs = row.alsoAvailabilityTimestamp ?? null;
+  if (incomingTs !== null) {
+    const incomingEpoch = alsoTimestampEpoch(incomingTs);
+    const linkEpoch = link ? alsoTimestampEpoch(link.availabilityTimestamp) : null;
+    if (incomingEpoch !== null && (!link || linkEpoch !== incomingEpoch)) {
+      changed.push("availabilityTimestamp");
+    }
+  }
+  if (changed.length === 0) return { diffStatus: "unchanged", changedFields: null };
+  return { diffStatus: "changed", changedFields: changed };
+}
+
 /**
  * Parse + match + persist the snapshot.
- * Writes ONLY supplier_imports and supplier_import_rows — never products,
+ * Writes ONLY supplier_imports and supplier_import_rows â€” never products,
  * product_suppliers, prices or stock.
  */
 export async function previewSupplierImport(input: PreviewInput): Promise<SupplierImportPreview> {
@@ -394,22 +485,22 @@ export async function previewSupplierImport(input: PreviewInput): Promise<Suppli
   if (!supplier) throw new SupplierImportError("SUPPLIER_NOT_FOUND", 404);
   if (!supplier.isActive) throw new SupplierImportError("SUPPLIER_INACTIVE", 400);
 
-  // C.3.2 — Perfil de importação por fornecedor.
+  // C.3.2 â€” Perfil de importaÃ§Ã£o por fornecedor.
   // Primeiro parse (auto ou manual) para obter headers; depois verifica perfil.
-  // Mapping manual VAZIO é tratado como ausente: a UI envia sempre mapping:{},
-  // e um objeto vazio não pode esconder um perfil guardado válido.
+  // Mapping manual VAZIO Ã© tratado como ausente: a UI envia sempre mapping:{},
+  // e um objeto vazio nÃ£o pode esconder um perfil guardado vÃ¡lido.
   //
-  // C.3.3 (etapa 1) — o parse passa pelo dispatcher parseSupplierFile e a
-  // resolução perfil/mapping vive em resolveSupplierFileMapping
-  // (./supplier-import/file), com a MESMA semântica C.3.2: a ordem de
-  // execução mantém-se — parse inicial ANTES de carregar o perfil da base de
-  // dados, re-parse com o perfil só quando aplicável.
+  // C.3.3 (etapa 1) â€” o parse passa pelo dispatcher parseSupplierFile e a
+  // resoluÃ§Ã£o perfil/mapping vive em resolveSupplierFileMapping
+  // (./supplier-import/file), com a MESMA semÃ¢ntica C.3.2: a ordem de
+  // execuÃ§Ã£o mantÃ©m-se â€” parse inicial ANTES de carregar o perfil da base de
+  // dados, re-parse com o perfil sÃ³ quando aplicÃ¡vel.
   //
-  // C.3.4.1 — o conteúdo vem sempre de um SourcePayload (contrato único SOURCE
-  // → FORMATO → SupplierFileParse). O formato é resolvido pelo payload
-  // (explícito na rota/upload; "auto" deteta bytes/texto) e o hash/tamanho são
-  // calculados sobre o conteúdo exato (UTF-8 para texto; bytes originais para
-  // XLSX — NUNCA sobre o base64 de transporte).
+  // C.3.4.1 â€” o conteÃºdo vem sempre de um SourcePayload (contrato Ãºnico SOURCE
+  // â†’ FORMATO â†’ SupplierFileParse). O formato Ã© resolvido pelo payload
+  // (explÃ­cito na rota/upload; "auto" deteta bytes/texto) e o hash/tamanho sÃ£o
+  // calculados sobre o conteÃºdo exato (UTF-8 para texto; bytes originais para
+  // XLSX â€” NUNCA sobre o base64 de transporte).
   assertSourcePayload(input.source);
   const source = input.source;
   const format = sourceFormat(source);
@@ -430,10 +521,10 @@ export async function previewSupplierImport(input: PreviewInput): Promise<Suppli
     profile,
   });
 
-  // C.3.2 — Guardar perfil durante o preview.
-  // O mapping guardado é exatamente o mapping efetivamente usado neste preview
+  // C.3.2 â€” Guardar perfil durante o preview.
+  // O mapping guardado Ã© exatamente o mapping efetivamente usado neste preview
   // (o mesmo snapshot que fica em supplier_imports.mapping), pelo que um
-  // segundo preview reutiliza o perfil sem alterar o histórico já persistido.
+  // segundo preview reutiliza o perfil sem alterar o histÃ³rico jÃ¡ persistido.
   if (input.saveProfile) {
     const mappingToSave = parsed.mapping;
     const validMapping =
@@ -442,9 +533,9 @@ export async function previewSupplierImport(input: PreviewInput): Promise<Suppli
       isProfileCompatibleWithHeaders(mappingToSave, parsed.headers);
     if (validMapping) {
       await saveSupplierProfile(supplier.id, mappingToSave, parsed.delimiter, input.userId);
-      // O retorno do save não é prova de sucesso: profile_valid só é reportado
+      // O retorno do save nÃ£o Ã© prova de sucesso: profile_valid sÃ³ Ã© reportado
       // depois de uma RELEITURA (loadSupplierProfile) confirmar que o perfil
-      // gravado é legível. Sem confirmação, mantém-se a resolução anterior.
+      // gravado Ã© legÃ­vel. Sem confirmaÃ§Ã£o, mantÃ©m-se a resoluÃ§Ã£o anterior.
       const reread = await loadSupplierProfile(supplier.id);
       if (reread) {
         resolution = { type: "profile_valid", mapping: reread.mapping, profileId: reread.id };
@@ -476,6 +567,13 @@ export async function previewSupplierImport(input: PreviewInput): Promise<Suppli
   const productInfo = new Map<number, ProductInfo>();
   const preferredByProduct = new Map<number, number>();
   const linkCost = new Map<number, string | null>();
+  // C.3.4.4: estado de fornecedor por produto (diff incremental ALSO stock).
+  const linkSupplierState = new Map<number, {
+    supplierStock: number | null;
+    availableNextDate: string | Date | null;
+    availableNextQuantity: number | null;
+    availabilityTimestamp: Date | string | null;
+  }>();
 
   if (matchedIds.length) {
     for (const group of chunk(matchedIds, SUPPLIER_IMPORT_KEY_CHUNK)) {
@@ -490,10 +588,23 @@ export async function previewSupplierImport(input: PreviewInput): Promise<Suppli
     const links = await db.select({
       productId: productSuppliers.productId, supplierId: productSuppliers.supplierId,
       isPreferred: productSuppliers.isPreferred, costPrice: productSuppliers.costPrice,
+      // C.3.4.4: estado de fornecedor para o diff incremental (sÃ³ ALSO stock).
+      supplierStock: productSuppliers.supplierStock,
+      availableNextDate: productSuppliers.availableNextDate,
+      availableNextQuantity: productSuppliers.availableNextQuantity,
+      availabilityTimestamp: productSuppliers.availabilityTimestamp,
     }).from(productSuppliers).where(inArray(productSuppliers.productId, matchedIds));
     for (const link of links) {
       if (link.isPreferred) preferredByProduct.set(link.productId, link.supplierId);
-      if (link.supplierId === supplier.id) linkCost.set(link.productId, link.costPrice);
+      if (link.supplierId === supplier.id) {
+        linkCost.set(link.productId, link.costPrice);
+        linkSupplierState.set(link.productId, {
+          supplierStock: link.supplierStock,
+          availableNextDate: link.availableNextDate,
+          availableNextQuantity: link.availableNextQuantity,
+          availabilityTimestamp: link.availabilityTimestamp,
+        });
+      }
     }
   }
 
@@ -553,6 +664,29 @@ export async function previewSupplierImport(input: PreviewInput): Promise<Suppli
       priceMessage = computation.priced ? null : computation.message ?? null;
     }
 
+    // C.3.4.4 â€” diff incremental: SÃ“ linhas ALSO stock-only ganham diffStatus
+    // (NULL em tudo o resto â€” imports genÃ©ricos inalterados). ready compara
+    // com o link; conflict/error mapeiam para error; new_product (impossÃ­vel
+    // em stock-only apÃ³s a reescrita acima) mapeia para new.
+    let supplierStock: number | null = null;
+    let supplierStockBefore: number | null = null;
+    let diffStatus: "new" | "changed" | "unchanged" | "error" | null = null;
+    let changedFields: string[] | null = null;
+    if (isStockOnly) {
+      supplierStock = row.supplierStock ?? null;
+      if (plan.status === "ready" && plan.productId !== null) {
+        const link = linkSupplierState.get(plan.productId);
+        supplierStockBefore = link?.supplierStock ?? null;
+        const diff = diffAlsoStockRow(row, link);
+        diffStatus = diff.diffStatus;
+        changedFields = diff.changedFields;
+      } else if (plan.status === "new_product") {
+        diffStatus = "new";
+      } else {
+        diffStatus = "error";
+      }
+    }
+
     lines.push({
       rowNumber: row.rowNumber,
       supplierSku: row.supplierSku,
@@ -567,7 +701,13 @@ export async function previewSupplierImport(input: PreviewInput): Promise<Suppli
       costPrice: row.costPrice,
       costBefore: product ? linkCost.get(product.id) ?? null : null,
       stock: row.stock,
-      stockBefore: product?.stock ?? null,
+      // Em stock-only o `stock` fÃ­sico Ã© sempre null (nÃ£o transporta ALSO) e
+      // o "antes" fÃ­sico nÃ£o Ã© mostrado (evita sugerir uma escrita fÃ­sica).
+      stockBefore: isStockOnly ? null : (product?.stock ?? null),
+      supplierStock,
+      supplierStockBefore,
+      diffStatus,
+      changedFields,
       reservedStock: product?.reservedStock ?? null,
       leadTimeDays: row.leadTimeDays,
       productId: plan.productId,
@@ -588,11 +728,15 @@ export async function previewSupplierImport(input: PreviewInput): Promise<Suppli
   });
 
   const planSummary = summarizePlan(parsed.rows, plans);
-  const actionable = planSummary.ready + planSummary.newProducts;
+  // C.3.4.4: linhas UNCHANGED nunca sÃ£o claimed/applied â€” saem do actionable
+  // (0 em imports genÃ©ricos: comportamento idÃªntico ao anterior).
+  const unchangedCount = lines.filter((l) => l.diffStatus === "unchanged").length;
+  const changedCount = lines.filter((l) => l.diffStatus === "changed").length;
+  const actionable = planSummary.ready + planSummary.newProducts - unchangedCount;
   const batchesTotal = Math.ceil(actionable / SUPPLIER_IMPORT_BATCH_SIZE);
   const missing = await detectMissingProducts(supplier.id, lines);
 
-  // ── The snapshot is persisted atomically ──
+  // â”€â”€ The snapshot is persisted atomically â”€â”€
   // Header and rows commit together or not at all: a preview that died halfway
   // must not leave a `preview` import whose rows are a subset of the file,
   // because that subset is exactly what apply would otherwise consume.
@@ -600,11 +744,11 @@ export async function previewSupplierImport(input: PreviewInput): Promise<Suppli
     const [created] = await tx.insert(supplierImports).values({
       supplierId: supplier.id,
       fileName: sourceLabel.slice(0, 255),
-      // C.3.4.1 — a fonte configurada (supplier_sources) nasce na gestão de
-      // fontes; um upload manual não tem linha de fonte (source_id NULL).
-      // C.3.4.2 — quando o preview vem de um runSource, o id da fonte é
-      // passado explicitamente; o motor (matching/pricing/snapshot) é o mesmo.
-      // O label é persistido como snapshot para o histórico sobreviver a
+      // C.3.4.1 â€” a fonte configurada (supplier_sources) nasce na gestÃ£o de
+      // fontes; um upload manual nÃ£o tem linha de fonte (source_id NULL).
+      // C.3.4.2 â€” quando o preview vem de um runSource, o id da fonte Ã©
+      // passado explicitamente; o motor (matching/pricing/snapshot) Ã© o mesmo.
+      // O label Ã© persistido como snapshot para o histÃ³rico sobreviver a
       // renome/delete; os validadores HTTP ficam NULL no upload.
       sourceId: input.sourceId ?? null,
       sourceLabel: sourceLabel.slice(0, 255),
@@ -615,7 +759,11 @@ export async function previewSupplierImport(input: PreviewInput): Promise<Suppli
       rowCount: parsed.rows.length,
       status: "preview",
       mapping: parsed.mapping,
-      summary: { ...planSummary, actionable, batchesTotal, ignoredColumns: parsed.ignoredColumns, missingProducts: missing },
+      summary: {
+        ...planSummary, actionable, batchesTotal, ignoredColumns: parsed.ignoredColumns, missingProducts: missing,
+        // C.3.4.4: contagens do diff â€” SÃ“ em also_stock (genÃ©ricos inalterados).
+        ...(isStockOnly ? { diffChanged: changedCount, diffUnchanged: unchangedCount } : {}),
+      },
       batchesTotal,
       batchesDone: 0,
       userId: input.userId,
@@ -634,6 +782,10 @@ export async function previewSupplierImport(input: PreviewInput): Promise<Suppli
         status: line.status,
         costPrice: line.costPrice,
         stock: line.stock,
+        // C.3.4.4: snapshot do stock de fornecedor + diff (null fora de ALSO stock).
+        supplierStock: line.supplierStock ?? null,
+        diffStatus: line.diffStatus ?? null,
+        changedFields: line.changedFields ?? null,
         leadTimeDays: line.leadTimeDays,
         message: line.message ? line.message.slice(0, 500) : null,
         currentPrice: line.currentPrice,
@@ -643,7 +795,7 @@ export async function previewSupplierImport(input: PreviewInput): Promise<Suppli
         // not sink the preview INSERT the way an out-of-range value used to.
         priceMessage: line.priceMessage ? line.priceMessage.slice(0, 255) : null,
         isPreferredSupplier: line.isPreferredSupplier,
-        // C.3.4.3.1 snapshot histórico genérico — preserva exatamente o normalizado
+        // C.3.4.3.1 snapshot histÃ³rico genÃ©rico â€” preserva exatamente o normalizado
         manufacturerPartNumber: (line as any).alsoManufacturerPartNumber ?? null,
         manufacturerName: (line as any).alsoManufacturerName ?? null,
         supplierCategoryPath: (line as any).alsoCategoryPath ?? null,
@@ -706,7 +858,7 @@ export async function previewSupplierImport(input: PreviewInput): Promise<Suppli
   };
 }
 
-// ─── Apply ───────────────────────────────────────────────
+// â”€â”€â”€ Apply â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 interface ImportSnapshot {
   id: number;
@@ -732,7 +884,7 @@ async function loadImport(importId: number): Promise<ImportSnapshot | null> {
  * Atomically take ownership of an import.
  *
  * First apply: from `preview` only, and only with a token matching the snapshot.
- * Resume: from `partial`, or from an `applying` whose heartbeat is stale — a
+ * Resume: from `partial`, or from an `applying` whose heartbeat is stale â€” a
  * running import cannot be stolen, and two racing reclaimers cannot both win
  * because the loser re-reads the updated row version.
  */
@@ -760,6 +912,9 @@ interface ClaimedRow {
   product_id: number | null;
   cost_price: string | null;
   stock: number | null;
+  supplier_stock: number | null;
+  diff_status: "new" | "changed" | "unchanged" | "error" | null;
+  changed_fields: string[] | null;
   lead_time_days: number | null;
   supplier_sku: string | null;
   internal_sku: string | null;
@@ -773,11 +928,32 @@ interface ClaimedRow {
   availability_timestamp: string | null;
 }
 
+type BatchProductSnapshot = {
+  id: number;
+  price: string;
+  costPrice: string | null;
+  stock: number;
+  reservedStock: number;
+  priceMode: string;
+  vatRate: string;
+  categoryId: number | null;
+  brandId: number | null;
+};
+
+type BatchSupplierLink = typeof productSuppliers.$inferSelect;
+
 interface ApplyContext {
   importId: number;
   supplierId: number;
   supplierName: string;
   userId: number;
+  pricingContext?: Awaited<ReturnType<typeof loadPricingContext>>;
+  batchProducts?: Map<number, BatchProductSnapshot>;
+  batchSupplierLinks?: Map<number, BatchSupplierLink>;
+  batchPreferredSupplierIds?: Map<number, number>;
+  batchCacheableProductIds?: Set<number>;
+  batchSupplierPreferredAfterUpdate?: Map<number, boolean>;
+  batchProductEffects?: Map<number, RowEffect>;
 }
 
 type RowEffect = "created" | "updated" | "repriced" | "skipped";
@@ -854,10 +1030,16 @@ async function upsertSupplierLink(
   row: ClaimedRow,
   context: ApplyContext,
   preferredForNewProduct: boolean
-): Promise<void> {
-  const [existing] = await tx.select().from(productSuppliers)
-    .where(and(eq(productSuppliers.productId, productId), eq(productSuppliers.supplierId, context.supplierId)))
-    .limit(1);
+): Promise<boolean> {
+  const canUseBatchCache = context.batchCacheableProductIds?.has(productId) === true;
+
+  const existing = canUseBatchCache
+    ? context.batchSupplierLinks?.get(productId)
+    : (
+        await tx.select().from(productSuppliers)
+          .where(and(eq(productSuppliers.productId, productId), eq(productSuppliers.supplierId, context.supplierId)))
+          .limit(1)
+      )[0];
 
   // Check whether there is ANY preferred supplier for this product
   // (excluding the current association when it exists).
@@ -869,13 +1051,26 @@ async function upsertSupplierLink(
       )
     : and(eq(productSuppliers.productId, productId), eq(productSuppliers.isPreferred, true));
 
-  const [otherPreferred] = await tx.select({ id: productSuppliers.id })
-    .from(productSuppliers)
-    .where(preferredForProductQuery)
-    .limit(1);
+  let otherPreferred: { id: number } | undefined;
 
+  if (canUseBatchCache) {
+    const otherPreferredSupplierId = context.batchPreferredSupplierIds?.get(productId);
+    otherPreferred = otherPreferredSupplierId === undefined
+      ? undefined
+      : { id: otherPreferredSupplierId };
+  } else {
+    [otherPreferred] = await tx.select({ id: productSuppliers.id })
+      .from(productSuppliers)
+      .where(preferredForProductQuery)
+      .limit(1);
+  }
+
+  if (canUseBatchCache && existing) {
+    const preupdatedPreferred = context.batchSupplierPreferredAfterUpdate?.get(productId);
+    if (preupdatedPreferred !== undefined) return preupdatedPreferred;
+  }
   // ALSO generic: preparar valores para product_suppliers
-  // availableNextDate é date (YYYY-MM-DD string), availabilityTimestamp é timestamptz (Date)
+  // availableNextDate Ã© date (YYYY-MM-DD string), availabilityTimestamp Ã© timestamptz (Date)
   let availTsDate: Date | null = null;
   if ((row as any).availability_timestamp) {
     const rawTs: any = (row as any).availability_timestamp;
@@ -889,7 +1084,7 @@ async function upsertSupplierLink(
           let iso = s.replace(" ", "T");
           if (!iso.endsWith("Z") && !iso.includes("+") && iso.includes("T")) iso += "Z";
           else if (!iso.includes("T")) iso += "T00:00:00Z";
-          // normaliza +00 → +00:00 para JS
+          // normaliza +00 â†’ +00:00 para JS
           iso = iso.replace(/\+00$/, "+00:00").replace(/-00$/, "-00:00");
           d = new Date(iso);
         }
@@ -906,7 +1101,7 @@ async function upsertSupplierLink(
 
   if (existing) {
     const newCost = row.cost_price ?? existing.costPrice;
-    // Stock-only (cost null) nunca altera preferred — mantém o existente
+    // Stock-only (cost null) nunca altera preferred â€” mantÃ©m o existente
     const isStockRow = row.cost_price === null;
     const shouldBePreferred = isStockRow ? existing.isPreferred : (existing.isPreferred ? true : !otherPreferred);
     await tx.update(productSuppliers).set({
@@ -915,7 +1110,7 @@ async function upsertSupplierLink(
       lastCostPrice: newCost !== existing.costPrice ? existing.costPrice : existing.lastCostPrice,
       leadTimeDays: row.lead_time_days ?? existing.leadTimeDays,
       isPreferred: shouldBePreferred,
-      // C.3.4.3.1 generic — pricelist vs stock: só sobrescreve se snapshot trouxe valor
+      // C.3.4.3.1 generic â€” pricelist vs stock: sÃ³ sobrescreve se snapshot trouxe valor
       manufacturerPartNumber: mpnVal ?? (existing as any).manufacturerPartNumber,
       supplierCategoryPath: catPathVal ?? (existing as any).supplierCategoryPath,
       availableNextDate: nextDateVal ?? (existing as any).availableNextDate,
@@ -924,7 +1119,7 @@ async function upsertSupplierLink(
       lastSyncAt: now,
       updatedAt: now,
     }).where(eq(productSuppliers.id, existing.id));
-    return;
+    return shouldBePreferred;
   }
 
   await tx.insert(productSuppliers).values({
@@ -942,12 +1137,13 @@ async function upsertSupplierLink(
     availabilityTimestamp: availTsDate,
     lastSyncAt: now,
   });
+  return !otherPreferred;
 }
 
 /**
- * MDTech's next catalogue reference: `MD-000001`, `MD-000002`, …
+ * MDTech's next catalogue reference: `MD-000001`, `MD-000002`, â€¦
  *
- * The number comes from `nextval()`, so it is handed out atomically — two
+ * The number comes from `nextval()`, so it is handed out atomically â€” two
  * concurrent imports (two batches, two requests, two workers) can never receive
  * the same one. A sequence is deliberately not transactional: a batch that rolls
  * back leaves a gap in the numbering, never a reused value.
@@ -972,14 +1168,14 @@ interface CreatedProduct {
 /**
  * Create the product the file describes. The engine owns its price.
  *
- * ── The internal SKU is MDTech's, never the supplier's ──
+ * â”€â”€ The internal SKU is MDTech's, never the supplier's â”€â”€
  * `products.sku` is the catalogue's global reference; `product_suppliers.supplier_sku`
  * is one supplier's code for the same article. Copying a supplier's code into
  * products.sku would let a second supplier's file collide with it (the unique
  * index aborting the whole 500-row batch, permanently) or, worse, match against
  * the first supplier's product and write cost/stock into it. So:
- *  - an explicit `internal_sku` column is honoured — the operator mapped it as
- *    MDTech's own reference — and is never rewritten;
+ *  - an explicit `internal_sku` column is honoured â€” the operator mapped it as
+ *    MDTech's own reference â€” and is never rewritten;
  *  - otherwise the SKU is minted from the sequence.
  * Every attempt is `ON CONFLICT (sku) DO NOTHING`: a value already taken by
  * hand-written data costs a fresh sequence number, not a rolled back batch.
@@ -1007,7 +1203,7 @@ async function createProductFromRow(tx: NodePgDatabase, row: ClaimedRow, context
   };
 
   // An explicitly mapped internal SKU is the operator's own statement about the
-  // catalogue: it is used as given. If it is already taken, the row reports it —
+  // catalogue: it is used as given. If it is already taken, the row reports it â€”
   // products.sku is never silently renamed to make room.
   if (row.internal_sku) {
     const productId = await insertWith(row.internal_sku);
@@ -1036,10 +1232,75 @@ async function createProductFromRow(tx: NodePgDatabase, row: ClaimedRow, context
 }
 
 /**
+ * C.3.4.4 â€” aplica UMA linha ALSO stock-only (diff_status nÃ£o-nulo).
+ *
+ * Autoridade ABSOLUTA de stock: esta funÃ§Ã£o NUNCA escreve products.stock,
+ * NUNCA cria stock movements, NUNCA altera custo/preÃ§o/preferred e NUNCA cria
+ * links. SÃ³ escreve na associaÃ§Ã£o existente os campos de fornecedor com valor
+ * nÃ£o-nulo no snapshot E diferente do estado atual (+ lastSyncAt/updatedAt).
+ * Snapshot null (incl. sentinel -1) = "desconhecido / nÃ£o atualizar".
+ */
+async function applyAlsoStockRow(tx: NodePgDatabase, row: ClaimedRow, context: ApplyContext): Promise<RowEffect> {
+  if (row.product_id === null) {
+    await markRow(tx, row.id, "error", "Produto não encontrado ao aplicar");
+    return "skipped";
+  }
+  if (row.diff_status === "unchanged") {
+    // Defesa em profundidade: o claim exclui-as, mas se alguma chegar aqui
+    // (corrida antiga/nova) consome-se sem NENHUM write.
+    return "skipped";
+  }
+  const [link] = await tx.select().from(productSuppliers)
+    .where(and(eq(productSuppliers.productId, row.product_id), eq(productSuppliers.supplierId, context.supplierId)))
+    .limit(1);
+  if (!link) {
+    // Stock-only nunca cria associaÃ§Ãµes: se o link desapareceu entre o
+    // preview e o apply, a linha Ã© recusada em vez de o recriar.
+    await markRow(tx, row.id, "error", "A associação produto-fornecedor foi removida entretanto — linha não aplicada");
+    return "skipped";
+  }
+
+  // O delta Ã© recomputado contra o estado ATUAL do link (nÃ£o se confia
+  // cegamente no changedFields do preview: outra importaÃ§Ã£o pode ter
+  // convergido entretanto â€” nesse caso: zero writes).
+  const patch: {
+    supplierStock?: number;
+    availableNextDate?: string;
+    availableNextQuantity?: number;
+    availabilityTimestamp?: Date;
+  } = {};
+  if (row.supplier_stock !== null && row.supplier_stock !== undefined && row.supplier_stock !== link.supplierStock) {
+    patch.supplierStock = row.supplier_stock;
+  }
+  const snapNextDate = toISODate(row.available_next_date);
+  if (snapNextDate !== null && snapNextDate !== toISODate(link.availableNextDate)) {
+    patch.availableNextDate = snapNextDate;
+  }
+  if (row.available_next_quantity !== null && row.available_next_quantity !== undefined && row.available_next_quantity !== link.availableNextQuantity) {
+    patch.availableNextQuantity = row.available_next_quantity;
+  }
+  const snapEpoch = alsoTimestampEpoch(row.availability_timestamp);
+  if (snapEpoch !== null && snapEpoch !== alsoTimestampEpoch(link.availabilityTimestamp)) {
+    patch.availabilityTimestamp = new Date(snapEpoch);
+  }
+
+  if (Object.keys(patch).length === 0) return "updated";
+  const now = new Date();
+  await tx.update(productSuppliers).set({ ...patch, lastSyncAt: now, updatedAt: now }).where(eq(productSuppliers.id, link.id));
+  return "updated";
+}
+
+/**
  * Apply one claimed row. The claim already flipped `applied`, so every branch
  * here runs exactly once per row for the life of the import.
  */
 async function applyRow(tx: NodePgDatabase, row: ClaimedRow, context: ApplyContext): Promise<RowEffect> {
+  // C.3.4.4: linhas ALSO stock-only (diff_status nÃ£o-nulo) seguem o ramo
+  // separado â€” o caminho genÃ©rico abaixo (stock fÃ­sico, movimentos, pricing)
+  // nunca as vÃª.
+  if (row.diff_status !== null && row.diff_status !== undefined) {
+    return applyAlsoStockRow(tx, row, context);
+  }
   let productId = row.product_id;
   let createdProduct = false;
 
@@ -1065,7 +1326,7 @@ async function applyRow(tx: NodePgDatabase, row: ClaimedRow, context: ApplyConte
         : { status: "ready", productId, message: `Produto criado com SKU interno ${created.sku}`.slice(0, 500) }
       ).where(eq(supplierImportRows.id, row.id));
     } else {
-      // Another import created it meanwhile → apply against it, never a copy.
+      // Another import created it meanwhile â†’ apply against it, never a copy.
       productId = resolved.productId;
       await tx.update(supplierImportRows).set({ status: "ready", productId }).where(eq(supplierImportRows.id, row.id));
     }
@@ -1076,22 +1337,64 @@ async function applyRow(tx: NodePgDatabase, row: ClaimedRow, context: ApplyConte
     return "skipped";
   }
 
-  const [product] = await tx.select({
-    id: products.id, price: products.price, costPrice: products.costPrice, stock: products.stock,
-    reservedStock: products.reservedStock, priceMode: products.priceMode,
-  }).from(products).where(eq(products.id, productId)).limit(1);
+  const canUseBatchCache =
+    !createdProduct &&
+    context.batchCacheableProductIds?.has(productId) === true;
+
+  const product = canUseBatchCache
+    ? context.batchProducts?.get(productId)
+    : (
+        await tx.select({
+          id: products.id,
+          price: products.price,
+          costPrice: products.costPrice,
+          stock: products.stock,
+          reservedStock: products.reservedStock,
+          priceMode: products.priceMode,
+          vatRate: products.vatRate,
+          categoryId: products.categoryId,
+          brandId: products.brandId,
+        }).from(products).where(eq(products.id, productId)).limit(1)
+      )[0];
+
   if (!product) {
     await markRow(tx, row.id, "error", "O produto foi eliminado entretanto");
     return "skipped";
   }
 
-  await upsertSupplierLink(tx, productId, row, context, createdProduct);
+  const batchEffect = canUseBatchCache
+    ? context.batchProductEffects?.get(productId)
+    : undefined;
+  if (batchEffect !== undefined) return batchEffect;
+
+  const supplierIsPreferred = await upsertSupplierLink(tx, productId, row, context, createdProduct);
 
   // The preferred supplier is the authority for products.costPrice, and only a
   // cost change may reprice. A non-preferred supplier therefore updates its own
   // link and stops there: no cost sync, no automatic repricing through it.
-  const syncCost = row.cost_price !== null && (createdProduct || await isPreferredSupplier(tx, productId, context.supplierId));
-  const priceResult = syncCost ? await syncProductCost(tx as unknown as NodePgDatabase, productId) : null;
+  const syncCost = row.cost_price !== null && (createdProduct || supplierIsPreferred);
+  const priceResult = syncCost
+    ? await syncProductCost(
+        tx as unknown as NodePgDatabase,
+        productId,
+        context.pricingContext,
+        supplierIsPreferred
+          ? {
+              preferredCost: row.cost_price,
+              preferredSupplierId: context.supplierId,
+              productSnapshot: {
+                id: product.id,
+                price: product.price,
+                costPrice: product.costPrice,
+                vatRate: product.vatRate,
+                categoryId: product.categoryId,
+                brandId: product.brandId,
+                priceMode: product.priceMode,
+              },
+            }
+          : {},
+      )
+    : null;
 
   if (createdProduct) {
     // Initial stock arrives with the product, so it is booked as one entry.
@@ -1099,7 +1402,7 @@ async function applyRow(tx: NodePgDatabase, row: ClaimedRow, context: ApplyConte
       await tx.insert(stockMovements).values({
         productId, type: "entry", quantity: row.stock, stockBefore: 0, stockAfter: row.stock,
         reservedBefore: 0, reservedAfter: 0,
-        reason: `Entrada inicial · importação fornecedor ${context.supplierName}`,
+        reason: `Entrada inicial · importação fornecedor ${context.supplierName}`.slice(0, 255),
         referenceType: "supplier_import", referenceId: context.importId, userId: context.userId,
       });
     }
@@ -1116,7 +1419,7 @@ async function applyRow(tx: NodePgDatabase, row: ClaimedRow, context: ApplyConte
       productId, type: "import", quantity: row.stock - product.stock,
       stockBefore: product.stock, stockAfter: row.stock,
       reservedBefore: product.reservedStock, reservedAfter: product.reservedStock,
-      reason: `Importação fornecedor ${context.supplierName} · linha ${row.row_number}`,
+      reason: `Importação fornecedor ${context.supplierName} · linha ${row.row_number}`.slice(0, 255),
       referenceType: "supplier_import", referenceId: context.importId, userId: context.userId,
     });
   }
@@ -1139,7 +1442,9 @@ export async function countRows(importId: number): Promise<RowCounts> {
   const [row] = await db.select({
     total: sql<string>`count(*)`,
     applied: sql<string>`count(*) FILTER (WHERE applied)`,
-    pending: sql<string>`count(*) FILTER (WHERE applied = false AND status IN ('ready','new_product'))`,
+    // C.3.4.4: UNCHANGED nunca Ã© claimed â€” tambÃ©m nÃ£o conta como pending
+    // (senÃ£o a importaÃ§Ã£o nunca fecharia como completed).
+    pending: sql<string>`count(*) FILTER (WHERE applied = false AND status IN ('ready','new_product') AND (diff_status IS NULL OR diff_status <> 'unchanged'))`,
     conflicts: sql<string>`count(*) FILTER (WHERE status = 'conflict')`,
     errors: sql<string>`count(*) FILTER (WHERE status = 'error')`,
     newProducts: sql<string>`count(*) FILTER (WHERE status = 'new_product')`,
@@ -1193,14 +1498,14 @@ async function outcomeFor(importId: number, totals: Partial<ApplyOutcome> = {}):
 }
 
 /**
- * Apply — or resume — a persisted snapshot in batches of
+ * Apply â€” or resume â€” a persisted snapshot in batches of
  * SUPPLIER_IMPORT_BATCH_SIZE rows, one transaction per batch.
  */
 export async function applySupplierImport(input: ApplyInput): Promise<ApplyOutcome> {
   const snapshot = await loadImport(input.importId);
   if (!snapshot) throw new SupplierImportError("IMPORT_NOT_FOUND", 404);
 
-  // completed + retry → the same answer, and nothing re-applied.
+  // completed + retry â†’ the same answer, and nothing re-applied.
   if (snapshot.status === "completed") {
     return outcomeFor(snapshot.id, { idempotent: true });
   }
@@ -1254,6 +1559,7 @@ export async function applySupplierImport(input: ApplyInput): Promise<ApplyOutco
              WHERE import_id = ${snapshot.id}
                AND applied = false
                AND status IN ('ready','new_product')
+               AND (diff_status IS NULL OR diff_status <> 'unchanged')
              ORDER BY row_number
              LIMIT ${SUPPLIER_IMPORT_BATCH_SIZE}
              FOR UPDATE SKIP LOCKED
@@ -1263,14 +1569,356 @@ export async function applySupplierImport(input: ApplyInput): Promise<ApplyOutco
            FROM picked
           WHERE r.id = picked.id
           RETURNING r.id, r.row_number, r.status, r.product_id, r.cost_price, r.stock,
+                    r.supplier_stock, r.diff_status, r.changed_fields,
                     r.lead_time_days, r.supplier_sku, r.internal_sku, r.ean, r.name,
                     r.manufacturer_part_number, r.manufacturer_name, r.supplier_category_path,
                     r.available_next_date, r.available_next_quantity, r.availability_timestamp
         `));
         if (claimed.length === 0) return { claimed: 0, effects: [] as RowEffect[] };
 
+        const batchContext: ApplyContext = {
+          ...context,
+          pricingContext: await loadPricingContext(tx as unknown as NodePgDatabase),
+        };
+
+        const existingProductIdCounts = new Map<number, number>();
+        for (const row of claimed) {
+          if (row.status === "new_product" || row.product_id === null) continue;
+          existingProductIdCounts.set(
+            row.product_id,
+            (existingProductIdCounts.get(row.product_id) ?? 0) + 1,
+          );
+        }
+
+        const existingProductIds = [...existingProductIdCounts.keys()];
+        const batchCacheableProductIds = new Set(
+          [...existingProductIdCounts.entries()]
+            .filter(([, count]) => count === 1)
+            .map(([productId]) => productId),
+        );
+
+        const batchProducts = new Map<number, BatchProductSnapshot>();
+        const batchSupplierLinks = new Map<number, BatchSupplierLink>();
+        const batchPreferredSupplierIds = new Map<number, number>();
+
+        if (existingProductIds.length > 0) {
+          const productRows = await tx.select({
+            id: products.id,
+            price: products.price,
+            costPrice: products.costPrice,
+            stock: products.stock,
+            reservedStock: products.reservedStock,
+            priceMode: products.priceMode,
+            vatRate: products.vatRate,
+            categoryId: products.categoryId,
+            brandId: products.brandId,
+          }).from(products).where(inArray(products.id, existingProductIds));
+
+          for (const product of productRows) batchProducts.set(product.id, product);
+
+          const linkRows = await tx.select().from(productSuppliers)
+            .where(inArray(productSuppliers.productId, existingProductIds));
+
+          for (const link of linkRows) {
+            if (link.supplierId === context.supplierId) {
+              batchSupplierLinks.set(link.productId, link);
+            }
+            if (link.isPreferred && link.supplierId !== context.supplierId) {
+              batchPreferredSupplierIds.set(link.productId, link.supplierId);
+            }
+          }
+        }
+
+        batchContext.batchProducts = batchProducts;
+        batchContext.batchSupplierLinks = batchSupplierLinks;
+        batchContext.batchPreferredSupplierIds = batchPreferredSupplierIds;
+        batchContext.batchCacheableProductIds = batchCacheableProductIds;
+
+        // Fast-path: existing supplier links for products that occur only once
+        // in this batch can be updated together. New products, duplicate product
+        // rows and ALSO stock-only rows keep using the conservative per-row path.
+        const fastLinkUpdates: Array<{
+          id: number;
+          productId: number;
+          supplierSku: string | null;
+          costPrice: string | null;
+          lastCostPrice: string | null;
+          leadTimeDays: number | null;
+          isPreferred: boolean;
+          manufacturerPartNumber: string | null;
+          supplierCategoryPath: string | null;
+          availableNextDate: string | null;
+          availableNextQuantity: number | null;
+          availabilityTimestamp: Date | string | null;
+        }> = [];
+
+        for (const row of claimed) {
+          if (
+            row.diff_status !== null ||
+            row.product_id === null ||
+            !batchCacheableProductIds.has(row.product_id) ||
+            !batchProducts.has(row.product_id)
+          ) continue;
+
+          const existing = batchSupplierLinks.get(row.product_id);
+          if (!existing) continue;
+
+          const otherPreferredSupplierId = batchPreferredSupplierIds.get(row.product_id);
+          const newCost = row.cost_price ?? existing.costPrice;
+          const isStockRow = row.cost_price === null;
+          const shouldBePreferred = isStockRow
+            ? existing.isPreferred
+            : (existing.isPreferred || otherPreferredSupplierId === undefined);
+
+          let availabilityTimestamp: Date | string | null = existing.availabilityTimestamp;
+          if (row.availability_timestamp) {
+            const rawTs: any = row.availability_timestamp;
+            if (rawTs instanceof Date) {
+              if (!Number.isNaN(rawTs.getTime())) availabilityTimestamp = rawTs;
+            } else {
+              const s = String(rawTs).trim();
+              if (s) {
+                let d = new Date(s);
+                if (Number.isNaN(d.getTime())) {
+                  let iso = s.replace(" ", "T");
+                  if (!iso.endsWith("Z") && !iso.includes("+") && iso.includes("T")) iso += "Z";
+                  else if (!iso.includes("T")) iso += "T00:00:00Z";
+                  iso = iso.replace(/\+00$/, "+00:00").replace(/-00$/, "-00:00");
+                  d = new Date(iso);
+                }
+                if (!Number.isNaN(d.getTime())) availabilityTimestamp = d;
+              }
+            }
+          }
+
+          fastLinkUpdates.push({
+            id: existing.id,
+            productId: row.product_id,
+            supplierSku: row.supplier_sku ?? existing.supplierSku,
+            costPrice: newCost,
+            lastCostPrice: newCost !== existing.costPrice ? existing.costPrice : existing.lastCostPrice,
+            leadTimeDays: row.lead_time_days ?? existing.leadTimeDays,
+            isPreferred: shouldBePreferred,
+            manufacturerPartNumber: row.manufacturer_part_number ?? existing.manufacturerPartNumber,
+            supplierCategoryPath: row.supplier_category_path ?? existing.supplierCategoryPath,
+            availableNextDate: row.available_next_date ?? existing.availableNextDate,
+            availableNextQuantity: row.available_next_quantity ?? existing.availableNextQuantity,
+            availabilityTimestamp,
+          });
+        }
+
+        const batchSupplierPreferredAfterUpdate = new Map<number, boolean>();
+
+        if (fastLinkUpdates.length > 0) {
+          const updatedLinks = rowsOf<{ id: number }>(await tx.execute(sql`
+            WITH data AS (
+              SELECT *
+                FROM jsonb_to_recordset(${JSON.stringify(fastLinkUpdates)}::jsonb) AS x(
+                  id integer,
+                  "productId" integer,
+                  "supplierSku" text,
+                  "costPrice" numeric(10,2),
+                  "lastCostPrice" numeric(10,2),
+                  "leadTimeDays" integer,
+                  "isPreferred" boolean,
+                  "manufacturerPartNumber" text,
+                  "supplierCategoryPath" text,
+                  "availableNextDate" date,
+                  "availableNextQuantity" integer,
+                  "availabilityTimestamp" timestamptz
+                )
+            )
+            UPDATE ${productSuppliers} AS ps
+               SET supplier_sku = data."supplierSku",
+                   cost_price = data."costPrice",
+                   last_cost_price = data."lastCostPrice",
+                   lead_time_days = data."leadTimeDays",
+                   is_preferred = data."isPreferred",
+                   manufacturer_part_number = data."manufacturerPartNumber",
+                   supplier_category_path = data."supplierCategoryPath",
+                   available_next_date = data."availableNextDate",
+                   available_next_quantity = data."availableNextQuantity",
+                   availability_timestamp = data."availabilityTimestamp",
+                   last_sync_at = now(),
+                   updated_at = now()
+              FROM data
+             WHERE ps.id = data.id
+            RETURNING ps.id
+          `));
+
+          const updatedIds = new Set(updatedLinks.map((link) => link.id));
+          for (const update of fastLinkUpdates) {
+            if (updatedIds.has(update.id)) {
+              batchSupplierPreferredAfterUpdate.set(update.productId, update.isPreferred);
+            }
+          }
+        }
+
+        batchContext.batchSupplierPreferredAfterUpdate = batchSupplierPreferredAfterUpdate;
+
+        // Fast-path 2: after the supplier link was safely handled in bulk, compute
+        // product cost/pricing/stock effects in memory and persist them in bulk.
+        // ALSO stock-only, new products, duplicate product rows and every row that
+        // missed the supplier-link fast-path continue through applyRow unchanged.
+        const batchProductEffects = new Map<number, RowEffect>();
+        const fastProductUpdates: Array<{
+          id: number;
+          setCost: boolean;
+          costPrice: string | null;
+          setPrice: boolean;
+          price: string | null;
+          setPricingMeta: boolean;
+          priceRuleId: number | null;
+          priceCalculatedAt: Date | null;
+          setStock: boolean;
+          stock: number | null;
+        }> = [];
+        const fastStockMovements: Array<typeof stockMovements.$inferInsert> = [];
+
+        const pricingContext = batchContext.pricingContext;
+        if (!pricingContext) throw new Error("Pricing context unavailable");
+
+        for (const row of claimed) {
+          if (
+            row.diff_status !== null ||
+            row.status === "new_product" ||
+            row.product_id === null ||
+            !batchCacheableProductIds.has(row.product_id)
+          ) continue;
+
+          const product = batchProducts.get(row.product_id);
+          if (!product) continue;
+
+          const supplierIsPreferred = batchSupplierPreferredAfterUpdate.get(row.product_id);
+          if (supplierIsPreferred === undefined) continue;
+
+          // Preserve the current applyRow rule: stock below reservations makes the
+          // row follow the conservative path, where it is marked as an error.
+          if (
+            row.stock !== null &&
+            row.stock !== product.stock &&
+            row.stock < product.reservedStock
+          ) continue;
+
+          const syncCost = row.cost_price !== null && supplierIsPreferred;
+          const priceResult = syncCost
+            ? computeAutomaticPrice(
+                {
+                  id: product.id,
+                  price: product.price,
+                  costPrice: row.cost_price,
+                  vatRate: product.vatRate,
+                  categoryId: product.categoryId,
+                  brandId: product.brandId,
+                  priceMode: product.priceMode,
+                },
+                context.supplierId,
+                pricingContext.rules,
+                pricingContext.categoryTree,
+                pricingContext.policy,
+              )
+            : null;
+
+          const stockChanged = row.stock !== null && row.stock !== product.stock;
+          const priceChanged =
+            priceResult?.priced === true &&
+            priceResult.changed === true &&
+            !!priceResult.newPrice;
+
+          const pricingMetaChanged = priceResult?.priced === true;
+
+          if (syncCost || stockChanged) {
+            fastProductUpdates.push({
+              id: product.id,
+              setCost: syncCost,
+              costPrice: syncCost ? row.cost_price : product.costPrice,
+              setPrice: priceChanged,
+              price: priceChanged ? priceResult!.newPrice! : product.price,
+              setPricingMeta: pricingMetaChanged,
+              priceRuleId: pricingMetaChanged ? (priceResult!.rule?.rule.id ?? null) : null,
+              priceCalculatedAt: pricingMetaChanged ? new Date() : null,
+              setStock: stockChanged,
+              stock: stockChanged ? row.stock : product.stock,
+            });
+          }
+
+          if (stockChanged) {
+            fastStockMovements.push({
+              productId: product.id,
+              type: "import",
+              quantity: row.stock! - product.stock,
+              stockBefore: product.stock,
+              stockAfter: row.stock!,
+              reservedBefore: product.reservedStock,
+              reservedAfter: product.reservedStock,
+              reason: `Importação fornecedor ${context.supplierName} · linha ${row.row_number}`.slice(0, 255),
+              referenceType: "supplier_import",
+              referenceId: context.importId,
+              userId: context.userId,
+            });
+          }
+
+          batchProductEffects.set(
+            product.id,
+            priceResult?.priced && priceResult.changed ? "repriced" : "updated",
+          );
+        }
+
+        if (fastProductUpdates.length > 0) {
+          const updatedProducts = rowsOf<{ id: number }>(await tx.execute(sql`
+            WITH data AS (
+              SELECT *
+                FROM jsonb_to_recordset(${JSON.stringify(fastProductUpdates)}::jsonb) AS x(
+                  id integer,
+                  "setCost" boolean,
+                  "costPrice" numeric(10,2),
+                  "setPrice" boolean,
+                  price numeric(10,2),
+                  "setPricingMeta" boolean,
+                  "priceRuleId" integer,
+                  "priceCalculatedAt" timestamptz,
+                  "setStock" boolean,
+                  stock integer
+                )
+            )
+            UPDATE ${products} AS p
+               SET cost_price = CASE WHEN data."setCost" THEN data."costPrice" ELSE p.cost_price END,
+                   price = CASE WHEN data."setPrice" THEN data.price ELSE p.price END,
+                   price_rule_id = CASE
+                     WHEN data."setPricingMeta" THEN data."priceRuleId"
+                     ELSE p.price_rule_id
+                   END,
+                   price_calculated_at = CASE
+                     WHEN data."setPricingMeta" THEN data."priceCalculatedAt"
+                     ELSE p.price_calculated_at
+                   END,
+                   stock = CASE WHEN data."setStock" THEN data.stock ELSE p.stock END,
+                   updated_at = now()
+              FROM data
+             WHERE p.id = data.id
+            RETURNING p.id
+          `));
+
+          const updatedProductIds = new Set(updatedProducts.map((product) => product.id));
+          for (const productId of [...batchProductEffects.keys()]) {
+            const needsProductWrite = fastProductUpdates.some((update) => update.id === productId);
+            if (needsProductWrite && !updatedProductIds.has(productId)) {
+              batchProductEffects.delete(productId);
+            }
+          }
+        }
+
+        if (fastStockMovements.length > 0) {
+          await tx.insert(stockMovements).values(fastStockMovements);
+        }
+
+        batchContext.batchProductEffects = batchProductEffects;
+
         const effects: RowEffect[] = [];
-        for (const row of claimed) effects.push(await applyRow(tx, row, context));
+        for (const row of claimed) {
+          await supplierImportApplyCheckpoint();
+          effects.push(await applyRow(tx, row, batchContext));
+        }
 
         // Progress + heartbeat in the same transaction as the effects: a
         // committed batch is always a visible batch. LEAST() keeps the
@@ -1298,7 +1946,7 @@ export async function applySupplierImport(input: ApplyInput): Promise<ApplyOutco
       if (batch.claimed < SUPPLIER_IMPORT_BATCH_SIZE) break;
     } catch (e) {
       // The full technical error belongs in the server log only. A real
-      // database/storage failure is classified into a safe category — never
+      // database/storage failure is classified into a safe category â€” never
       // SQL, query, params or a stack trace. Anything else keeps its
       // (human-authored) message under APPLY_BATCH_FAILED, which is what the
       // recovery tests assert a killed worker reports.
@@ -1329,7 +1977,7 @@ export async function applySupplierImport(input: ApplyInput): Promise<ApplyOutco
     return outcomeFor(snapshot.id, { ...totals, resumed: !fromPreview, error: lastError });
   }
 
-  // ── `completed` is only reachable with nothing pending ──
+  // â”€â”€ `completed` is only reachable with nothing pending â”€â”€
   // `pending` is exactly what a claim would still take, so it is the honest
   // definition of "nothing left to do". Closing an import that still has pending
   // rows would strand them permanently (completed is not resumable), and a late
@@ -1348,6 +1996,7 @@ export async function applySupplierImport(input: ApplyInput): Promise<ApplyOutco
           WHERE pending_row.import_id = ${snapshot.id}
             AND pending_row.applied = false
             AND pending_row.status IN ('ready','new_product')
+            AND (pending_row.diff_status IS NULL OR pending_row.diff_status <> 'unchanged')
        )
     RETURNING id
   `));
@@ -1378,7 +2027,7 @@ export async function applySupplierImport(input: ApplyInput): Promise<ApplyOutco
   return outcomeFor(snapshot.id, { ...totals, resumed: !fromPreview });
 }
 
-// ─── Progress ────────────────────────────────────────────
+// â”€â”€â”€ Progress â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export interface ImportProgress {
   importId: number;
@@ -1446,7 +2095,7 @@ export async function getImportProgress(importId: number): Promise<ImportProgres
   };
 }
 
-/** Rows of a persisted snapshot — lets a reloaded page show the preview again. */
+/** Rows of a persisted snapshot â€” lets a reloaded page show the preview again. */
 export async function getImportLines(importId: number, limit = SUPPLIER_IMPORT_PREVIEW_LIMIT) {
   return db.select().from(supplierImportRows)
     .where(eq(supplierImportRows.importId, importId))
@@ -1454,7 +2103,7 @@ export async function getImportLines(importId: number, limit = SUPPLIER_IMPORT_P
     .limit(limit);
 }
 
-// ─── C.3.4.2 — Reopen a persisted preview ────────────────
+// â”€â”€â”€ C.3.4.2 â€” Reopen a persisted preview â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /**
  * A persisted preview handed back to the operator for manual review, with a
@@ -1467,34 +2116,34 @@ export interface SupplierImportReopenedPreview extends SupplierImportPreview {
 }
 
 /**
- * Reopen a persisted `preview` so a human can review and apply it — the
+ * Reopen a persisted `preview` so a human can review and apply it â€” the
  * missing step between "Sync Now created import #N" and the C.3.1 Apply.
  *
- * ── Why this exists ──
+ * â”€â”€ Why this exists â”€â”€
  * The apply token is deliberately never persisted: it is the proof that THIS
  * snapshot was shown to an operator, and it only ever lives in the response of
  * the preview call. So a preview produced by a remote sync (or a manual upload
  * followed by a reload) had no way back to the Apply button. This function
- * re-shows exactly the persisted snapshot and re-issues a token bound to it —
+ * re-shows exactly the persisted snapshot and re-issues a token bound to it â€”
  * same HMAC module, same TTL, same `kind`, same binding
  * (importId + supplierId + fileHash + rowCount). Apply then verifies it the
  * way it verifies any first-apply token.
  *
- * ── What it never does ──
+ * â”€â”€ What it never does â”€â”€
  * No parsing, no matching, no pricing, no snapshot rewrite, no status change,
  * no products/product_suppliers/stock touched. Everything the operator sees
  * comes from supplier_imports + supplier_import_rows as persisted. The product
- * SKU/name are LEFT JOINed for display only — apply keeps reading the rows.
+ * SKU/name are LEFT JOINed for display only â€” apply keeps reading the rows.
  *
- * ── State machine ──
- *  - preview           → reopened (this function);
- *  - completed         → 409 IMPORT_NOT_REOPENABLE (nothing to apply; the
+ * â”€â”€ State machine â”€â”€
+ *  - preview           â†’ reopened (this function);
+ *  - completed         â†’ 409 IMPORT_NOT_REOPENABLE (nothing to apply; the
  *                        apply route already answers idempotently);
- *  - applying/partial  → 409 IMPORT_NOT_REOPENABLE — a first-apply token
+ *  - applying/partial  â†’ 409 IMPORT_NOT_REOPENABLE â€” a first-apply token
  *                        would be meaningless: the resume flow (apply without
  *                        token, gated by the heartbeat) already owns them;
- *  - failed            → 409 IMPORT_FAILED (existing safe error);
- *  - unknown id        → 404 IMPORT_NOT_FOUND.
+ *  - failed            â†’ 409 IMPORT_FAILED (existing safe error);
+ *  - unknown id        â†’ 404 IMPORT_NOT_FOUND.
  */
 export async function reopenSupplierImportPreview(importId: number): Promise<SupplierImportReopenedPreview> {
   const [row] = await db
@@ -1524,7 +2173,7 @@ export async function reopenSupplierImportPreview(importId: number): Promise<Sup
   }
   if (row.status !== "preview") {
     // completed: nothing left to apply. applying/partial: owned by the resume
-    // flow — never re-issue a first-apply token for an import already claimed.
+    // flow â€” never re-issue a first-apply token for an import already claimed.
     throw new SupplierImportError("IMPORT_NOT_REOPENABLE", 409);
   }
 
@@ -1542,6 +2191,9 @@ export async function reopenSupplierImportPreview(importId: number): Promise<Sup
       status: supplierImportRows.status,
       costPrice: supplierImportRows.costPrice,
       stock: supplierImportRows.stock,
+      supplierStock: supplierImportRows.supplierStock,
+      diffStatus: supplierImportRows.diffStatus,
+      changedFields: supplierImportRows.changedFields,
       leadTimeDays: supplierImportRows.leadTimeDays,
       message: supplierImportRows.message,
       currentPrice: supplierImportRows.currentPrice,
@@ -1556,7 +2208,7 @@ export async function reopenSupplierImportPreview(importId: number): Promise<Sup
       availableNextQuantity: supplierImportRows.availableNextQuantity,
       availabilityTimestamp: supplierImportRows.availabilityTimestamp,
       // Display only (LEFT JOIN): a product deleted since the preview simply
-      // shows without a SKU — the row keeps its own persisted values.
+      // shows without a SKU â€” the row keeps its own persisted values.
       productSku: products.sku,
       productName: products.name,
     })
@@ -1593,6 +2245,12 @@ export async function reopenSupplierImportPreview(importId: number): Promise<Sup
     costBefore: null,
     stock: r.stock,
     stockBefore: null,
+    // C.3.4.4: o snapshot ALSO Ã© reaberto tal como persistido (stock de
+    // fornecedor + diff); o "antes" nÃ£o faz parte do snapshot.
+    supplierStock: r.supplierStock,
+    supplierStockBefore: null,
+    diffStatus: (r.diffStatus as SupplierImportPreviewLine["diffStatus"]) ?? null,
+    changedFields: (r.changedFields as string[] | null) ?? null,
     reservedStock: null,
     leadTimeDays: r.leadTimeDays,
     productId: r.productId,
@@ -1626,9 +2284,9 @@ export async function reopenSupplierImportPreview(importId: number): Promise<Sup
     sourceLabel: row.sourceLabel,
     fileHash: row.fileHash,
     fileSizeBytes: row.fileSizeBytes,
-    // C.3.4.3.1 — o formato efetivo é rederivado do snapshot (o conteúdo do
-    // ficheiro não é persistido): assinatura do mapping + nome do ficheiro.
-    // A UI reaberta mostra o MESMO mecanismo do preview original — nunca o
+    // C.3.4.3.1 â€” o formato efetivo Ã© rederivado do snapshot (o conteÃºdo do
+    // ficheiro nÃ£o Ã© persistido): assinatura do mapping + nome do ficheiro.
+    // A UI reaberta mostra o MESMO mecanismo do preview original â€” nunca o
     // mapeamento C.3.2 num snapshot ALSO.
     format: inferSupplierImportFormat(row.fileName, mapping),
     // Headers/delimiter are not part of the snapshot: only the mapping is.
@@ -1643,7 +2301,7 @@ export async function reopenSupplierImportPreview(importId: number): Promise<Sup
     truncated,
     missingProducts,
     // Same module, same secret, same TTL/kind and the same four-field binding
-    // as the token the original preview issued — apply cannot tell them apart,
+    // as the token the original preview issued â€” apply cannot tell them apart,
     // and this one is just as useless against any other import.
     previewToken: createSupplierImportToken({
       importId: row.id, supplierId: row.supplierId, fileHash: row.fileHash, rowCount: row.rowCount,
@@ -1661,7 +2319,7 @@ function isMissingProductsReport(value: unknown): value is MissingProductsReport
   return v.action === "none" && typeof v.count === "number" && Array.isArray(v.items);
 }
 
-// ─── History ─────────────────────────────────────────────
+// â”€â”€â”€ History â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export interface SupplierImportHistoryItem {
   id: number;
@@ -1714,7 +2372,7 @@ export async function listSupplierImports(
   }));
 }
 
-// ─── C.3.2 — Perfil de importação por fornecedor ──
+// â”€â”€â”€ C.3.2 â€” Perfil de importaÃ§Ã£o por fornecedor â”€â”€
 export interface SupplierImportProfile {
   id: number;
   supplierId: number;
@@ -1737,11 +2395,11 @@ function isStringRecord(value: unknown): value is Record<string, string> {
 }
 
 /**
- * C.3.2 — o JSONB `mapping` pode chegar como STRING JSON (dupla codificação,
- * ex.: "{\"nome\":\"name\",…}" — a forma exata encontrada em staging). Aceita:
+ * C.3.2 â€” o JSONB `mapping` pode chegar como STRING JSON (dupla codificaÃ§Ã£o,
+ * ex.: "{\"nome\":\"name\",â€¦}" â€” a forma exata encontrada em staging). Aceita:
  *  - objeto Record<string,string> diretamente;
- *  - string JSON válida que, após JSON.parse, seja Record<string,string>.
- * Qualquer outra forma é inválida → null.
+ *  - string JSON vÃ¡lida que, apÃ³s JSON.parse, seja Record<string,string>.
+ * Qualquer outra forma Ã© invÃ¡lida â†’ null.
  */
 function parseProfileMapping(value: unknown): Record<string, string> | null {
   if (isStringRecord(value)) return value;
@@ -1750,13 +2408,13 @@ function parseProfileMapping(value: unknown): Record<string, string> | null {
       const parsed: unknown = JSON.parse(value);
       if (isStringRecord(parsed)) return parsed;
     } catch {
-      // string que não é JSON — inválida, cai no return null
+      // string que nÃ£o Ã© JSON â€” invÃ¡lida, cai no return null
     }
   }
   return null;
 }
 
-/** Descreve apenas a FORMA do valor (para log seguro), nunca o conteúdo. */
+/** Descreve apenas a FORMA do valor (para log seguro), nunca o conteÃºdo. */
 function describeMappingShape(value: unknown): string {
   if (value === null || value === undefined) return "vazio";
   if (Array.isArray(value)) return "array";
@@ -1765,7 +2423,7 @@ function describeMappingShape(value: unknown): string {
   return typeof value;
 }
 
-/** Mapping manual só conta quando tem pelo menos uma entrada string→string. */
+/** Mapping manual sÃ³ conta quando tem pelo menos uma entrada stringâ†’string. */
 function hasManualMappingEntries(mapping: Record<string, string> | undefined): boolean {
   return !!mapping && Object.values(mapping).some((v) => typeof v === "string");
 }
@@ -1784,9 +2442,9 @@ export async function loadSupplierProfile(supplierId: number): Promise<SupplierI
   if (!rawProfile) return null;
   const mapping = parseProfileMapping(rawProfile.mapping);
   if (!mapping) {
-    // Mapping corrompido/inválido no JSONB — não é engolido em silêncio: fica
-    // logged de forma SEGURA (apenas ids e a forma do valor — nunca o conteúdo
-    // do mapping nem dados do ficheiro) e o perfil é tratado como ausente,
+    // Mapping corrompido/invÃ¡lido no JSONB â€” nÃ£o Ã© engolido em silÃªncio: fica
+    // logged de forma SEGURA (apenas ids e a forma do valor â€” nunca o conteÃºdo
+    // do mapping nem dados do ficheiro) e o perfil Ã© tratado como ausente,
     // mantendo o preview funcional via autoMapHeaders/fallback.
     console.warn(
       `[supplier-import] perfil #${rawProfile.id} do fornecedor #${rawProfile.supplierId} ignorado: mapping JSONB inválido (${describeMappingShape(rawProfile.mapping)})`
@@ -1829,9 +2487,9 @@ export async function saveSupplierProfile(
   return { id: created.id, updated: false };
 }
 
-// ─── C.3.3 (etapa 1) — movidos para @/lib/supplier-import/file ──
+// â”€â”€â”€ C.3.3 (etapa 1) â€” movidos para @/lib/supplier-import/file â”€â”€
 // `isProfileCompatibleWithHeaders` e o tipo `ProfileResolution` passaram a viver
-// junto da resolução mapping/perfil (pura, agnóstica ao formato). Mantêm-se
-// exportados DAQUI para não partir os importadores C.3.2 existentes.
+// junto da resoluÃ§Ã£o mapping/perfil (pura, agnÃ³stica ao formato). MantÃªm-se
+// exportados DAQUI para nÃ£o partir os importadores C.3.2 existentes.
 export { isProfileCompatibleWithHeaders } from "@/lib/supplier-import/file";
 export type { ProfileResolution } from "@/lib/supplier-import/file";
