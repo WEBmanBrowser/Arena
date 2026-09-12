@@ -1,27 +1,27 @@
 /**
- * C.3.4.4 — also-sftp-fetcher: worker de transporte SFTP (READ-ONLY).
+ * C.3.4.4 â€” also-sftp-fetcher: worker de transporte SFTP (READ-ONLY).
  *
- * Arquitetura: a app Arena NÃO fala SSH. Chama este worker via Cloudflare
- * Service Binding; o worker abre TCP (`cloudflare:sockets`), faz o handshake
+ * Arquitetura: a app Arena NÃƒO fala SSH. Chama este worker via Cloudflare
+ * Service Binding; o worker usa `ssh2` sobre `nodejs_compat`, faz o handshake
  * SSH-2, autentica com o secret do SEU runtime e executa stat/read.
  *
- * Contrato RPC (POST JSON — sem segredos, só o NOME do secret):
+ * Contrato RPC (POST JSON â€” sem segredos, sÃ³ o NOME do secret):
  *   pedido:  { op, host, port, username, secretName, remotePath,
  *              hostKeyFingerprint, maxBytes?, timeoutMs?, maxAttempts? }
  *   stat ok: { ok: true, size: number|null, mtime: number|null }
  *   read ok: { ok: true, size, mtime, sha256, contentBase64 }
- *   erro:    { ok: false, code, message } (tabela segura — sem segredos,
+ *   erro:    { ok: false, code, message } (tabela segura â€” sem segredos,
  *            sem bytes do remoto, sem paths, sem stack)
  *
- * Segurança:
- *  - pin da host key OBRIGATÓRIO (mismatch aborta antes de auth/dados);
+ * SeguranÃ§a:
+ *  - pin da host key OBRIGATÃ“RIO (mismatch aborta antes de auth/dados);
  *  - allowlist exata de hosts (env SFTP_ALLOWED_HOSTS, default paco.also.com);
- *  - secret resolvido SÓ do env do worker, pelo NOME (fail-closed);
+ *  - secret resolvido SÃ“ do env do worker, pelo NOME (fail-closed);
  *  - teto 5 MB (stat antecipado + aborto a meio do stream);
- *  - retry SÓ para transitórios de rede (timeout/fetch), nunca auth/hostkey;
+ *  - retry SÃ“ para transitÃ³rios de rede (timeout/fetch), nunca auth/hostkey;
  *  - READ-ONLY estrutural (ver ./sftp.ts).
  *
- * Deploy: este worker NÃO deve ter routes/domínios públicos — é chamado só
+ * Deploy: este worker NÃƒO deve ter routes/domÃ­nios pÃºblicos â€” Ã© chamado sÃ³
  * via service binding `ALSO_SFTP_FETCHER` (ver wrangler.jsonc da app).
  */
 
@@ -31,8 +31,8 @@ import {
   guardSftpConfig,
   type SftpConfig,
 } from "./guards";
-import { SshChannel, SshTransport, base64Encode, type DuplexSocket } from "./ssh";
-import { SftpClient } from "./sftp";
+import { Buffer } from "node:buffer";
+import { runSsh2SftpOp } from "./ssh2-transport";
 
 export interface FetcherEnv {
   /** Hosts exatos permitidos (csv, default `paco.also.com`). */
@@ -60,14 +60,14 @@ export type SftpWorkerResponse =
   | { ok: true; size: number | null; mtime: number | null; sha256?: string; contentBase64?: string }
   | { ok: false; code: SftpErrorCode; message: string };
 
-/** Deadline default por operação (handshake+auth+transferência ≤5 MB). */
+/** Deadline default por operaÃ§Ã£o (handshake+auth+transferÃªncia â‰¤5 MB). */
 export const SFTP_OP_TIMEOUT_MS = 60_000;
 /** Teto absoluto do deadline pedido pelo chamador. */
 const SFTP_OP_TIMEOUT_MAX_MS = 120_000;
-/** Máximo de tentativas (só transitórios de rede são repetidos). */
+/** MÃ¡ximo de tentativas (sÃ³ transitÃ³rios de rede sÃ£o repetidos). */
 const SFTP_MAX_ATTEMPTS_DEFAULT = 3;
 const SFTP_MAX_ATTEMPTS_MAX = 5;
-/** Teto do corpo do pedido RPC (só config — nunca conteúdo). */
+/** Teto do corpo do pedido RPC (sÃ³ config â€” nunca conteÃºdo). */
 const MAX_REQUEST_BYTES = 8192;
 
 const DEFAULT_ALLOWED_HOSTS = ["paco.also.com"];
@@ -96,15 +96,17 @@ function clampInt(v: unknown, def: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, n));
 }
 
+type SftpAttemptRunner = typeof runSsh2SftpOp;
+
 export interface RunSftpOpOptions {
-  connector: () => Promise<DuplexSocket>;
+  runAttempt?: SftpAttemptRunner;
   subtle?: SubtleCrypto;
   sleep?: (ms: number) => Promise<void>;
 }
 
 /**
- * Executa UMA operação (stat/read) com retry de transitórios. Cada tentativa
- * abre uma conexão NOVA (nunca se reutiliza uma sessão a meio de um erro).
+ * Executa UMA operacao (stat/read) com retry apenas de erros transitorios.
+ * Cada tentativa abre uma nova sessao SSH/SFTP.
  */
 export async function runSftpOp(
   cfg: SftpConfig,
@@ -113,44 +115,34 @@ export async function runSftpOp(
   opts: RunSftpOpOptions & { maxBytes: number; timeoutMs: number; maxAttempts: number }
 ): Promise<{ size: number | null; mtime: number | null; bytes: Uint8Array | null }> {
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const runAttempt = opts.runAttempt ?? runSsh2SftpOp;
   let lastError: SftpError = new SftpError("SFTP_FETCH_FAILED");
+
   for (let attempt = 1; attempt <= opts.maxAttempts; attempt++) {
-    const transport = new SshTransport({ connector: opts.connector, timeoutMs: opts.timeoutMs, subtle: opts.subtle });
     try {
-      await transport.connect();
-      const deadline = Date.now() + opts.timeoutMs;
-      await transport.handshake(deadline, cfg.hostKeyFingerprint);
-      await transport.authenticatePassword(deadline, cfg.username, password);
-      const channel: SshChannel = await transport.openSftpChannel(deadline);
-      try {
-        const sftp = new SftpClient(channel);
-        await sftp.init(deadline);
-        const st = await sftp.stat(deadline, cfg.remotePath);
-        if (op === "stat") {
-          await channel.close(deadline);
-          return { size: st.size, mtime: st.mtime, bytes: null };
-        }
-        // Teto antecipado por stat; o stream re-verifica (size pode mentir).
-        if (st.size !== null && st.size > opts.maxBytes) throw new SftpError("SFTP_TOO_LARGE");
-        const { bytes } = await sftp.read(deadline, cfg.remotePath, opts.maxBytes);
-        await channel.close(deadline);
-        return { size: st.size ?? bytes.length, mtime: st.mtime, bytes };
-      } finally {
-        await transport.destroy();
-      }
+      return await runAttempt(cfg, op, password, {
+        maxBytes: opts.maxBytes,
+        timeoutMs: opts.timeoutMs,
+      });
     } catch (e) {
-      await transport.destroy().catch(() => undefined);
-      const err = e instanceof SftpError ? e : new SftpError("SFTP_FETCH_FAILED", { retryable: true });
-      if (!(e instanceof SftpError)) console.error("[sftp-fetch] unexpected:", e);
+      const err =
+        e instanceof SftpError
+          ? e
+          : new SftpError("SFTP_FETCH_FAILED", { retryable: true });
+
       lastError = err;
-      if (!err.retryable || attempt >= opts.maxAttempts) throw err;
+
+      if (!err.retryable || attempt >= opts.maxAttempts) {
+        throw err;
+      }
+
       await sleep(250 * attempt);
     }
   }
+
   throw lastError;
 }
-
-/** Núcleo testável: pedido validado + env → envelope (sem Request/Response). */
+/** NÃºcleo testÃ¡vel: pedido validado + env â†’ envelope (sem Request/Response). */
 export async function handleSftpRequest(
   raw: unknown,
   env: FetcherEnv,
@@ -178,9 +170,9 @@ export async function handleSftpRequest(
     return { ok: false, code, message: sftpErrorMessage(code) };
   }
 
-  // Allowlist EXATA (camada 2; a camada 1 são as guardas puras acima).
+  // Allowlist EXATA (camada 2; a camada 1 sÃ£o as guardas puras acima).
   if (!allowedHosts(env).includes(cfg.host)) {
-    // Log mínimo: op+host+código (sem path/username/segredos).
+    // Log mÃ­nimo: op+host+cÃ³digo (sem path/username/segredos).
     console.log(`[sftp-fetch] op=${op} host=${cfg.host} code=SFTP_HOST_NOT_ALLOWED`);
     return { ok: false, code: "SFTP_HOST_NOT_ALLOWED", message: sftpErrorMessage("SFTP_HOST_NOT_ALLOWED") };
   }
@@ -207,17 +199,16 @@ export async function handleSftpRequest(
       .map((b) => b.toString(16).padStart(2, "0"))
       .join("");
     console.log(`[sftp-fetch] op=read host=${cfg.host} code=OK bytes=${result.bytes.length}`);
-    return { ok: true, size: result.size, mtime: result.mtime, sha256, contentBase64: base64Encode(result.bytes) };
+    return { ok: true, size: result.size, mtime: result.mtime, sha256, contentBase64: Buffer.from(result.bytes).toString("base64") };
   } catch (e) {
     const code: SftpErrorCode = e instanceof SftpError ? e.code : "SFTP_FETCH_FAILED";
-    if (!(e instanceof SftpError)) console.error("[sftp-fetch] unexpected:", e);
-    // Só op+host+código no log — nunca path, username, segredos ou bytes.
+    // SÃ³ op+host+cÃ³digo no log â€” nunca path, username, segredos ou bytes.
     console.log(`[sftp-fetch] op=${op} host=${cfg.host} code=${code}`);
     return { ok: false, code, message: sftpErrorMessage(code) };
   }
 }
 
-// ─── Entry point (service binding) ────────────────────────
+// â”€â”€â”€ Entry point (service binding) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 async function readCappedText(req: Request): Promise<string> {
   const reader = req.body?.getReader();
@@ -245,12 +236,6 @@ async function readCappedText(req: Request): Promise<string> {
   return new TextDecoder().decode(bytes);
 }
 
-async function realConnector(host: string, port: number): Promise<DuplexSocket> {
-  // Import estático-tipado, carregado só aqui (os testes nunca tocam nisto).
-  const { connect } = await import("cloudflare:sockets");
-  return connect({ hostname: host, port });
-}
-
 const worker = {
   async fetch(req: Request, env: FetcherEnv): Promise<Response> {
     if (req.method !== "POST") {
@@ -269,18 +254,7 @@ const worker = {
         { status: 200 }
       );
     }
-    // O connector é criado por pedido a partir da config validada (o núcleo
-    // revalida tudo — o worker nunca confia em validação externa).
-    let validated: SftpConfig;
-    try {
-      validated = guardSftpConfig((raw ?? {}) as Record<string, unknown>);
-    } catch (e) {
-      const code = e instanceof SftpError ? e.code : "SFTP_CONFIG_INVALID";
-      return Response.json({ ok: false, code, message: sftpErrorMessage(code) }, { status: 200 });
-    }
-    const envelope = await handleSftpRequest(raw, env, {
-      connector: () => realConnector(validated.host, validated.port),
-    });
+    const envelope = await handleSftpRequest(raw, env, {});
     return Response.json(envelope, { status: 200 });
   },
 };

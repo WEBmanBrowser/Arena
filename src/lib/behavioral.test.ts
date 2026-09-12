@@ -2,7 +2,7 @@
  * V30 Behavioral tests — PRODUCTION LOGIC = TESTED LOGIC.
  * Services AND operation handlers used by routes are the same ones tested here.
  */
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { db } from "@/db";
 import { products, productImages, productSuppliers, suppliers, orders, orderItems, categories, auditLogs, users } from "@/db/schema";
 import { eq, sql, and, inArray, desc } from "drizzle-orm";
@@ -45,6 +45,8 @@ async function reset() {
   // Audit cleanup for this test suite's actions
   await db.execute(sql`DELETE FROM audit_logs WHERE user_id = ${ACTOR_ID}`);
 }
+
+afterEach(reset);
 
 // ═══ BULK SCHEMAS ═════════════════════════════════════════
 describe("Bulk schemas (shared, strict)", () => {
