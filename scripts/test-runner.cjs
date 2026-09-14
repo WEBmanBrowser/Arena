@@ -52,6 +52,7 @@ async function main() {
     password: 'postgres',
     port,
     persistent: false,
+    initdbFlags: ['--encoding=UTF8'],
   });
 
   // Always remove the data dir on exit, even on early failure.
@@ -80,8 +81,12 @@ async function main() {
   // Run migrations
   log('applying migrations...');
   const migrateResult = spawnSync(
-    'npx',
-    ['drizzle-kit', 'migrate', '--config=drizzle.config.ts'],
+    process.execPath,
+    [
+      path.join(process.cwd(), 'node_modules', 'drizzle-kit', 'bin.cjs'),
+      'migrate',
+      '--config=drizzle.config.ts',
+    ],
     {
       stdio: 'inherit',
       env: { ...process.env, DATABASE_URL: databaseUrl },
@@ -112,7 +117,11 @@ async function main() {
     NODE_ENV: 'test',
     BULK_PREVIEW_SECRET: process.env.BULK_PREVIEW_SECRET,
   };
-  const child = spawn('npx', ['vitest', 'run', ...testArgs], {
+  const child = spawn(process.execPath, [
+    path.join(process.cwd(), 'node_modules', 'vitest', 'vitest.mjs'),
+    'run',
+    ...testArgs,
+  ], {
     stdio: 'inherit',
     env,
     cwd: process.cwd(),

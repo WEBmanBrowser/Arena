@@ -102,6 +102,28 @@ export const SUPPLIER_IMPORT_MESSAGES: Record<string, string> = {
   ALSO_MISSING_HEADERS: "Ficheiro stock ALSO sem cabeçalho reconhecível.",
   AVAILABLE_NEXT_QUANTITY_UNKNOWN: "Quantidade futura desconhecida (AvailableNextQuantity = -1).",
 
+  // ── ALSO real + SFTP (C.3.4.4) ──
+  // Nenhuma destas mensagens pode conter passwords, host keys, paths internos,
+  // bytes do remoto ou stack — a tabela é a única fonte do texto do operador.
+  UNSUPPORTED_ALSO_PRICELIST_FORMAT:
+    "O pricelist ALSO atual (6 colunas, sem header) ainda não tem semântica confirmada — nada foi importado nem aplicado. Só o stock (/stock.txt) é sincronizado nesta fase.",
+  SFTP_CONFIG_INVALID: "Configuração SFTP inválida (host, porta, caminho, utilizador, referência do secret ou pin da host key).",
+  SFTP_HOST_NOT_ALLOWED: "O host SFTP não está na allowlist do worker de transporte — nada foi transferido.",
+  SFTP_HOST_KEY_MISMATCH:
+    "A host key do servidor SFTP não corresponde ao pin configurado — ligação abortada antes de qualquer transferência.",
+  SFTP_AUTH_FAILED: "O servidor SFTP recusou as credenciais — verifique o utilizador e o secret no worker de transporte.",
+  SFTP_SECRET_MISSING:
+    "O segredo SFTP não está disponível no worker de transporte — verifique a referência do secret (o valor nunca é guardado na aplicação).",
+  SFTP_FILE_NOT_FOUND: "O ficheiro remoto SFTP não existe no caminho configurado.",
+  SFTP_PERMISSION_DENIED: "O servidor SFTP negou acesso ao ficheiro remoto (leitura).",
+  SFTP_TOO_LARGE: "O ficheiro remoto SFTP excede o limite de 5 MB — nada foi importado.",
+  SFTP_TIMEOUT: "O servidor SFTP não respondeu dentro do limite de tempo.",
+  SFTP_FETCH_FAILED: "Falha ao obter o ficheiro SFTP — tente novamente mais tarde.",
+  SFTP_PROTOCOL_ERROR: "O servidor SFTP respondeu de forma inesperada — nada foi importado.",
+  SFTP_BINDING_UNAVAILABLE:
+    "O worker de transporte SFTP (also-sftp-fetcher) não está ligado a esta aplicação — falta a service binding.",
+  SFTP_NO_CHANGE: "Nenhuma alteração no ficheiro remoto SFTP desde a última sincronização.",
+
   // ── token / state machine ──
   PREVIEW_TOKEN_REQUIRED: "Confirme o preview antes de aplicar.",
   PREVIEW_TOKEN_INVALID: "Token do preview inválido.",

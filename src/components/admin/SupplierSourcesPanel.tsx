@@ -16,6 +16,11 @@
  *    reabre o preview persistido e recebe aí um token novo — o token nunca
  *    entra numa URL;
  *  - fonte nova nasce desativada: o toggle "Ativar" é um ato separado.
+ *
+ * C.3.4.4 — fontes SFTP (ALSO): o painel mostra host/porta/path, fingerprint
+ * da host key e validadores (size+mtime); o tipo da fonte é imutável após
+ * criar. A password SFTP NUNCA é pedida nem mostrada aqui — vive como secret
+ * no runtime do worker `also-sftp-fetcher` (a UI só aceita o NOME).
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { supplierImportErrorMessage } from "@/lib/supplier-import/error-messages";
@@ -24,12 +29,17 @@ import { supplierImportReviewHref } from "@/lib/import-review-link";
 type SourceRow = {
   id: number;
   name: string;
+  sourceType: string;
   url: string | null;
   format: string;
   authType: string;
   username: string | null;
   secretReference: string | null;
   headersConfig: Record<string, unknown> | null;
+  sftpHost: string | null;
+  sftpPort: number | null;
+  sftpRemotePath: string | null;
+  sftpHostKeyFingerprint: string | null;
   enabled: boolean;
   applyPolicy: string;
   lastCheckedAt: string | null;
@@ -40,6 +50,8 @@ type SourceRow = {
   lastRowCount: number | null;
   lastEtag: string | null;
   lastModified: string | null;
+  lastRemoteSize: number | null;
+  lastRemoteMtime: string | null;
 };
 
 type SyncOutcome = {
@@ -52,16 +64,38 @@ type SyncOutcome = {
 };
 
 type FormState = {
+  sourceType: "url" | "sftp";
   name: string;
   url: string;
-  format: "auto" | "csv" | "xlsx";
+  format: "auto" | "csv" | "xlsx" | "also_stock" | "also_pricelist";
   authType: "none" | "basic" | "bearer" | "header";
   username: string;
   secretReference: string;
   headerName: string;
+  sftpHost: string;
+  sftpPort: string;
+  sftpRemotePath: string;
+  sftpHostKeyFingerprint: string;
 };
 
-const emptyForm: FormState = { name: "", url: "", format: "auto", authType: "none", username: "", secretReference: "", headerName: "" };
+const emptyForm: FormState = {
+  sourceType: "url",
+  name: "",
+  url: "",
+  format: "auto",
+  authType: "none",
+  username: "",
+  secretReference: "",
+  headerName: "",
+  sftpHost: "",
+  sftpPort: "22",
+  sftpRemotePath: "",
+  sftpHostKeyFingerprint: "",
+};
+
+/** Origem legível de uma fonte SFTP (sem credenciais). */
+const sftpOrigin = (s: SourceRow) =>
+  s.sftpHost ? `sftp://${s.sftpHost}${s.sftpPort && s.sftpPort !== 22 ? `:${s.sftpPort}` : ""}${s.sftpRemotePath ?? ""}` : "—";
 
 const dt = (iso: string | null) => (iso ? new Date(iso).toLocaleString("pt-PT", { dateStyle: "short", timeStyle: "short" }) : "—");
 
@@ -126,6 +160,7 @@ export default function SupplierSourcesPanel({ supplierId, supplierName }: { sup
   const openEdit = (s: SourceRow) => {
     setEditing(s);
     setForm({
+      sourceType: s.sourceType === "sftp" ? "sftp" : "url",
       name: s.name,
       url: s.url ?? "",
       format: (s.format as FormState["format"]) ?? "auto",
@@ -133,12 +168,32 @@ export default function SupplierSourcesPanel({ supplierId, supplierName }: { sup
       username: s.username ?? "",
       secretReference: s.secretReference ?? "",
       headerName: typeof s.headersConfig?.headerName === "string" ? s.headersConfig.headerName : "",
+      sftpHost: s.sftpHost ?? "",
+      sftpPort: String(s.sftpPort ?? 22),
+      sftpRemotePath: s.sftpRemotePath ?? "",
+      sftpHostKeyFingerprint: s.sftpHostKeyFingerprint ?? "",
     });
     setFormError(null);
     setShowForm(true);
   };
 
   const buildPayload = () => {
+    // C.3.4.4: payload SFTP sem URL/auth genéricos (o tipo é imutável; em
+    // edição o servidor escolhe o ramo pelo tipo da linha existente).
+    if (form.sourceType === "sftp") {
+      return {
+        supplierId,
+        sourceType: "sftp" as const,
+        name: form.name.trim(),
+        sftpHost: form.sftpHost.trim(),
+        sftpPort: Number.parseInt(form.sftpPort, 10),
+        sftpRemotePath: form.sftpRemotePath.trim(),
+        username: form.username.trim(),
+        secretReference: form.secretReference.trim(),
+        sftpHostKeyFingerprint: form.sftpHostKeyFingerprint.trim(),
+        format: form.format,
+      };
+    }
     const headersConfig: Record<string, string> = {};
     if (form.authType === "header" && form.headerName.trim()) headersConfig.headerName = form.headerName.trim();
     return {
@@ -207,7 +262,12 @@ export default function SupplierSourcesPanel({ supplierId, supplierName }: { sup
             ...prev,
             [s.id]: {
               kind: "info",
-              text: run.noChangeReason === "http_304" ? "Sem alterações (HTTP 304 — validador do servidor)." : "Sem alterações (conteúdo igual ao último snapshot).",
+              text:
+                run.noChangeReason === "http_304"
+                  ? "Sem alterações (HTTP 304 — validador do servidor)."
+                  : run.noChangeReason === "remote_metadata"
+                    ? "Sem alterações (metadata SFTP igual — ficheiro nem foi transferido)."
+                    : "Sem alterações (conteúdo igual ao último snapshot).",
             },
           }));
         }
@@ -244,52 +304,110 @@ export default function SupplierSourcesPanel({ supplierId, supplierName }: { sup
               <span className={label}>Nome *</span>
               <input value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} className={input} placeholder="Lista diária" />
             </div>
-            <div className="lg:col-span-2">
-              <span className={label}>URL (apenas HTTPS) *</span>
-              <input value={form.url} onChange={(e) => setForm((f) => ({ ...f, url: e.target.value }))} className={input} placeholder="https://supplier.example.com/files/lista.csv" />
-            </div>
-            <div>
-              <span className={label}>Formato</span>
-              <select value={form.format} onChange={(e) => setForm((f) => ({ ...f, format: e.target.value as FormState["format"] }))} className={input}>
-                <option value="auto">Auto (deteção por bytes)</option>
-                <option value="csv">CSV</option>
-                <option value="xlsx">XLSX</option>
-              </select>
-            </div>
-            <div>
-              <span className={label}>Autenticação</span>
-              <select value={form.authType} onChange={(e) => setForm((f) => ({ ...f, authType: e.target.value as FormState["authType"] }))} className={input}>
-                <option value="none">Nenhuma</option>
-                <option value="basic">Basic</option>
-                <option value="bearer">Bearer</option>
-                <option value="header">Header</option>
-              </select>
-            </div>
-            {form.authType === "basic" && (
+            {!editing && (
               <div>
-                <span className={label}>Username (Basic) *</span>
-                <input value={form.username} onChange={(e) => setForm((f) => ({ ...f, username: e.target.value }))} className={input} autoComplete="off" />
+                <span className={label}>Tipo de fonte *</span>
+                <select value={form.sourceType} onChange={(e) => setForm((f) => ({ ...f, sourceType: e.target.value as FormState["sourceType"] }))} className={input}>
+                  <option value="url">HTTPS (URL)</option>
+                  <option value="sftp">SFTP (ex.: ALSO)</option>
+                </select>
               </div>
             )}
-            {form.authType === "header" && (
-              <div>
-                <span className={label}>Nome do header *</span>
-                <input value={form.headerName} onChange={(e) => setForm((f) => ({ ...f, headerName: e.target.value }))} className={input} placeholder="X-Api-Key" autoComplete="off" />
-              </div>
-            )}
-            {form.authType !== "none" && (
-              <div>
-                <span className={label}>Referência do secret *</span>
-                <input value={form.secretReference} onChange={(e) => setForm((f) => ({ ...f, secretReference: e.target.value }))} className={input} placeholder="SUPPLIER_SRC_12_TOKEN" autoComplete="off" spellCheck={false} />
-                <p className="text-[11px] text-slate-400 mt-1">
-                  Apenas o NOME do secret disponível no runtime (ex.: variável de ambiente provisionada por CLI).
-                  Nunca escreva aqui a password/token/key — a aplicação nunca aceita nem guarda valores de segredos.
-                </p>
-              </div>
+            {form.sourceType === "url" ? (
+              <>
+                <div className="lg:col-span-2">
+                  <span className={label}>URL (apenas HTTPS) *</span>
+                  <input value={form.url} onChange={(e) => setForm((f) => ({ ...f, url: e.target.value }))} className={input} placeholder="https://supplier.example.com/files/lista.csv" />
+                </div>
+                <div>
+                  <span className={label}>Formato</span>
+                  <select value={form.format} onChange={(e) => setForm((f) => ({ ...f, format: e.target.value as FormState["format"] }))} className={input}>
+                    <option value="auto">Auto (deteção por bytes)</option>
+                    <option value="csv">CSV</option>
+                    <option value="xlsx">XLSX</option>
+                  </select>
+                </div>
+                <div>
+                  <span className={label}>Autenticação</span>
+                  <select value={form.authType} onChange={(e) => setForm((f) => ({ ...f, authType: e.target.value as FormState["authType"] }))} className={input}>
+                    <option value="none">Nenhuma</option>
+                    <option value="basic">Basic</option>
+                    <option value="bearer">Bearer</option>
+                    <option value="header">Header</option>
+                  </select>
+                </div>
+                {form.authType === "basic" && (
+                  <div>
+                    <span className={label}>Username (Basic) *</span>
+                    <input value={form.username} onChange={(e) => setForm((f) => ({ ...f, username: e.target.value }))} className={input} autoComplete="off" />
+                  </div>
+                )}
+                {form.authType === "header" && (
+                  <div>
+                    <span className={label}>Nome do header *</span>
+                    <input value={form.headerName} onChange={(e) => setForm((f) => ({ ...f, headerName: e.target.value }))} className={input} placeholder="X-Api-Key" autoComplete="off" />
+                  </div>
+                )}
+                {form.authType !== "none" && (
+                  <div>
+                    <span className={label}>Referência do secret *</span>
+                    <input value={form.secretReference} onChange={(e) => setForm((f) => ({ ...f, secretReference: e.target.value }))} className={input} placeholder="SUPPLIER_SRC_12_TOKEN" autoComplete="off" spellCheck={false} />
+                    <p className="text-[11px] text-slate-400 mt-1">
+                      Apenas o NOME do secret disponível no runtime (ex.: variável de ambiente provisionada por CLI).
+                      Nunca escreva aqui a password/token/key — a aplicação nunca aceita nem guarda valores de segredos.
+                    </p>
+                  </div>
+                )}
+              </>
+            ) : (
+              <>
+                <div>
+                  <span className={label}>Host SFTP *</span>
+                  <input value={form.sftpHost} onChange={(e) => setForm((f) => ({ ...f, sftpHost: e.target.value }))} className={input} placeholder="ftp.fornecedor.example" autoComplete="off" spellCheck={false} />
+                </div>
+                <div>
+                  <span className={label}>Porta</span>
+                  <input value={form.sftpPort} onChange={(e) => setForm((f) => ({ ...f, sftpPort: e.target.value }))} className={input} placeholder="22" inputMode="numeric" autoComplete="off" />
+                </div>
+                <div className="lg:col-span-2">
+                  <span className={label}>Path remoto (absoluto) *</span>
+                  <input value={form.sftpRemotePath} onChange={(e) => setForm((f) => ({ ...f, sftpRemotePath: e.target.value }))} className={input} placeholder="/out/stock.txt" autoComplete="off" spellCheck={false} />
+                </div>
+                <div>
+                  <span className={label}>Username SSH *</span>
+                  <input value={form.username} onChange={(e) => setForm((f) => ({ ...f, username: e.target.value }))} className={input} autoComplete="off" />
+                </div>
+                <div>
+                  <span className={label}>Formato</span>
+                  <select value={form.format} onChange={(e) => setForm((f) => ({ ...f, format: e.target.value as FormState["format"] }))} className={input}>
+                    <option value="auto">Auto (nome do ficheiro + bytes)</option>
+                    <option value="also_stock">ALSO stock (stock.txt)</option>
+                    <option value="also_pricelist">ALSO pricelist</option>
+                    <option value="csv">CSV</option>
+                    <option value="xlsx">XLSX</option>
+                  </select>
+                </div>
+                <div className="lg:col-span-2">
+                  <span className={label}>Fingerprint da host key (SHA256:…) *</span>
+                  <input value={form.sftpHostKeyFingerprint} onChange={(e) => setForm((f) => ({ ...f, sftpHostKeyFingerprint: e.target.value }))} className={input} placeholder="SHA256:…" autoComplete="off" spellCheck={false} />
+                  <p className="text-[11px] text-slate-400 mt-1">
+                    Pin obrigatório da chave do servidor (sem TOFU): a sincronização recusa qualquer host key diferente.
+                  </p>
+                </div>
+                <div>
+                  <span className={label}>Referência do secret (password) *</span>
+                  <input value={form.secretReference} onChange={(e) => setForm((f) => ({ ...f, secretReference: e.target.value }))} className={input} placeholder="ALSO_SFTP_PASSWORD" autoComplete="off" spellCheck={false} />
+                  <p className="text-[11px] text-slate-400 mt-1">
+                    Apenas o NOME do secret com a password, provisionado no runtime do worker SFTP (ex.: por CLI).
+                    A password NUNCA é pedida nem guardada aqui.
+                  </p>
+                </div>
+              </>
             )}
             <div className="lg:col-span-3 text-[11px] text-slate-500">
               Perfil de mapeamento: usa automaticamente o perfil normal do fornecedor (C.3.2). Nova fonte nasce SEMPRE desativada e o resultado de uma
               sincronização é sempre um preview para revisão humana — nunca aplicação automática.
+              {form.sourceType === "sftp" && " O transporte SFTP é só de leitura (stat/read) e o stock ALSO nunca altera o stock físico da loja."}
             </div>
           </div>
           {formError && <p className="text-xs text-red-600">{formError}</p>}
@@ -307,7 +425,7 @@ export default function SupplierSourcesPanel({ supplierId, supplierName }: { sup
           <thead className="bg-slate-50">
             <tr>
               <th className="text-left p-2 font-medium text-slate-600">Fonte</th>
-              <th className="text-left p-2 font-medium text-slate-600">URL</th>
+              <th className="text-left p-2 font-medium text-slate-600">Origem</th>
               <th className="text-center p-2 font-medium text-slate-600">Estado</th>
               <th className="text-left p-2 font-medium text-slate-600">Último check</th>
               <th className="text-left p-2 font-medium text-slate-600">Último sucesso</th>
@@ -326,7 +444,7 @@ export default function SupplierSourcesPanel({ supplierId, supplierName }: { sup
             {!loading && sources.length === 0 && (
               <tr>
                 <td colSpan={9} className="p-3 text-slate-400">
-                  Sem fontes. Uploads manuais (CSV/XLSX) continuam a funcionar sem fonte configurada — as fontes servem apenas sincronização por URL.
+                  Sem fontes. Uploads manuais (CSV/XLSX) continuam a funcionar sem fonte configurada — as fontes servem apenas sincronização por URL ou SFTP.
                 </td>
               </tr>
             )}
@@ -335,13 +453,37 @@ export default function SupplierSourcesPanel({ supplierId, supplierName }: { sup
                 <td className="p-2">
                   <div className="font-medium text-slate-800">{s.name}</div>
                   <div className="text-slate-400">
-                    {s.format} · auth {s.authType === "none" ? "nenhuma" : s.authType}
-                    {s.authType === "basic" && s.username ? ` (${s.username})` : ""}
-                    {s.secretReference ? ` · secret: ${s.secretReference}` : ""}
-                    {typeof s.headersConfig?.headerName === "string" ? ` · header: ${s.headersConfig.headerName}` : ""}
+                    {s.sourceType === "sftp" ? (
+                      <>
+                        sftp · {s.format}
+                        {s.username ? ` · user ${s.username}` : ""}
+                        {s.secretReference ? ` · secret: ${s.secretReference}` : ""}
+                      </>
+                    ) : (
+                      <>
+                        {s.format} · auth {s.authType === "none" ? "nenhuma" : s.authType}
+                        {s.authType === "basic" && s.username ? ` (${s.username})` : ""}
+                        {s.secretReference ? ` · secret: ${s.secretReference}` : ""}
+                        {typeof s.headersConfig?.headerName === "string" ? ` · header: ${s.headersConfig.headerName}` : ""}
+                      </>
+                    )}
                   </div>
                 </td>
-                <td className="p-2 max-w-[260px] break-all text-slate-500">{s.url}</td>
+                <td className="p-2 max-w-[260px] break-all text-slate-500">
+                  {s.sourceType === "sftp" ? (
+                    <>
+                      {sftpOrigin(s)}
+                      <div className="text-slate-400 text-[11px]">pin: {s.sftpHostKeyFingerprint ?? "—"}</div>
+                      {s.lastRemoteSize !== null && s.lastRemoteSize !== undefined && (
+                        <div className="text-slate-400 text-[11px]">
+                          remoto: {s.lastRemoteSize} bytes{s.lastRemoteMtime ? ` · mtime ${s.lastRemoteMtime}` : ""}
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    s.url
+                  )}
+                </td>
                 <td className="p-2 text-center">
                   <span className={`px-2 py-0.5 rounded text-[11px] ${s.enabled ? "bg-green-50 text-green-600" : "bg-slate-100 text-slate-500"}`}>
                     {s.enabled ? "Ativa" : "Desativada"}
@@ -349,7 +491,7 @@ export default function SupplierSourcesPanel({ supplierId, supplierName }: { sup
                 </td>
                 <td className="p-2 whitespace-nowrap">{dt(s.lastCheckedAt)}</td>
                 <td className="p-2 whitespace-nowrap">{dt(s.lastSuccessAt)}</td>
-                <td className="p-2 text-center">{s.lastHttpStatus ?? "—"}</td>
+                <td className="p-2 text-center">{s.sourceType === "sftp" ? "—" : (s.lastHttpStatus ?? "—")}</td>
                 <td className="p-2 text-center">{s.lastRowCount ?? "—"}</td>
                 <td className="p-2 text-red-500 max-w-[220px]">
                   {s.lastErrorCode ? (

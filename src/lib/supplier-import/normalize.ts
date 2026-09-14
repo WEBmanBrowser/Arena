@@ -136,6 +136,10 @@ export interface SupplierImportIssue {
  * C.3.4.3.1 — ALSO extension: optional ALSO-specific metadata preserved per row,
  * even when the commercial apply (stock-only) does not use it. These fields are
  * populated only by ALSO parsers (pricelist / stock) and stay null for CSV/XLSX.
+ *
+ * C.3.4.4 — `supplierStock`: stock do FORNECEDOR (ALSO), separado do stock
+ * físico (`stock` → products.stock). Só o parser ALSO stock-only o preenche;
+ * `stock` NUNCA transporta stock ALSO para products.stock.
  */
 export interface NormalizedSupplierRow {
   /** Line number in the source file (header = line 1), so reports point at the file. */
@@ -148,6 +152,8 @@ export interface NormalizedSupplierRow {
   /** Decimal string with exactly 2 fraction digits, or null when absent. */
   costPrice: string | null;
   stock: number | null;
+  /** C.3.4.4: stock do fornecedor (ALSO stock-only) — nunca o stock físico. */
+  supplierStock?: number | null;
   leadTimeDays: number | null;
   issues: SupplierImportIssue[];
   // ── C.3.4.3.1 ALSO metadata (optional, preserved) ──

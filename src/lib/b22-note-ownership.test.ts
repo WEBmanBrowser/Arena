@@ -3,7 +3,7 @@
 
 import { db } from "@/db";
 import { customerNotes, users, auditLogs } from "@/db/schema";
-import { eq, and } from "drizzle-orm";
+import { eq, and, inArray } from "drizzle-orm";
 import { createCustomerNote, updateCustomerNote, deleteCustomerNote } from "@/lib/services/admin-customers-service";
 import { describe, it, expect, beforeEach } from "vitest";
 
@@ -12,6 +12,9 @@ describe("B.2.2 — Note Ownership", () => {
   beforeEach(async () => {
     // Clean up notes before each test
     await db.delete(customerNotes);
+    const testUsers = await db.select({ id: users.id }).from(users).where(inArray(users.email, ["owner@example.com","owner2@example.com","customer1@example.com","customer2@example.com","audit@example.com","no-audit@example.com"]));
+    if (testUsers.length > 0) await db.delete(auditLogs).where(inArray(auditLogs.userId, testUsers.map((u) => u.id)));
+    await db.delete(users).where(inArray(users.email, ["owner@example.com","owner2@example.com","customer1@example.com","customer2@example.com","audit@example.com","no-audit@example.com"]));
   });
 
   // Test that a note can only be updated by its owner

@@ -48,7 +48,21 @@ import {
   guardSupplierSourceUrl,
   sourceSha256Hex,
   type FetchSourceOptions,
+  type SourcePayload,
 } from "@/lib/supplier-import/source";
+import {
+  SftpError,
+  fetchSftpSource,
+  guardSftpFingerprint,
+  guardSftpHost,
+  guardSftpPath,
+  guardSftpPort,
+  guardSftpSecretName,
+  guardSftpUsername,
+  resolveSftpFormat,
+  sftpLabel,
+  type SftpFetchOptions,
+} from "@/lib/supplier-import/sftp";
 import {
   SupplierImportError,
   previewSupplierImport,
@@ -76,7 +90,7 @@ const clip = (value: string | null | undefined, max: number): string | null => {
  * bruto fica apenas no log do servidor (nunca no browser nem na BD).
  */
 export function safeRunError(err: unknown): { code: string; message: string; remoteStatus: number | null } {
-  if (err instanceof SupplierSourceError || err instanceof SupplierCsvError || err instanceof SupplierImportError) {
+  if (err instanceof SupplierSourceError || err instanceof SupplierCsvError || err instanceof SupplierImportError || err instanceof SftpError) {
     return {
       code: err.code,
       // A tabela partilhada é a ÚNICA origem do texto: nada do remoto (corpo,
@@ -99,8 +113,11 @@ export function safeRunError(err: unknown): { code: string; message: string; rem
 export interface RunSupplierSourceOutcome {
   runId: number;
   status: "success" | "no_change";
-  /** Porquê do no_change: HTTP 304 (validadores) ou hash de conteúdo igual. */
-  noChangeReason?: "http_304" | "content_hash";
+  /**
+   * Porquê do no_change: HTTP 304 (validadores), metadata SFTP (size+mtime
+   * iguais, sem transferir) ou hash de conteúdo igual.
+   */
+  noChangeReason?: "http_304" | "content_hash" | "remote_metadata";
   httpStatus: number | null;
   durationMs: number;
   importId: number | null;
@@ -110,6 +127,9 @@ export interface RunSupplierSourceOutcome {
   missingCount: number | null;
   etag: string | null;
   lastModified: string | null;
+  /** C.3.4.4: size+mtime observados (SFTP; null em fontes HTTPS). */
+  remoteSize: number | null;
+  remoteMtime: string | null;
   fileHash: string | null;
   /** Só presente em success — a UI usa importId/summary; nunca valores do browser. */
   preview?: SupplierImportPreview;
@@ -124,16 +144,24 @@ export interface RunSupplierSourceOutcome {
  * source_id/label/etag/last_modified ao import; 10–11. fecha a run e
  * atualiza a observabilidade da fonte. NUNCA aplica nada.
  */
+/** Deps de run: HTTPS (fetchImpl) + SFTP (fetcherImpl) — cada ramo usa as suas. */
+export type RunSupplierSourceDeps = FetchSourceOptions & SftpFetchOptions;
+
 export async function runSupplierSource(
   sourceId: number,
   userId: number,
-  deps: FetchSourceOptions = {}
+  deps: RunSupplierSourceDeps = {}
 ): Promise<RunSupplierSourceOutcome> {
   const [source] = await db.select().from(supplierSources).where(eq(supplierSources.id, sourceId)).limit(1);
   if (!source) throw new SupplierSourceError("SOURCE_NOT_FOUND", 404);
-  if (source.sourceType !== "url") throw new SupplierSourceError("SOURCE_TYPE_UNSUPPORTED", 400);
-  if (!source.url) throw new SupplierSourceError("SOURCE_URL_INVALID", 400);
+  if (source.sourceType !== "url" && source.sourceType !== "sftp") {
+    throw new SupplierSourceError("SOURCE_TYPE_UNSUPPORTED", 400);
+  }
   if (!source.enabled) throw new SupplierSourceError("SOURCE_DISABLED", 409);
+  // C.3.4.4: o ramo SFTP (worker also-sftp-fetcher) partilha o claim atómico,
+  // o motor de preview e a observabilidade — só o transporte difere.
+  if (source.sourceType === "sftp") return runSftpSourceSync(source, userId, deps);
+  if (!source.url) throw new SupplierSourceError("SOURCE_URL_INVALID", 400);
 
   // Claim ANTES de qualquer rede: duas sincronizações simultâneas da mesma
   // fonte nunca correm em paralelo (SOURCE_ALREADY_RUNNING). O FOR UPDATE na
@@ -187,7 +215,7 @@ export async function runSupplierSource(
       return {
         runId, status: "no_change", noChangeReason: "http_304", httpStatus: 304, durationMs,
         importId: null, rowCount: null, newCount: null, updatedCount: null, missingCount: null,
-        etag: source.lastEtag, lastModified: source.lastModified, fileHash: null,
+        etag: source.lastEtag, lastModified: source.lastModified, remoteSize: null, remoteMtime: null, fileHash: null,
       };
     }
 
@@ -239,7 +267,7 @@ export async function runSupplierSource(
       return {
         runId, status: "no_change", noChangeReason: "content_hash", httpStatus: result.httpStatus, durationMs,
         importId: lastRelevant.id, rowCount: lastRelevant.rowCount, newCount: null, updatedCount: null,
-        missingCount: null, etag: result.etag, lastModified: result.lastModified, fileHash: hash,
+        missingCount: null, etag: result.etag, lastModified: result.lastModified, remoteSize: null, remoteMtime: null, fileHash: hash,
       };
     }
 
@@ -314,6 +342,8 @@ export async function runSupplierSource(
       missingCount,
       etag: result.etag,
       lastModified: result.lastModified,
+      remoteSize: null,
+      remoteMtime: null,
       fileHash: hash,
       preview,
     };
@@ -349,7 +379,245 @@ export async function runSupplierSource(
       console.error("supplier source run finalize:", finalizeError);
     }
     if (e instanceof SupplierSourceError) throw e;
+    // C.3.4.4: erros SFTP tipados viajam com o código estável (a rota mapeia
+    // para a frase segura da tabela partilhada — nunca texto do remoto).
+    if (e instanceof SftpError) throw new SupplierSourceError(e.code, 502);
     throw new SupplierSourceError(code, 500);
+  }
+}
+
+/**
+ * C.3.4.4 — sincronização de UMA fonte SFTP (worker also-sftp-fetcher).
+ *
+ * Espelho do ramo HTTPS: claim atómico → stat/read → no_change (metadata ou
+ * hash) → preview pelo MESMO motor → observabilidade. Diferenças:
+ *  - transporte = fetchSftpSource (stat-then-read; size+mtime evitam a
+ *    transferência, o SHA-256 do conteúdo decide a identidade);
+ *  - validadores size+mtime em vez de ETag/Last-Modified; httpStatus é null
+ *    (sem HTTP envolvido);
+ *  - formato explícito da fonte (incl. also_stock/also_pricelist) ou `auto`
+ *    (basename *.txt + sniffing dos bytes — ver sftp.ts);
+ *  - NUNCA apply aqui (preview_only); sem cron nesta fase.
+ */
+async function runSftpSourceSync(
+  source: typeof supplierSources.$inferSelect,
+  userId: number,
+  deps: RunSupplierSourceDeps
+): Promise<RunSupplierSourceOutcome> {
+  const runId = await claimSourceRun(source.id);
+  const startedAt = Date.now();
+  const fail = async (e: unknown): Promise<never> => {
+    const { code, message } = safeRunError(e);
+    const durationMs = Date.now() - startedAt;
+    const now = new Date();
+    try {
+      await db.transaction(async (tx) => {
+        await tx.update(supplierSourceRuns).set({
+          status: "error",
+          finishedAt: now,
+          durationMs,
+          httpStatus: null,
+          errorCode: clip(code, 80),
+          errorMessage: clip(message, 500),
+        }).where(eq(supplierSourceRuns.id, runId));
+        await tx.update(supplierSources).set({
+          lastCheckedAt: now,
+          lastErrorCode: clip(code, 80),
+          lastErrorMessage: clip(message, 500),
+          lastDurationMs: durationMs,
+          updatedAt: now,
+        }).where(eq(supplierSources.id, source.id));
+      });
+    } catch (finalizeError) {
+      console.error("supplier source run finalize:", finalizeError);
+    }
+    if (e instanceof SupplierSourceError) throw e;
+    if (e instanceof SftpError) throw new SupplierSourceError(e.code, 502);
+    throw new SupplierSourceError(code, 500);
+  };
+
+  try {
+    if (!source.sftpHost || !source.sftpRemotePath || !source.username || !source.secretReference || !source.sftpHostKeyFingerprint) {
+      throw new SftpError("SFTP_CONFIG_INVALID");
+    }
+    const result = await fetchSftpSource(
+      {
+        host: source.sftpHost,
+        port: source.sftpPort ?? 22,
+        remotePath: source.sftpRemotePath,
+        username: source.username,
+        secretReference: source.secretReference,
+        hostKeyFingerprint: source.sftpHostKeyFingerprint,
+        format: source.format as "auto" | "csv" | "xlsx" | "also_stock" | "also_pricelist",
+        lastRemoteSize: source.lastRemoteSize,
+        lastRemoteMtime: source.lastRemoteMtime,
+      },
+      deps
+    );
+
+    if (result.kind === "not_modified") {
+      // size+mtime iguais: sem transferência, sem preview, sem catálogo
+      // alterado. last_checked_at avança; last_success_at NÃO (espelho do 304:
+      // não houve conteúdo novo).
+      const durationMs = Date.now() - startedAt;
+      const now = new Date();
+      await db.transaction(async (tx) => {
+        await tx.update(supplierSourceRuns).set({
+          status: "no_change",
+          finishedAt: now,
+          durationMs,
+          httpStatus: null,
+          remoteSize: result.stat.size,
+          remoteMtime: clip(result.stat.mtime, 100),
+        }).where(eq(supplierSourceRuns.id, runId));
+        await tx.update(supplierSources).set({
+          lastCheckedAt: now,
+          lastHttpStatus: null,
+          lastDurationMs: durationMs,
+          lastErrorCode: null,
+          lastErrorMessage: null,
+          updatedAt: now,
+        }).where(eq(supplierSources.id, source.id));
+      });
+      await auditRun(source, userId, { runId, status: "no_change", reason: "remote_metadata" });
+      return {
+        runId, status: "no_change", noChangeReason: "remote_metadata", httpStatus: null, durationMs,
+        importId: null, rowCount: null, newCount: null, updatedCount: null, missingCount: null,
+        etag: null, lastModified: null, remoteSize: result.stat.size, remoteMtime: result.stat.mtime, fileHash: null,
+      };
+    }
+
+    // Conteúdo transferido: o formato é o explícito da fonte ou `auto`
+    // (basename + sniffing); xlsx viaja em bytes, texto em UTF-8.
+    const format = resolveSftpFormat(
+      source.format as "auto" | "csv" | "xlsx" | "also_stock" | "also_pricelist",
+      source.sftpRemotePath,
+      result.content.bytes
+    );
+    const label = sftpLabel(source.sftpHost, source.sftpPort ?? 22, source.sftpRemotePath);
+    const payload: SourcePayload =
+      format === "xlsx"
+        ? { kind: "sftp", label, format: "xlsx", bytes: result.content.bytes }
+        : { kind: "sftp", label, format, text: new TextDecoder("utf-8").decode(result.content.bytes) };
+
+    // Hash de IDENTIDADE sobre os bytes reais (a mesma infraestrutura do
+    // upload). size+mtime poupam a transferência; o hash decide no_change.
+    const hash = sourceSha256Hex(payload);
+    const [lastRelevant] = await db
+      .select({ id: supplierImports.id, fileHash: supplierImports.fileHash, rowCount: supplierImports.rowCount })
+      .from(supplierImports)
+      .where(and(eq(supplierImports.sourceId, source.id), sql`${supplierImports.status} <> 'failed'`))
+      .orderBy(desc(supplierImports.id))
+      .limit(1);
+
+    if (lastRelevant && lastRelevant.fileHash === hash) {
+      const durationMs = Date.now() - startedAt;
+      const now = new Date();
+      await db.transaction(async (tx) => {
+        await tx.update(supplierSourceRuns).set({
+          status: "no_change",
+          finishedAt: now,
+          durationMs,
+          httpStatus: null,
+          rowCount: lastRelevant.rowCount,
+          remoteSize: result.content.size,
+          remoteMtime: clip(result.content.mtime, 100),
+          importId: lastRelevant.id,
+        }).where(eq(supplierSourceRuns.id, runId));
+        await tx.update(supplierSources).set({
+          lastCheckedAt: now,
+          lastSuccessAt: now,
+          lastHttpStatus: null,
+          lastDurationMs: durationMs,
+          lastRowCount: lastRelevant.rowCount,
+          lastRemoteSize: result.content.size,
+          lastRemoteMtime: clip(result.content.mtime, 100),
+          lastErrorCode: null,
+          lastErrorMessage: null,
+          updatedAt: now,
+        }).where(eq(supplierSources.id, source.id));
+      });
+      await auditRun(source, userId, { runId, status: "no_change", reason: "content_hash" });
+      return {
+        runId, status: "no_change", noChangeReason: "content_hash", httpStatus: null, durationMs,
+        importId: lastRelevant.id, rowCount: lastRelevant.rowCount, newCount: null, updatedCount: null,
+        missingCount: null, etag: null, lastModified: null,
+        remoteSize: result.content.size, remoteMtime: result.content.mtime, fileHash: hash,
+      };
+    }
+
+    const mapping = source.profileId ? await loadProfileMappingById(source.profileId) : undefined;
+    const preview = await previewSupplierImport({
+      supplierId: source.supplierId,
+      source: payload,
+      mapping,
+      userId,
+      sourceId: source.id,
+    });
+
+    const [persisted] = await db
+      .select({ rowCount: supplierImports.rowCount })
+      .from(supplierImports)
+      .where(eq(supplierImports.id, preview.importId))
+      .limit(1);
+    const summary = (preview.summary ?? {}) as Record<string, unknown>;
+    const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
+    const newCount = num(summary.newProducts);
+    const updatedCount = num(summary.ready);
+    const missingCount =
+      preview.missingProducts && Number.isFinite(preview.missingProducts.count) ? preview.missingProducts.count : null;
+
+    const durationMs = Date.now() - startedAt;
+    const now = new Date();
+    await db.transaction(async (tx) => {
+      await tx.update(supplierSourceRuns).set({
+        status: "success",
+        finishedAt: now,
+        durationMs,
+        rowCount: persisted?.rowCount ?? num(summary.total),
+        newCount,
+        updatedCount,
+        missingCount,
+        httpStatus: null,
+        remoteSize: result.content.size,
+        remoteMtime: clip(result.content.mtime, 100),
+        importId: preview.importId,
+      }).where(eq(supplierSourceRuns.id, runId));
+      await tx.update(supplierSources).set({
+        lastCheckedAt: now,
+        lastSuccessAt: now,
+        lastErrorCode: null,
+        lastErrorMessage: null,
+        lastDurationMs: durationMs,
+        lastRowCount: persisted?.rowCount ?? null,
+        lastHttpStatus: null,
+        lastRemoteSize: result.content.size,
+        lastRemoteMtime: clip(result.content.mtime, 100),
+        updatedAt: now,
+      }).where(eq(supplierSources.id, source.id));
+    });
+
+    // NUNCA applySupplierImport() aqui — o resultado é sempre um preview.
+    await auditRun(source, userId, { runId, status: "success", importId: preview.importId, rowCount: persisted?.rowCount ?? null });
+    return {
+      runId,
+      status: "success",
+      httpStatus: null,
+      durationMs,
+      importId: preview.importId,
+      rowCount: persisted?.rowCount ?? null,
+      newCount,
+      updatedCount,
+      missingCount,
+      etag: null,
+      lastModified: null,
+      remoteSize: result.content.size,
+      remoteMtime: result.content.mtime,
+      fileHash: hash,
+      preview,
+    };
+  } catch (e) {
+    return fail(e);
   }
 }
 
@@ -433,6 +701,11 @@ export interface SupplierSourceDto {
   headersConfig: Record<string, unknown> | null;
   profileId: number | null;
   applyPolicy: string;
+  /** C.3.4.4: config SFTP (null em fontes HTTPS; nunca password). */
+  sftpHost: string | null;
+  sftpPort: number | null;
+  sftpRemotePath: string | null;
+  sftpHostKeyFingerprint: string | null;
   lastCheckedAt: string | null;
   lastSuccessAt: string | null;
   lastErrorCode: string | null;
@@ -442,6 +715,9 @@ export interface SupplierSourceDto {
   lastHttpStatus: number | null;
   lastEtag: string | null;
   lastModified: string | null;
+  /** C.3.4.4: validadores remotos SFTP (size+mtime; null em HTTPS). */
+  lastRemoteSize: number | null;
+  lastRemoteMtime: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -463,6 +739,10 @@ export function toSourceDto(row: typeof supplierSources.$inferSelect): SupplierS
     headersConfig: row.headersConfig ?? null,
     profileId: row.profileId,
     applyPolicy: row.applyPolicy,
+    sftpHost: row.sftpHost,
+    sftpPort: row.sftpPort,
+    sftpRemotePath: row.sftpRemotePath,
+    sftpHostKeyFingerprint: row.sftpHostKeyFingerprint,
     lastCheckedAt: iso(row.lastCheckedAt),
     lastSuccessAt: iso(row.lastSuccessAt),
     lastErrorCode: row.lastErrorCode,
@@ -472,6 +752,8 @@ export function toSourceDto(row: typeof supplierSources.$inferSelect): SupplierS
     lastHttpStatus: row.lastHttpStatus,
     lastEtag: row.lastEtag,
     lastModified: row.lastModified,
+    lastRemoteSize: row.lastRemoteSize,
+    lastRemoteMtime: row.lastRemoteMtime,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
@@ -490,6 +772,9 @@ export interface SupplierSourceRunDto {
   httpStatus: number | null;
   etag: string | null;
   lastModified: string | null;
+  /** C.3.4.4: size+mtime observados (SFTP; null em HTTPS). */
+  remoteSize: number | null;
+  remoteMtime: string | null;
   importId: number | null;
   errorCode: string | null;
   errorMessage: string | null;
@@ -525,6 +810,8 @@ export async function getSupplierSourceDetail(sourceId: number): Promise<{
     httpStatus: r.httpStatus,
     etag: r.etag,
     lastModified: r.lastModified,
+    remoteSize: r.remoteSize,
+    remoteMtime: r.remoteMtime,
     importId: r.importId,
     errorCode: r.errorCode,
     errorMessage: r.errorMessage,
@@ -674,18 +961,143 @@ export async function updateSupplierSource(
   }
 }
 
+export interface CreateSftpSourceInput {
+  supplierId: number;
+  name: string;
+  sftpHost: string;
+  sftpPort: number;
+  sftpRemotePath: string;
+  username: string;
+  /** NOME do segredo no worker also-sftp-fetcher — nunca o valor. */
+  secretReference: string;
+  /** Fingerprint SHA-256 da host key (pin obrigatório). */
+  sftpHostKeyFingerprint: string;
+  format: "auto" | "csv" | "xlsx" | "also_stock" | "also_pricelist";
+  profileId?: number | null;
+}
+
+/**
+ * C.3.4.4 — Create SFTP: a linha nasce SEMPRE desativada e preview_only.
+ * As guardas puras correm antes de persistir (config inválida falha na API,
+ * não em runtime). SFTP usa sempre auth por password (auth_type='basic' +
+ * secret_reference): é o único mecanismo do fetcher read-only.
+ */
+export async function createSftpSource(
+  input: CreateSftpSourceInput,
+  userId: number
+): Promise<SupplierSourceDto> {
+  try {
+    const [row] = await db
+      .insert(supplierSources)
+      .values({
+        supplierId: input.supplierId,
+        name: input.name,
+        sourceType: "sftp",
+        url: null,
+        format: input.format,
+        authType: "basic",
+        username: input.username,
+        secretReference: input.secretReference,
+        headersConfig: null,
+        sftpHost: input.sftpHost,
+        sftpPort: input.sftpPort,
+        sftpRemotePath: input.sftpRemotePath,
+        sftpHostKeyFingerprint: input.sftpHostKeyFingerprint,
+        profileId: input.profileId ?? null,
+        applyPolicy: "preview_only",
+        enabled: false,
+        createdBy: userId,
+        updatedBy: userId,
+      })
+      .returning();
+    await createAuditLog({
+      userId, action: "supplier_source.created", entity: "supplier_source", entityId: row.id,
+      details: { supplierId: row.supplierId, name: row.name, sourceType: "sftp", format: row.format },
+    });
+    return toSourceDto(row);
+  } catch (e) {
+    const storage = classifyImportStorageFailure(e);
+    if (storage?.code === "IMPORT_DUPLICATE_ROW") throw new SupplierSourceError("SOURCE_NAME_EXISTS", 409);
+    throw e;
+  }
+}
+
+/**
+ * C.3.4.4 — Update SFTP: patch já validado (a rota valida a forma e o estado
+ * final). `enabled` NÃO muda por aqui. Rejeita linhas que não sejam SFTP.
+ */
+export async function updateSftpSource(
+  sourceId: number,
+  patch: Partial<Omit<CreateSftpSourceInput, "supplierId">>,
+  userId: number
+): Promise<SupplierSourceDto> {
+  const [existing] = await db.select().from(supplierSources).where(eq(supplierSources.id, sourceId)).limit(1);
+  if (!existing) throw new SupplierSourceError("SOURCE_NOT_FOUND", 404);
+  if (existing.sourceType !== "sftp") throw new SupplierSourceError("SOURCE_TYPE_UNSUPPORTED", 400);
+
+  try {
+    const [row] = await db
+      .update(supplierSources)
+      .set({
+        name: patch.name ?? existing.name,
+        format: patch.format ?? existing.format,
+        username: patch.username ?? existing.username,
+        secretReference: patch.secretReference ?? existing.secretReference,
+        sftpHost: patch.sftpHost ?? existing.sftpHost,
+        sftpPort: patch.sftpPort ?? existing.sftpPort,
+        sftpRemotePath: patch.sftpRemotePath ?? existing.sftpRemotePath,
+        sftpHostKeyFingerprint: patch.sftpHostKeyFingerprint ?? existing.sftpHostKeyFingerprint,
+        profileId: patch.profileId !== undefined ? patch.profileId : existing.profileId,
+        updatedBy: userId,
+        updatedAt: new Date(),
+      })
+      .where(eq(supplierSources.id, sourceId))
+      .returning();
+    await createAuditLog({
+      userId, action: "supplier_source.updated", entity: "supplier_source", entityId: sourceId,
+      details: { name: row.name, sourceType: "sftp", format: row.format },
+    });
+    return toSourceDto(row);
+  } catch (e) {
+    const storage = classifyImportStorageFailure(e);
+    if (storage?.code === "IMPORT_DUPLICATE_ROW") throw new SupplierSourceError("SOURCE_NAME_EXISTS", 409);
+    throw e;
+  }
+}
+
 /**
  * Ativar/desativar é o ÚNICO caminho para `enabled=true` e exige fonte com
- * URL válida configurada (a mesma guarda pura do fetch é aplicada aqui —
- * ativar uma fonte com URL hostil falha na API, não em runtime).
+ * configuração válida (as mesmas guardas puras do fetch são aplicadas aqui —
+ * ativar uma fonte malformada/hostil falha na API, não em runtime).
  */
 export async function setSupplierSourceEnabled(sourceId: number, enabled: boolean, userId: number): Promise<SupplierSourceDto> {
   const [existing] = await db.select().from(supplierSources).where(eq(supplierSources.id, sourceId)).limit(1);
   if (!existing) throw new SupplierSourceError("SOURCE_NOT_FOUND", 404);
   if (enabled) {
-    if (existing.sourceType !== "url" || !existing.url) throw new SupplierSourceError("SOURCE_URL_INVALID", 400);
-    const guard = guardSupplierSourceUrl(existing.url);
-    if (!guard.ok) throw new SupplierSourceError(guard.code, 400);
+    if (existing.sourceType === "sftp") {
+      // C.3.4.4: config SFTP completa + guardas puras antes de ativar.
+      if (
+        !existing.sftpHost || !existing.sftpRemotePath || !existing.username ||
+        !existing.secretReference || !existing.sftpHostKeyFingerprint
+      ) {
+        throw new SupplierSourceError("SFTP_CONFIG_INVALID", 400);
+      }
+      try {
+        guardSftpHost(existing.sftpHost);
+        guardSftpPort(existing.sftpPort ?? 22);
+        guardSftpPath(existing.sftpRemotePath);
+        guardSftpUsername(existing.username);
+        guardSftpSecretName(existing.secretReference);
+        guardSftpFingerprint(existing.sftpHostKeyFingerprint);
+      } catch (e) {
+        if (e instanceof SftpError) throw new SupplierSourceError(e.code, 400);
+        throw e;
+      }
+    } else {
+      if (existing.sourceType !== "url" || !existing.url) throw new SupplierSourceError("SOURCE_URL_INVALID", 400);
+      const guard = guardSupplierSourceUrl(existing.url);
+      if (!guard.ok) throw new SupplierSourceError(guard.code, 400);
+    }
   }
   const [row] = await db
     .update(supplierSources)

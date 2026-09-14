@@ -18,6 +18,8 @@ import { csrfGuard } from "@/lib/csrf";
 import { SupplierSourceError } from "@/lib/supplier-import/source";
 import { supplierImportErrorMessage } from "@/lib/supplier-import/error-messages";
 import {
+  sftpSourceCreateSchema,
+  sftpSourceUpdateSchema,
   supplierSourceCreateSchema,
   supplierSourceEnabledSchema,
   supplierSourceUpdateSchema,
@@ -27,6 +29,7 @@ import {
   loadSupplierSourceRow,
   normalizeAuthState,
   setSupplierSourceEnabled,
+  updateSftpSource,
   updateSupplierSource,
 } from "@/lib/services/supplier-source-service";
 
@@ -71,17 +74,51 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
   } catch {
     return NextResponse.json({ error: "INVALID_BODY", message: supplierImportErrorMessage("INVALID_BODY") }, { status: 400 });
   }
-  // enabled/apply_policy/supplier_id NÃO são editáveis por PUT (flags de
-  // estado: PATCH dedicado; política: fixa em preview_only nesta fase).
+  // enabled/apply_policy/supplier_id/source_type NÃO são editáveis por PUT
+  // (flags de estado: PATCH dedicado; política: fixa em preview_only; o tipo
+  // da fonte é imutável — SFTP ↔ HTTPS não converte).
   delete raw.enabled;
   delete raw.applyPolicy;
   delete raw.supplierId;
-
-  const patch = supplierSourceUpdateSchema.safeParse(raw);
-  if (!patch.success) return badRequest(patch.error.issues);
+  delete raw.sourceType;
 
   const existing = await loadSupplierSourceRow(id);
   if (!existing) return NextResponse.json({ error: "SOURCE_NOT_FOUND", message: supplierImportErrorMessage("SOURCE_NOT_FOUND") }, { status: 404 });
+
+  // C.3.4.4: linhas SFTP validam-se contra as schemas SFTP (forma do patch +
+  // estado final) e atualizam-se pelo serviço SFTP — o ramo HTTPS abaixo fica
+  // intocado.
+  if (existing.sourceType === "sftp") {
+    const patch = sftpSourceUpdateSchema.safeParse(raw);
+    if (!patch.success) return badRequest(patch.error.issues);
+    const finalState = {
+      supplierId: existing.supplierId,
+      name: patch.data.name ?? existing.name,
+      sftpHost: patch.data.sftpHost ?? existing.sftpHost,
+      sftpPort: patch.data.sftpPort ?? existing.sftpPort,
+      sftpRemotePath: patch.data.sftpRemotePath ?? existing.sftpRemotePath,
+      username: patch.data.username ?? existing.username,
+      secretReference: patch.data.secretReference ?? existing.secretReference,
+      sftpHostKeyFingerprint: patch.data.sftpHostKeyFingerprint ?? existing.sftpHostKeyFingerprint,
+      format: patch.data.format ?? existing.format,
+      profileId: patch.data.profileId !== undefined ? patch.data.profileId : existing.profileId,
+    };
+    const finalParsed = sftpSourceCreateSchema.safeParse(finalState);
+    if (!finalParsed.success) return badRequest(finalParsed.error.issues);
+    try {
+      const source = await updateSftpSource(id, patch.data, user.id);
+      return NextResponse.json({ source });
+    } catch (e) {
+      if (e instanceof SupplierSourceError) {
+        return NextResponse.json({ error: e.code, message: supplierImportErrorMessage(e.code) }, { status: e.httpStatus });
+      }
+      console.error("supplier source update:", e);
+      return NextResponse.json({ error: "SOURCE_RUN_FAILED", message: supplierImportErrorMessage("SOURCE_RUN_FAILED") }, { status: 500 });
+    }
+  }
+
+  const patch = supplierSourceUpdateSchema.safeParse(raw);
+  if (!patch.success) return badRequest(patch.error.issues);
 
   const finalState = normalizeAuthState({
     supplierId: existing.supplierId,

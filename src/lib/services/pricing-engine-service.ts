@@ -3,7 +3,7 @@
  *
  * Single entry point that turns a product's COST into its selling PRICE:
  *
- *   cost → applicable rule → net price → VAT → commercial rounding → price
+ *   cost â†’ applicable rule â†’ net price â†’ VAT â†’ commercial rounding â†’ price
  *
  * Design constraints:
  *  - Manual products are NEVER repriced. The guard lives here, in the service,
@@ -60,7 +60,7 @@ export interface PriceComputation {
   changed: boolean;
 }
 
-interface ProductPricingContext {
+export interface ProductPricingContext {
   id: number;
   price: string;
   costPrice: string | null;
@@ -90,7 +90,7 @@ export function computeAutomaticPrice(
     return { ...base, priced: false, skipReason: "manual_price", message: "Preço manual — não recalculado" };
   }
 
-  // 2. No cost → no calculation. We never invent a price.
+  // 2. No cost â†’ no calculation. We never invent a price.
   const costCents = toCentsSafe(product.costPrice);
   if (costCents === null || costCents <= 0) {
     return { ...base, priced: false, skipReason: "no_cost", message: "Sem preço de custo" };
@@ -162,11 +162,11 @@ export async function loadPricingContext(database: QueryDb = db): Promise<{
   policy: RoundingPolicy;
 }> {
   const d = database as typeof db;
-  const [ruleRows, catRows, policy] = await Promise.all([
-    d.select().from(pricingRules).where(eq(pricingRules.isActive, true)),
-    d.select({ id: categories.id, parentId: categories.parentId }).from(categories),
-    getRoundingPolicy(database),
-  ]);
+  // Keep these queries sequential: when `database` is an existing transaction
+  // they share one pg client, which must not execute queries concurrently.
+  const ruleRows = await d.select().from(pricingRules).where(eq(pricingRules.isActive, true));
+  const catRows = await d.select({ id: categories.id, parentId: categories.parentId }).from(categories);
+  const policy = await getRoundingPolicy(database);
   return {
     rules: ruleRows as unknown as PricingRuleRow[],
     categoryTree: catRows,
@@ -186,39 +186,47 @@ export async function loadPricingContext(database: QueryDb = db): Promise<{
  */
 export async function recalculateProductPrice(
   productId: number,
-  options: { database?: QueryDb; userId?: number | null; reason?: string } = {}
+  options: { database?: QueryDb; userId?: number | null; reason?: string; pricingContext?: Awaited<ReturnType<typeof loadPricingContext>>; productSnapshot?: ProductPricingContext; preferredSupplierId?: number | null; persist?: boolean } = {}
 ): Promise<PriceComputation> {
   const database = options.database ?? db;
   const d = database as typeof db;
 
-  const [product] = await d
-    .select({
-      id: products.id,
-      price: products.price,
-      costPrice: products.costPrice,
-      vatRate: products.vatRate,
-      categoryId: products.categoryId,
-      brandId: products.brandId,
-      priceMode: products.priceMode,
-    })
-    .from(products)
-    .where(eq(products.id, productId))
-    .limit(1);
+  const product = options.productSnapshot ?? (
+    await d
+      .select({
+        id: products.id,
+        price: products.price,
+        costPrice: products.costPrice,
+        vatRate: products.vatRate,
+        categoryId: products.categoryId,
+        brandId: products.brandId,
+        priceMode: products.priceMode,
+      })
+      .from(products)
+      .where(eq(products.id, productId))
+      .limit(1)
+  )[0];
 
   if (!product) {
     return { productId, priced: false, skipReason: "calculation_error", message: "Produto não encontrado", currentPrice: "0.00", changed: false };
   }
 
-  const [preferred] = await d
-    .select({ supplierId: productSuppliers.supplierId })
-    .from(productSuppliers)
-    .where(and(eq(productSuppliers.productId, productId), eq(productSuppliers.isPreferred, true)))
-    .limit(1);
+  let preferredSupplierId: number | null;
+  if ("preferredSupplierId" in options) {
+    preferredSupplierId = options.preferredSupplierId ?? null;
+  } else {
+    const [preferred] = await d
+      .select({ supplierId: productSuppliers.supplierId })
+      .from(productSuppliers)
+      .where(and(eq(productSuppliers.productId, productId), eq(productSuppliers.isPreferred, true)))
+      .limit(1);
+    preferredSupplierId = preferred?.supplierId ?? null;
+  }
 
-  const { rules, categoryTree, policy } = await loadPricingContext(database);
-  const result = computeAutomaticPrice(product, preferred?.supplierId ?? null, rules, categoryTree, policy);
+  const { rules, categoryTree, policy } = options.pricingContext ?? await loadPricingContext(database);
+  const result = computeAutomaticPrice(product, preferredSupplierId, rules, categoryTree, policy);
 
-  if (result.priced && result.changed && result.newPrice) {
+  if (options.persist !== false && result.priced && result.changed && result.newPrice) {
     await d
       .update(products)
       .set({
@@ -228,7 +236,7 @@ export async function recalculateProductPrice(
         updatedAt: new Date(),
       })
       .where(eq(products.id, productId));
-  } else if (result.priced && !result.changed) {
+  } else if (options.persist !== false && result.priced && !result.changed) {
     // Price unchanged, but record that the engine ran and which rule applied.
     await d
       .update(products)

@@ -1,18 +1,27 @@
 /**
  * C.3.4.3.1 — ALSO file formats: pricelist + stock.
+ * C.3.4.4 — formatos REAIS observados em paco.also.com + autoridade de stock.
  *
  * Both are TSV (tab-separated) but differ:
- *  - pricelist-1.txt: NO header, fixed positional columns (10+), ~15k rows.
- *  - stock.txt:       WITH header, tab-separated, header-driven, ~15 255 rows.
+ *  - pricelist-1.txt (formato ANTIGO): NO header, fixed positional columns
+ *    (10+), ~15k rows — continua suportado como antes.
+ *  - pricelist-1.txt (formato REAL atual): TAB, 6 colunas, sem header, sem
+ *    quotes — semântica DESCONHECIDA: NUNCA é mapeado; o parser falha o
+ *    ficheiro com UNSUPPORTED_ALSO_PRICELIST_FORMAT (zero apply, zero
+ *    INVALID_GTIN/INVALID_STOCK/INVALID_COST artificiais).
+ *  - stock.txt (REAL): WITH header, tab-separated, header-driven, 6 colunas
+ *    (ProductID, AvailableQuantity, AvailableNextDate, AvailableNextQuantity,
+ *    AvailabilityDate, AvailabilityTime), datas YYYYMMDD, horas HHMMSS,
+ *    AvailableNextQuantity pode ser -1 (= desconhecido, não atualiza).
  *
  * Both converge to SupplierFileParse → NormalizedSupplierRow[] and reuse the
  * existing matching/pricing/preview/apply pipeline (no second engine).
  *
  * Stock-only semantics (unknown ProductID → warning/ignored, never creation,
  * never price change) are enforced by the service after parsing (see
- * supplier-import-service.ts), but the parser preserves all normalized stock
- * metadata (AvailableNextDate/AvailableNextQuantity/Availability timestamp) even
- * if the product apply does not use it yet.
+ * supplier-import-service.ts). C.3.4.4: o stock ALSO viaja em
+ * NormalizedSupplierRow.supplierStock — `stock` (físico) fica SEMPRE null nas
+ * linhas ALSO stock, por isso products.stock nunca é tocado pelo sync ALSO.
  */
 
 import { isValidGTIN } from "@/lib/validation";
@@ -53,7 +62,10 @@ function snapshotText(raw: string, max: number): { value: string; truncated: boo
 
 function isValidDateISO(raw: string): string | null {
   const norm = raw.replace(/\//g, "-").trim();
-  const m = norm.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  // C.3.4.4: o feed REAL usa datas compactas YYYYMMDD (ex.: 20260907) — a
+  // validação de calendário é a mesma; a saída é sempre YYYY-MM-DD.
+  const compact = norm.match(/^(\d{4})(\d{2})(\d{2})$/);
+  const m = compact ?? norm.match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (!m) return null;
   const y = Number(m[1]), mo = Number(m[2]), d = Number(m[3]);
   if (mo < 1 || mo > 12 || d < 1 || d > 31) return null;
@@ -97,13 +109,13 @@ function parseAvailabilityTimestamp(dateRaw: string, timeRaw: string, issues: Su
     datePart = parsedDate;
   }
   if (t) {
-    // time HH:MM or HH:MM:SS
-    const tm = t.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+    // time HH:MM or HH:MM:SS — C.3.4.4: o feed REAL usa HHMMSS (ex.: 134950).
+    const tm = t.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/) ?? t.match(/^(\d{2})(\d{2})(\d{2})$/);
     if (!tm) {
       issues.push({ field: "alsoAvailabilityTimestamp", value: t, code: "INVALID_AVAILABILITY_TIMESTAMP", message: `Hora de disponibilidade inválida "${t}" — ignorada`, severity: "warning" });
       return null;
     }
-    const hh = Number(tm[1]), mm = Number(tm[2]), ss = tm[3] ? Number(tm[3]) : null;
+    const hh = Number(tm[1]), mm = Number(tm[2]), ss = tm[3] !== undefined ? Number(tm[3]) : null;
     if (hh > 23 || mm > 59 || (ss !== null && ss > 59)) {
       issues.push({ field: "alsoAvailabilityTimestamp", value: t, code: "INVALID_AVAILABILITY_TIMESTAMP", message: `Hora de disponibilidade inválida "${t}" — ignorada`, severity: "warning" });
       return null;
@@ -137,6 +149,12 @@ function parseAvailabilityTimestamp(dateRaw: string, timeRaw: string, issues: Su
 
 /** Fixed positional width of the pricelist (ProductID…ManufacturerName). */
 export const ALSO_PRICELIST_MIN_COLUMNS = 10;
+
+/**
+ * Largura do pricelist REAL atual (/pricelist-1.txt): TAB, 6 colunas, sem
+ * header, semântica desconhecida — nunca mapeado (UNSUPPORTED_*).
+ */
+export const ALSO_REAL_PRICELIST_COLUMNS = 6;
 
 /**
  * Os pricelist reais do ALSO envolvem TODOS os campos em aspas duplas
@@ -285,6 +303,16 @@ export function parseAlsoPricelist(
 
   if (lines.length === 0) throw new SupplierCsvError("CSV_NO_DATA");
   if (lines.length > SUPPLIER_IMPORT_MAX_ROWS) throw new SupplierCsvError("CSV_TOO_MANY_ROWS");
+
+  // C.3.4.4 — o pricelist REAL atual (/pricelist-1.txt) é TAB com 6 colunas,
+  // sem header e sem quotes, de semântica DESCONHECIDA (ex.: `1.520\t\t\t0\t0\t`).
+  // Quando TODAS as linhas têm exatamente 6 colunas, o ficheiro é o formato
+  // real não-mapeado: falha explicitamente com UNSUPPORTED_ALSO_PRICELIST_FORMAT
+  // (zero apply) em vez de cair no parser posicional de 10 colunas e produzir
+  // INVALID_GTIN/INVALID_STOCK/INVALID_COST artificiais. Uma linha curta
+  // isolada num ficheiro de 10 colunas mantém o comportamento por-linha antigo.
+  const everyLineSixColumns = lines.every(({ raw }) => raw.split("\t").length === ALSO_REAL_PRICELIST_COLUMNS);
+  if (everyLineSixColumns) throw new SupplierCsvError("UNSUPPORTED_ALSO_PRICELIST_FORMAT");
 
   const rows: NormalizedSupplierRow[] = [];
   const ignoredColumns: string[] = [];
@@ -443,7 +471,9 @@ function normalizeHeaderStock(h: string): string {
 
 const STOCK_ALIASES: Record<string, string> = {
   productid: "supplierSku",
-  availablequantity: "stock",
+  // C.3.4.4: a quantidade do stock.txt é stock do FORNECEDOR — o mapping de
+  // auditoria reflete o campo real (supplierStock), nunca o físico.
+  availablequantity: "supplierStock",
   availablenextdate: "alsoAvailableNextDate",
   availablenextquantity: "alsoAvailableNextQuantity",
   availabilitydate: "alsoAvailabilityDate",
@@ -551,22 +581,25 @@ export function parseAlsoStock(
       error("supplierSku", rawSku, "MISSING_IDENTIFIER_KEY", "Linha sem ProductID — impossível de identificar stock");
     }
 
-    // stock (AvailableQuantity) — -1 sentinel means unknown (desconhecida)
-    let stock: number | null = null;
+    // C.3.4.4 — AvailableQuantity é stock do FORNECEDOR: viaja em
+    // `supplierStock` e `stock` (físico) fica SEMPRE null, para que o snapshot
+    // e o apply nunca transportem stock ALSO para products.stock.
+    // -1 sentinel means unknown (desconhecida) → null + warning (não atualiza).
+    let supplierStock: number | null = null;
     if (rawQty === "") {
-      error("stock", rawQty, "INVALID_STOCK", "Stock inválido (inteiro >= 0 esperado)");
+      error("supplierStock", rawQty, "INVALID_STOCK", "Stock inválido (inteiro >= 0 esperado)");
     } else if (rawQty.trim() === "-1" || rawQty.trim() === "-1.0" || rawQty.trim() === "-1,0") {
-      stock = null;
-      warning("stock", rawQty, "AVAILABLE_NEXT_QUANTITY_UNKNOWN", "Quantidade desconhecida (-1) — stock não atualizado");
+      supplierStock = null;
+      warning("supplierStock", rawQty, "AVAILABLE_NEXT_QUANTITY_UNKNOWN", "Quantidade desconhecida (-1) — stock de fornecedor não atualizado");
     } else {
       const parsed = parseInteger(rawQty);
       if (parsed.value === null) {
-        error("stock", rawQty, "INVALID_STOCK", "Stock inválido (inteiro >= 0 esperado)");
+        error("supplierStock", rawQty, "INVALID_STOCK", "Stock inválido (inteiro >= 0 esperado)");
       } else if (parsed.value > SNAPSHOT_INT4_MAX) {
-        error("stock", rawQty, "STOCK_OUT_OF_RANGE", `Stock acima do máximo suportado (${SNAPSHOT_INT4_MAX}) — não é truncado; a linha não é aplicada`);
+        error("supplierStock", rawQty, "STOCK_OUT_OF_RANGE", `Stock acima do máximo suportado (${SNAPSHOT_INT4_MAX}) — não é truncado; a linha não é aplicada`);
       } else {
-        stock = parsed.value;
-        if (parsed.ambiguous) warning("stock", rawQty, "AMBIGUOUS_NUMBER_FORMAT", `Stock lido como ${parsed.value}`);
+        supplierStock = parsed.value;
+        if (parsed.ambiguous) warning("supplierStock", rawQty, "AMBIGUOUS_NUMBER_FORMAT", `Stock lido como ${parsed.value}`);
       }
     }
 
@@ -608,7 +641,8 @@ export function parseAlsoStock(
       internalSku: null,
       name: null,
       costPrice: null,
-      stock,
+      stock: null,
+      supplierStock,
       leadTimeDays: null,
       issues,
       alsoAvailableNextDate,

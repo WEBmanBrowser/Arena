@@ -81,7 +81,7 @@ afterAll(cleanup);
 
 describe("C.3.2 — Reutilização do perfil (correção)", () => {
   it("A) loadSupplierProfile aceita mapping JSONB guardado como string JSON", async () => {
-    const [supplier] = await db.insert(suppliers).values({ id: 310, name: `${TAG}-Str`, isActive: true }).returning();
+    const [supplier] = await db.insert(suppliers).values({ name: `${TAG}-Str`, isActive: true }).returning();
 
     // Reproduz o registo de staging: o JSONB guarda uma STRING JSON
     // (dupla codificação), não o objeto.
@@ -105,17 +105,17 @@ describe("C.3.2 — Reutilização do perfil (correção)", () => {
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
     // (a) string JSON que representa um array — não é Record<string,string>
-    const [s1] = await db.insert(suppliers).values({ id: 311, name: `${TAG}-ArrStr`, isActive: true }).returning();
+    const [s1] = await db.insert(suppliers).values({ name: `${TAG}-ArrStr`, isActive: true }).returning();
     await insertRawProfile(s1.id, JSON.stringify(JSON.stringify([1, 2])));
     expect(await loadSupplierProfile(s1.id)).toBeNull();
 
     // (b) JSONB array direto
-    const [s2] = await db.insert(suppliers).values({ id: 312, name: `${TAG}-Arr`, isActive: true }).returning();
+    const [s2] = await db.insert(suppliers).values({ name: `${TAG}-Arr`, isActive: true }).returning();
     await insertRawProfile(s2.id, "[1,2]");
     expect(await loadSupplierProfile(s2.id)).toBeNull();
 
     // (c) string JSON com um valor que não deve vazar para o log
-    const [s3] = await db.insert(suppliers).values({ id: 313, name: `${TAG}-Secret`, isActive: true }).returning();
+    const [s3] = await db.insert(suppliers).values({ name: `${TAG}-Secret`, isActive: true }).returning();
     await insertRawProfile(s3.id, JSON.stringify("SECRET-MARKER-XYZ"));
     expect(await loadSupplierProfile(s3.id)).toBeNull();
 
@@ -138,7 +138,7 @@ describe("C.3.2 — Reutilização do perfil (correção)", () => {
   });
 
   it("B) mapping:{} da UI não impede a utilização do perfil guardado", async () => {
-    const [supplier] = await db.insert(suppliers).values({ id: 320, name: `${TAG}-Empty`, isActive: true }).returning();
+    const [supplier] = await db.insert(suppliers).values({ name: `${TAG}-Empty`, isActive: true }).returning();
     await saveSupplierProfile(supplier.id, STAGING_MAPPING);
     const profile = await loadSupplierProfile(supplier.id);
     expect(profile).not.toBeNull();
@@ -153,7 +153,7 @@ describe("C.3.2 — Reutilização do perfil (correção)", () => {
   });
 
   it("B2) route trata mapping:{} como ausente e usa o perfil guardado", async () => {
-    const [supplier] = await db.insert(suppliers).values({ id: 321, name: `${TAG}-Route`, isActive: true }).returning();
+    const [supplier] = await db.insert(suppliers).values({ name: `${TAG}-Route`, isActive: true }).returning();
     const saved = await saveSupplierProfile(supplier.id, STAGING_MAPPING);
     expect(saved.updated).toBe(false);
 
@@ -174,7 +174,7 @@ describe("C.3.2 — Reutilização do perfil (correção)", () => {
   });
 
   it("C) segundo preview com saveProfile=false reutiliza o perfil persistido", async () => {
-    const [supplier] = await db.insert(suppliers).values({ id: 322, name: `${TAG}-Second`, isActive: true }).returning();
+    const [supplier] = await db.insert(suppliers).values({ name: `${TAG}-Second`, isActive: true }).returning();
 
     // 1º preview: grava o perfil (como a UI com a checkbox marcada).
     const first = await previewSupplierImport({
@@ -200,7 +200,7 @@ describe("C.3.2 — Reutilização do perfil (correção)", () => {
   });
 
   it("D) saveProfile=true só reporta profile_valid depois de releitura válida", async () => {
-    const [supplier] = await db.insert(suppliers).values({ id: 323, name: `${TAG}-Reread`, isActive: true }).returning();
+    const [supplier] = await db.insert(suppliers).values({ name: `${TAG}-Reread`, isActive: true }).returning();
 
     const preview = await previewSupplierImport({
       supplierId: supplier.id, source: uploadSource({ fileName: `${TAG}-D.csv`, csvText: CSV }), mapping: {}, userId: 1, saveProfile: true,
@@ -216,7 +216,7 @@ describe("C.3.2 — Reutilização do perfil (correção)", () => {
 
   it("D2) perfil ilegível nunca é reportado como profile_valid", async () => {
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const [supplier] = await db.insert(suppliers).values({ id: 324, name: `${TAG}-Unread`, isActive: true }).returning();
+    const [supplier] = await db.insert(suppliers).values({ name: `${TAG}-Unread`, isActive: true }).returning();
     await insertRawProfile(supplier.id, JSON.stringify("SECRET-MARKER-XYZ"));
 
     const preview = await previewSupplierImport({
@@ -228,7 +228,7 @@ describe("C.3.2 — Reutilização do perfil (correção)", () => {
   });
 
   it("E) mapping manual não vazio continua a ter prioridade", async () => {
-    const [supplier] = await db.insert(suppliers).values({ id: 325, name: `${TAG}-Manual`, isActive: true }).returning();
+    const [supplier] = await db.insert(suppliers).values({ name: `${TAG}-Manual`, isActive: true }).returning();
     // Perfil COMPATÍVEL com o ficheiro, mas aponta o custo para outra coluna.
     await saveSupplierProfile(supplier.id, {
       skuFornecedor: "supplierSku", nome: "name", custoAlt2: "costPrice", stock: "stock",
@@ -259,7 +259,7 @@ describe("C.3.2 — Reutilização do perfil (correção)", () => {
   });
 
   it("E2) manual também vence quando o perfil é incompatível (fallback atual)", async () => {
-    const [supplier] = await db.insert(suppliers).values({ id: 326, name: `${TAG}-ManualInv`, isActive: true }).returning();
+    const [supplier] = await db.insert(suppliers).values({ name: `${TAG}-ManualInv`, isActive: true }).returning();
     await saveSupplierProfile(supplier.id, { skuFornecedor: "supplierSku", colunaVelha: "name" });
 
     const csv = "skuFornecedor;nome;stock;precoCustoAlt\nTEST-001;Produto A;5;20,00";
@@ -278,7 +278,7 @@ describe("C.3.2 — Reutilização do perfil (correção)", () => {
 
   it("F) preview falhado não grava nem sobrescreve o perfil", async () => {
     // F1 — fornecedor novo: o CSV falha no parse (sem coluna-chave) → sem perfil.
-    const [fresh] = await db.insert(suppliers).values({ id: 327, name: `${TAG}-FailNew`, isActive: true }).returning();
+    const [fresh] = await db.insert(suppliers).values({ name: `${TAG}-FailNew`, isActive: true }).returning();
     await expect(previewSupplierImport({
       supplierId: fresh.id, source: uploadSource({ fileName: `${TAG}-F1.csv`, csvText: "nome;custo\nA;1" }), mapping: {}, saveProfile: true, userId: 1,
     })).rejects.toThrow();
@@ -288,7 +288,7 @@ describe("C.3.2 — Reutilização do perfil (correção)", () => {
     expect(Number(count1?.count ?? 0)).toBe(0);
 
     // F2 — fornecedor com perfil: preview falhado (CSV vazio) não o altera.
-    const [withProfile] = await db.insert(suppliers).values({ id: 328, name: `${TAG}-FailOld`, isActive: true }).returning();
+    const [withProfile] = await db.insert(suppliers).values({ name: `${TAG}-FailOld`, isActive: true }).returning();
     await saveSupplierProfile(withProfile.id, { skuFornecedor: "supplierSku", nome: "name" });
     const before = await loadSupplierProfile(withProfile.id);
 

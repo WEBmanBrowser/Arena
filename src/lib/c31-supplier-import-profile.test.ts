@@ -44,7 +44,7 @@ afterAll(async () => {
 describe("C.3.2 — Supplier Import Profile", () => {
   it("A) fornecedor sem perfil → autoMapHeaders funciona", async () => {
     const [supplier] = await db.insert(suppliers).values({
-      id: 10, name: `${TAG}-NoProfile`, isActive: true,
+      name: `${TAG}-NoProfile`, isActive: true,
     }).returning();
 
     const profile = await loadSupplierProfile(supplier.id);
@@ -60,7 +60,7 @@ describe("C.3.2 — Supplier Import Profile", () => {
 
   it("B) perfil válido → reutilizado automaticamente", async () => {
     const [supplier] = await db.insert(suppliers).values({
-      id: 20, name: `${TAG}-Profile`, isActive: true,
+      name: `${TAG}-Profile`, isActive: true,
     }).returning();
 
     await saveSupplierProfile(supplier.id, {
@@ -84,7 +84,7 @@ describe("C.3.2 — Supplier Import Profile", () => {
 
   it("C) perfil incompatível → fallback seguro, não aplicado parcialmente", async () => {
     const [supplier] = await db.insert(suppliers).values({
-      id: 30, name: `${TAG}-InvalidProfile`, isActive: true,
+      name: `${TAG}-InvalidProfile`, isActive: true,
     }).returning();
 
     await saveSupplierProfile(supplier.id, {
@@ -104,8 +104,8 @@ describe("C.3.2 — Supplier Import Profile", () => {
   });
 
   it("D) fornecedor A e B têm perfis independentes", async () => {
-    const [supplierA] = await db.insert(suppliers).values({ id: 40, name: `${TAG}-ProfileA`, isActive: true }).returning();
-    const [supplierB] = await db.insert(suppliers).values({ id: 41, name: `${TAG}-ProfileB`, isActive: true }).returning();
+    const [supplierA] = await db.insert(suppliers).values({ name: `${TAG}-ProfileA`, isActive: true }).returning();
+    const [supplierB] = await db.insert(suppliers).values({ name: `${TAG}-ProfileB`, isActive: true }).returning();
 
     await saveSupplierProfile(supplierA.id, { "skuFornecedor": "supplierSku" });
     await saveSupplierProfile(supplierB.id, { "EAN": "ean" });
@@ -118,14 +118,14 @@ describe("C.3.2 — Supplier Import Profile", () => {
   });
 
   it("E) guardar primeiro perfil → INSERT", async () => {
-    const [supplier] = await db.insert(suppliers).values({ id: 50, name: `${TAG}-FirstSave`, isActive: true }).returning();
+    const [supplier] = await db.insert(suppliers).values({ name: `${TAG}-FirstSave`, isActive: true }).returning();
     const result = await saveSupplierProfile(supplier.id, { "skuFornecedor": "supplierSku" });
     expect(result.updated).toBe(false);
     expect(result.id).toBeDefined();
   });
 
   it("F) guardar novamente → UPDATE, 1 linha", async () => {
-    const [supplier] = await db.insert(suppliers).values({ id: 60, name: `${TAG}-Update`, isActive: true }).returning();
+    const [supplier] = await db.insert(suppliers).values({ name: `${TAG}-Update`, isActive: true }).returning();
     await saveSupplierProfile(supplier.id, { "skuFornecedor": "supplierSku" });
     const result = await saveSupplierProfile(supplier.id, { "skuFornecedor": "supplierSku", "nome": "name" });
     expect(result.updated).toBe(true);
@@ -135,7 +135,7 @@ describe("C.3.2 — Supplier Import Profile", () => {
   });
 
   it("G) preview falhado → perfil não alterado", async () => {
-    const [supplier] = await db.insert(suppliers).values({ id: 70, name: `${TAG}-FailedPreview`, isActive: true }).returning();
+    const [supplier] = await db.insert(suppliers).values({ name: `${TAG}-FailedPreview`, isActive: true }).returning();
     await saveSupplierProfile(supplier.id, { "skuFornecedor": "supplierSku", "nome": "name" });
 
     const profileBefore = await loadSupplierProfile(supplier.id);
@@ -155,7 +155,7 @@ describe("C.3.2 — Supplier Import Profile", () => {
   });
 
   it("H) perfil com supplierSku → nunca passa supplierSku para products.sku", async () => {
-    const [supplier] = await db.insert(suppliers).values({ id: 80, name: `${TAG}-SKU`, isActive: true }).returning();
+    const [supplier] = await db.insert(suppliers).values({ name: `${TAG}-SKU`, isActive: true }).returning();
     await saveSupplierProfile(supplier.id, { "skuFornecedor": "supplierSku" });
 
     // Confirmar que supplierImportProfiles guarda apenas o mapping, não substitui SKU interno.
@@ -165,7 +165,7 @@ describe("C.3.2 — Supplier Import Profile", () => {
   });
 
   it("I) snapshot histórico preservado após atualização do perfil", async () => {
-    const [supplier] = await db.insert(suppliers).values({ id: 90, name: `${TAG}-History`, isActive: true }).returning();
+    const [supplier] = await db.insert(suppliers).values({ name: `${TAG}-History`, isActive: true }).returning();
     await saveSupplierProfile(supplier.id, { "skuFornecedor": "supplierSku" });
 
     // Simular uma importação (preview) com o perfil antigo
@@ -185,14 +185,14 @@ describe("C.3.2 — Supplier Import Profile", () => {
   });
 
   it("J) C.3.1 sem perfis continua compatível", async () => {
-    const [supplier] = await db.insert(suppliers).values({ id: 100, name: `${TAG}-Legacy`, isActive: true }).returning();
+    const [supplier] = await db.insert(suppliers).values({ name: `${TAG}-Legacy`, isActive: true }).returning();
     // Nenhum perfil criado — comportamento legado preservado
     const profile = await loadSupplierProfile(supplier.id);
     expect(profile).toBeNull();
   });
 
   it("K) mapping inválido rejeitado sem destruir perfil existente", async () => {
-    const [supplier] = await db.insert(suppliers).values({ id: 110, name: `${TAG}-Invalid`, isActive: true }).returning();
+    const [supplier] = await db.insert(suppliers).values({ name: `${TAG}-Invalid`, isActive: true }).returning();
     await saveSupplierProfile(supplier.id, { "skuFornecedor": "supplierSku", "nome": "name" });
 
     // Tentar guardar mapping vazio ou incompleto — a função aceita, mas não destrói o existente
@@ -204,7 +204,7 @@ describe("C.3.2 — Supplier Import Profile", () => {
   });
 
   it("L) ordem dos headers não importa para compatibilidade", async () => {
-    const [supplier] = await db.insert(suppliers).values({ id: 120, name: `${TAG}-Order`, isActive: true }).returning();
+    const [supplier] = await db.insert(suppliers).values({ name: `${TAG}-Order`, isActive: true }).returning();
     await saveSupplierProfile(supplier.id, {
       "skuFornecedor": "supplierSku",
       "nome": "name",

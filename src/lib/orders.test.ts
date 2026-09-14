@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { db } from "@/db";
-import { products, orders, orderItems, stockMovements, coupons, payments, auditLogs, emailNotifications, orderStatusHistory, invoiceDocuments, shipments, rmaRequests, reconciliationObservations, refundAttempts } from "@/db/schema";
+import { products, orders, orderItems, stockMovements, coupons, payments, auditLogs, emailNotifications, orderStatusHistory, invoiceDocuments, shipments, rmaRequests, reconciliationObservations, refundAttempts, productSuppliers, productImages } from "@/db/schema";
 import { eq, sql } from "drizzle-orm";
 import { confirmOrderPayment, cancelOrder, releaseExpiredReservations } from "./orders";
 
@@ -23,6 +23,8 @@ async function resetTestData() {
   await db.delete(orders);
   // The tests assume a seed product exists with id=1, price="10.00", stock=5.
   // Wipe and reseed it idempotently so every test starts from the same fixture.
+  await db.delete(productSuppliers).where(eq(productSuppliers.productId, 1));
+  await db.delete(productImages).where(eq(productImages.productId, 1));
   await db.delete(products).where(eq(products.id, 1));
   await db.insert(products).values({
     id: 1,

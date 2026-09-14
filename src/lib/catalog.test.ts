@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { db } from "@/db";
 import { products, brands, productSuppliers, suppliers } from "@/db/schema";
 import { eq, sql, and } from "drizzle-orm";
@@ -15,6 +15,8 @@ async function reset() {
   await db.execute(sql`DELETE FROM brands WHERE slug LIKE 'test-%'`);
   await db.execute(sql`DELETE FROM suppliers WHERE name LIKE 'Test Sup%'`);
 }
+
+afterEach(reset);
 
 // ─── DB CONSTRAINTS ──────────────────────
 describe("DB constraints", () => {
