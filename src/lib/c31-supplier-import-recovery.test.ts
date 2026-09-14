@@ -118,7 +118,7 @@ async function setStatus(importId: number, patch: Record<string, string>) {
   await db.execute(sql`
     UPDATE supplier_imports SET
       status = COALESCE(${patch.status ?? null}::text, status),
-      started_at = COALESCE(${patch.startedAt ?? null}::timestamptz, started_at),
+      started_at = COALESCE(${patch.startedAt ?? null}::timestamp, started_at),
       heartbeat_at = COALESCE(${patch.heartbeatAt ?? null}::timestamptz, heartbeat_at)
     WHERE id = ${importId}
   `);

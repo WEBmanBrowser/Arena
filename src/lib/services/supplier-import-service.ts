@@ -422,7 +422,7 @@ function alsoTimestampEpoch(value: unknown): number | null {
   if (!s) return null;
   if (s.includes("T") || s.endsWith("Z") || /[+-]\d{2}:?\d{2}$/.test(s) || /[+-]\d{2}$/.test(s)) {
     // ISO ou texto do pg: direto (o V8 nÃ£o aceita offset "+00" sem minutos).
-    const d = new Date(s.replace(" ", "T").replace(/\+00$/, "+00:00").replace(/-00$/, "-00:00"));
+    const d = new Date(s.replace(" ", "T").replace(/([+-]\d{2})$/, "$1:00"));
     return Number.isNaN(d.getTime()) ? null : d.getTime();
   }
   const t = s.replace(" ", "T");

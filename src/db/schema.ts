@@ -1125,7 +1125,7 @@ export const supplierSources = pgTable("supplier_sources", {
   /** upload | url | sftp (C.3.4.4: SFTP via worker also-sftp-fetcher). */
   sourceType: varchar("source_type", { length: 20 }).notNull().default("upload"),
   /** auto → detetar; csv/xlsx explícitos vencem o sniffing. */
-  format: varchar("format", { length: 10 }).notNull().default("auto"),
+  format: varchar("format", { length: 20 }).notNull().default("auto"),
   /** URL da fonte (apenas HTTPS; NULL para upload). C.3.4.2 lê isto. */
   url: varchar("url", { length: 1000 }),
   /**
