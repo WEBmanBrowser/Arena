@@ -65,7 +65,7 @@
 
   // Cron Trigger — expire pending order reservations every 10 minutes
   "triggers": {
-    "crons": ["*/10 * * * *"]
+    "crons": []
   }
 
   // SECRETS (set via `wrangler secret put` — NEVER stored in this file):
