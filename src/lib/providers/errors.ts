@@ -118,6 +118,10 @@ const SECRET_PATTERNS: Array<[RegExp, string]> = [
   // Bearer tokens first: otherwise "Authorization: Bearer <token>" would only
   // redact the literal word "Bearer" and leak the token itself.
   [/\bBearer\s+[A-Za-z0-9._~+/-]+=*/gi, "Bearer [REDACTED]"],
+  // C.4 — same rationale for the Wintouch `Authorization: ApiKey <key>`
+  // scheme: without this the generic pattern below misses the space-separated
+  // form and the key itself would survive sanitization.
+  [/\bApiKey\s+[A-Za-z0-9._~+/-]+=*/gi, "ApiKey [REDACTED]"],
   [/(authorization|bearer|api[-_ ]?key|apikey|secret|token|password|passwd|pwd|signature|cvv|iban)\s*[:=]\s*\S+/gi, "$1=[REDACTED]"],
   [/\b(?:\d[ -]*?){13,19}\b/g, "[REDACTED_PAN]"],
 ];
