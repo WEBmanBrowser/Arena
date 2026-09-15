@@ -47,7 +47,10 @@ export async function checkRateLimit(key: string, opts: RateLimitOptions): Promi
   const row = (rows.rows?.[0] ?? {}) as { count?: number | string; window_start?: string | Date; expires_at?: string | Date };
   const count = Number(row.count ?? 1);
   const expiresAt = row.expires_at ? new Date(row.expires_at) : new Date(Date.now() + windowSeconds * 1000);
-  const retryAfterSeconds = Math.max(0, Math.ceil((expiresAt.getTime() - Date.now()) / 1000));
+  const retryAfterSeconds = Math.min(
+    windowSeconds,
+    Math.max(0, Math.ceil((expiresAt.getTime() - Date.now()) / 1000)),
+  );
   return {
     allowed: count <= limit,
     count,
