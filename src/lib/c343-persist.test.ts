@@ -167,6 +167,44 @@ describe("C: apply pricelist persiste MPN/path em product_suppliers e lastSyncAt
   });
 });
 
+describe("C2: novo pricelist header-driven mantem stock separado", () => {
+  it("aplica catalogo+custo mas AvailableQuantity nao altera stock fisico nem supplierStock", async () => {
+    const sku = `${TAG}-HEADER-PRICE`;
+    const [product] = await db.insert(products).values({
+      name: "Prod Header Price", slug: `${sku.toLowerCase()}-${Date.now()}`, sku, price: "50.00", costPrice: "20.00", vatRate: "23.00", priceMode: "auto", stock: 4,
+    }).returning();
+    await db.insert(productSuppliers).values({ productId: product.id, supplierId, supplierSku: "1009318", costPrice: "20.00", supplierStock: 7, isPreferred: true });
+
+    const txt = [
+      "ProductID\tEuropeanArticleNumber\tManufacturerPartNumber\tDescription\tCategoryText1\tCategoryText2\tCategoryText3\tNetPrice\tNetRetailPrice\tAvailableQuantity",
+      "1009318\t010343812031\tC13S041068\tEPSON Photo paper\tImpressao\tConsumiveis\tPapel\t25.50\t99.99\t99",
+    ].join("\n");
+
+    const preview = await previewSupplierImport({ supplierId, source: uploadSource({ fileName: "pricelist-1.txt", csvText: txt }), userId: MANAGER.id });
+    expect(preview.lines[0].stock).toBeNull();
+    expect(preview.lines[0].supplierStock ?? null).toBeNull();
+    expect(preview.lines[0].costPrice).toBe("25.50");
+
+    // snapshot C2 deve estar ready para o produto ja ligado pelo ProductID
+    const [snap] = await db.select().from(supplierImportRows).where(eq(supplierImportRows.importId, preview.importId)).limit(1);
+    expect(snap.status).toBe("ready");
+    expect(snap.productId).toBe(product.id);
+    expect(snap.costPrice).toBe("25.50");
+    expect(snap.diffStatus).toBeNull();
+
+    await applySupplierImport({ importId: preview.importId, previewToken: preview.previewToken, userId: MANAGER.id });
+
+    const [afterProd] = await db.select().from(products).where(eq(products.id, product.id)).limit(1);
+    const [afterLink] = await db.select().from(productSuppliers).where(and(eq(productSuppliers.productId, product.id), eq(productSuppliers.supplierId, supplierId))).limit(1);
+    expect(afterProd.stock).toBe(4);
+    expect(afterProd.costPrice).toBe("25.50");
+    expect(afterLink.costPrice).toBe("25.50");
+    expect(afterLink.supplierStock).toBe(7);
+    expect(afterLink.manufacturerPartNumber).toBe("C13S041068");
+    expect(afterLink.supplierCategoryPath).toBe("Impressao / Consumiveis / Papel");
+  });
+});
+
 describe("D: apply stock persiste dates", () => {
   it("stock apply atualiza supplier_stock + nextDate/qty/timestamp+lastSyncAt mantendo stock-only invariants", async () => {
     const sku = `${TAG}-STOCK-D`;

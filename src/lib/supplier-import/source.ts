@@ -130,16 +130,15 @@ export function uploadSource(input: {
   }
 
   // ── Camada 2: nome genérico → assinatura estrutural do conteúdo ──
-  // Stock: a assinatura é o header com nomes (driven by header — 1 linha
-  // chega, e nunca false positive: cabeçalhos genéricos não coincidem).
-  if (looksLikeAlsoStock(txt)) {
-    return { kind: "upload", label: fileName || "stock.txt", format: "also_stock", text: txt };
-  }
-  // Pricelist: sem header (posicional) — a estrutura tem de ser compatível
-  // em VÁRIAS linhas (≥ 2) para nenhum TXT arbitrário ser classificado como
-  // ALSO (o bug de staging: 10 linhas TSV com nome genérico → parser genérico).
+  // Pricelist é testado primeiro porque o formato header-driven atual também
+  // inclui AvailableQuantity e, por isso, também pode parecer stock.
   if (looksLikeAlsoPricelist(txt, { minDataLines: 2 })) {
     return { kind: "upload", label: fileName || "pricelist-1.txt", format: "also_pricelist", text: txt };
+  }
+  // Stock vem depois: ProductID + AvailableQuantity continuam a identificar
+  // stock.txt quando o conteúdo não corresponde primeiro a um pricelist.
+  if (looksLikeAlsoStock(txt)) {
+    return { kind: "upload", label: fileName || "stock.txt", format: "also_stock", text: txt };
   }
 
   return { kind: "upload", label: fileName || "supplier-list.csv", format: "csv", text: txt };
@@ -180,8 +179,8 @@ export function sourceFormat(payload: SourcePayload): SupplierFileFormat {
     return "xlsx";
   }
   const text = payload.text ?? "";
-  if (looksLikeAlsoStock(text)) return "also_stock";
   if (looksLikeAlsoPricelist(text)) return "also_pricelist";
+  if (looksLikeAlsoStock(text)) return "also_stock";
   return "csv";
 }
 
