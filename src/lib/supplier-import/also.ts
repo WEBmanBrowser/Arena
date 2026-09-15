@@ -5,10 +5,9 @@
  * Both are TSV (tab-separated) but differ:
  *  - pricelist-1.txt (formato ANTIGO): NO header, fixed positional columns
  *    (10+), ~15k rows — continua suportado como antes.
- *  - pricelist-1.txt (formato REAL atual): TAB, 6 colunas, sem header, sem
- *    quotes — semântica DESCONHECIDA: NUNCA é mapeado; o parser falha o
- *    ficheiro com UNSUPPORTED_ALSO_PRICELIST_FORMAT (zero apply, zero
- *    INVALID_GTIN/INVALID_STOCK/INVALID_COST artificiais).
+ *  - pricelist-1.txt (formato antigo observado, 6 colunas): TAB, sem header,
+ *    sem semântica conhecida: NUNCA é mapeado; o parser falha o ficheiro com
+ *    UNSUPPORTED_ALSO_PRICELIST_FORMAT (zero apply, zero erros artificiais).
  *  - stock.txt (REAL): WITH header, tab-separated, header-driven, 6 colunas
  *    (ProductID, AvailableQuantity, AvailableNextDate, AvailableNextQuantity,
  *    AvailabilityDate, AvailabilityTime), datas YYYYMMDD, horas HHMMSS,
@@ -151,8 +150,8 @@ function parseAvailabilityTimestamp(dateRaw: string, timeRaw: string, issues: Su
 export const ALSO_PRICELIST_MIN_COLUMNS = 10;
 
 /**
- * Largura do pricelist REAL atual (/pricelist-1.txt): TAB, 6 colunas, sem
- * header, semântica desconhecida — nunca mapeado (UNSUPPORTED_*).
+ * Largura do formato antigo observado de pricelist: TAB, 6 colunas, sem
+ * header e sem semântica conhecida; permanece bloqueado com UNSUPPORTED_*.
  */
 export const ALSO_REAL_PRICELIST_COLUMNS = 6;
 
@@ -226,6 +225,22 @@ export function looksLikeAlsoPricelist(
   }
   if (lines.length < minDataLines) return false;
 
+  // Novo pricelist ALSO: formato header-driven.
+  // Assinatura: ProductID + EAN + MPN + Description + NetPrice.
+  const headerCells = lines[0]
+    .split("\t")
+    .map((c) => unquoteAlsoCell(c).trim().toLowerCase());
+
+  if (
+    headerCells.includes("productid") &&
+    headerCells.includes("europeanarticlenumber") &&
+    headerCells.includes("manufacturerpartnumber") &&
+    headerCells.includes("description") &&
+    headerCells.includes("netprice")
+  ) {
+    return lines.length >= 2;
+  }
+
   for (const raw of lines) {
     const cols = raw.split("\t");
     if (cols.length < ALSO_PRICELIST_MIN_COLUMNS) return false;
@@ -292,6 +307,236 @@ export function parseAlsoPricelist(
   if (!cleaned.trim()) throw new SupplierCsvError("CSV_EMPTY");
 
   // Split preserving empty fields, handle CRLF
+  // Novo pricelist ALSO: header-driven.
+  // O catálogo é resolvido pelo nome dos campos.
+  // AvailableQuantity NÃO é stock físico aqui; o stock do fornecedor
+  // continua a ser atualizado exclusivamente através de stock.txt.
+  const headerDrivenLines = cleaned.split(/\r?\n/);
+  const firstNonEmptyIndex = headerDrivenLines.findIndex((line) => line.trim() !== "");
+
+  if (firstNonEmptyIndex >= 0) {
+    const rawHeaders = headerDrivenLines[firstNonEmptyIndex]
+      .split("\t")
+      .map((h) => unquoteAlsoCell(h).trim());
+
+    const normalizeHeader = (h: string) =>
+      h
+        .toLowerCase()
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .replace(/[^a-z0-9]/g, "");
+
+    const headerMap = new Map<string, number>();
+    for (let i = 0; i < rawHeaders.length; i++) {
+      const norm = normalizeHeader(rawHeaders[i]);
+      if (norm && !headerMap.has(norm)) headerMap.set(norm, i);
+    }
+
+    const isHeaderDrivenPricelist =
+      headerMap.has("productid") &&
+      headerMap.has("description") &&
+      headerMap.has("netprice");
+
+    if (isHeaderDrivenPricelist) {
+      const mapping: Record<string, string> = {};
+      const ignoredColumns: string[] = [];
+
+      const aliases: Record<string, string> = {
+        productid: "supplierSku",
+        europeanarticlenumber: "ean",
+        manufacturerpartnumber: "alsoManufacturerPartNumber",
+        manufacturername: "alsoManufacturerName",
+        description: "name",
+        categorytext1: "alsoCategoryPath",
+        categorytext2: "alsoCategoryPath",
+        categorytext3: "alsoCategoryPath",
+        netprice: "costPrice",
+      };
+
+      for (const h of rawHeaders) {
+        const alias = aliases[normalizeHeader(h)];
+        if (alias) mapping[h] = alias;
+        else ignoredColumns.push(h);
+      }
+
+      const dataLines: { idx: number; raw: string }[] = [];
+      for (let i = firstNonEmptyIndex + 1; i < headerDrivenLines.length; i++) {
+        if (headerDrivenLines[i].trim() === "") continue;
+        dataLines.push({ idx: i + 1, raw: headerDrivenLines[i] });
+      }
+
+      if (dataLines.length === 0) throw new SupplierCsvError("CSV_NO_DATA");
+      if (dataLines.length > SUPPLIER_IMPORT_MAX_ROWS) {
+        throw new SupplierCsvError("CSV_TOO_MANY_ROWS");
+      }
+
+      const rows: NormalizedSupplierRow[] = [];
+
+      for (const { idx, raw } of dataLines) {
+        const cols = raw.split("\t");
+
+        const get = (name: string): string => {
+          const fieldPos = headerMap.get(name);
+          return fieldPos === undefined
+            ? ""
+            : unquoteAlsoCell(cols[fieldPos] ?? "").trim();
+        };
+
+        const rawSku = get("productid");
+        const rawEan = get("europeanarticlenumber");
+        const rawDesc = get("description");
+        const rawPrice = get("netprice");
+        const rawMpn = get("manufacturerpartnumber");
+        const rawBrand = get("manufacturername");
+        const rawCat1 = get("categorytext1");
+        const rawCat2 = get("categorytext2");
+        const rawCat3 = get("categorytext3");
+
+        const issues: SupplierImportIssue[] = [];
+
+        const error = (
+          field: string,
+          value: string,
+          code: string,
+          message: string
+        ) => issues.push({ field, value, code, message, severity: "error" });
+
+        const warning = (
+          field: string,
+          value: string,
+          code: string,
+          message: string
+        ) => issues.push({ field, value, code, message, severity: "warning" });
+
+        const skuKey = snapshotKey(rawSku, SNAPSHOT_LIMITS.sku);
+        let supplierSku: string | null = skuKey.value;
+
+        if (skuKey.tooLong) {
+          error(
+            "supplierSku",
+            rawSku.slice(0, 120),
+            "SUPPLIER_SKU_TOO_LONG",
+            `SKU do fornecedor com mais de ${SNAPSHOT_LIMITS.sku} caracteres — não é cortado; a linha não é aplicada`
+          );
+          supplierSku = null;
+        }
+
+        let ean: string | null = null;
+        let eanTooLong = false;
+        const eanRaw = rawEan.replace(/[\s\u00a0]/g, "");
+
+        if (eanRaw) {
+          const normalized = /^\d{12}$/.test(eanRaw) ? "0" + eanRaw : eanRaw;
+
+          if (normalized.length > SNAPSHOT_LIMITS.ean) {
+            eanTooLong = true;
+            error(
+              "ean",
+              eanRaw,
+              "EAN_TOO_LONG",
+              `EAN demasiado longo (máx. ${SNAPSHOT_LIMITS.ean} caracteres) — não é gravado; a linha não é aplicada`
+            );
+          } else {
+            ean = normalized;
+            if (!isValidGTIN(ean)) {
+              error(
+                "ean",
+                eanRaw,
+                "INVALID_GTIN",
+                "EAN/GTIN com checksum inválido"
+              );
+            }
+          }
+        }
+
+        const nameSnap = snapshotText(rawDesc, SNAPSHOT_LIMITS.name);
+
+        if (nameSnap?.truncated) {
+          warning(
+            "name",
+            rawDesc,
+            "NAME_TRUNCATED",
+            `Designação limitada a ${SNAPSHOT_LIMITS.name} caracteres no snapshot`
+          );
+        }
+
+        const name = nameSnap?.value ?? null;
+
+        let costPrice: string | null = null;
+
+        if (rawPrice) {
+          const parsed = parseMoney(rawPrice);
+
+          if (parsed.value === null) {
+            error(
+              "costPrice",
+              rawPrice,
+              "INVALID_COST",
+              "Preço de custo inválido (decimal >= 0 esperado)"
+            );
+          } else if (centsOf(parsed.value) > centsOf(SNAPSHOT_COST_MAX)) {
+            error(
+              "costPrice",
+              rawPrice,
+              "COST_OUT_OF_RANGE",
+              `Custo acima do máximo suportado (${SNAPSHOT_COST_MAX} €) — não é truncado; a linha não é aplicada`
+            );
+          } else {
+            costPrice = parsed.value;
+
+            if (parsed.ambiguous) {
+              warning(
+                "costPrice",
+                rawPrice,
+                "AMBIGUOUS_NUMBER_FORMAT",
+                `Custo lido como ${parsed.value}€`
+              );
+            }
+          }
+        }
+
+        if (!supplierSku && !ean && !skuKey.tooLong && !eanTooLong) {
+          error(
+            "row",
+            "",
+            "MISSING_IDENTIFIER_KEY",
+            "Linha sem SKU do fornecedor, EAN ou SKU interno — impossível de identificar"
+          );
+        }
+
+        const mpn = rawMpn ? rawMpn.slice(0, 100) || null : null;
+        const brand = rawBrand ? rawBrand.slice(0, 255) || null : null;
+
+        const catParts = [rawCat1, rawCat2, rawCat3].filter(Boolean);
+        const catPath = catParts.length ? catParts.join(" / ") : null;
+
+        rows.push({
+          rowNumber: idx,
+          supplierSku,
+          ean,
+          internalSku: null,
+          name,
+          costPrice,
+          stock: null,
+          supplierStock: null,
+          leadTimeDays: null,
+          issues,
+          alsoManufacturerPartNumber: mpn,
+          alsoManufacturerName: brand,
+          alsoCategoryPath: catPath,
+        });
+      }
+
+      return {
+        headers: rawHeaders,
+        delimiter: "\t",
+        mapping,
+        ignoredColumns,
+        rows,
+      };
+    }
+  }
+
   const rawLines = cleaned.split(/\r?\n/);
   // Filter out trailing empty line after final newline but keep internal empties as skip
   const lines: { idx: number; raw: string }[] = [];
@@ -304,13 +549,13 @@ export function parseAlsoPricelist(
   if (lines.length === 0) throw new SupplierCsvError("CSV_NO_DATA");
   if (lines.length > SUPPLIER_IMPORT_MAX_ROWS) throw new SupplierCsvError("CSV_TOO_MANY_ROWS");
 
-  // C.3.4.4 — o pricelist REAL atual (/pricelist-1.txt) é TAB com 6 colunas,
-  // sem header e sem quotes, de semântica DESCONHECIDA (ex.: `1.520\t\t\t0\t0\t`).
-  // Quando TODAS as linhas têm exatamente 6 colunas, o ficheiro é o formato
-  // real não-mapeado: falha explicitamente com UNSUPPORTED_ALSO_PRICELIST_FORMAT
-  // (zero apply) em vez de cair no parser posicional de 10 colunas e produzir
-  // INVALID_GTIN/INVALID_STOCK/INVALID_COST artificiais. Uma linha curta
-  // isolada num ficheiro de 10 colunas mantém o comportamento por-linha antigo.
+  // C.3.4.4 — formato antigo observado de pricelist: TAB com 6 colunas,
+  // sem header e sem semântica conhecida (ex.: `1.520\t\t\t0\t0\t`).
+  // Quando TODAS as linhas têm exatamente 6 colunas, o ficheiro permanece
+  // bloqueado com UNSUPPORTED_ALSO_PRICELIST_FORMAT (zero apply), em vez de
+  // cair no parser posicional legado e produzir erros artificiais.
+  // Uma linha curta isolada num pricelist legado mantém o comportamento
+  // por-linha anterior.
   const everyLineSixColumns = lines.every(({ raw }) => raw.split("\t").length === ALSO_REAL_PRICELIST_COLUMNS);
   if (everyLineSixColumns) throw new SupplierCsvError("UNSUPPORTED_ALSO_PRICELIST_FORMAT");
 

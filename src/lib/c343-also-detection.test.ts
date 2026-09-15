@@ -161,8 +161,9 @@ describe("C.3.4.3.1 — regra de deteção estrutural (looksLikeAlsoPricelist)",
 
   it("rejeita header e colunas inconsistentes com a assinatura", () => {
     // Linha de header (ProductID sem dígitos na coluna 0 + palavras nas numéricas)
+    // Header ALSO conhecido e seguido de dados validos: formato header-driven suportado.
     const header = ["ProductID", "EuropeanArticleNumber", "CategoryText1", "CategoryText2", "CategoryText3", "Description", "AvailableQuantity", "NetPrice", "ManufacturerPartNumber", "ManufacturerName"].join("\t");
-    expect(looksLikeAlsoPricelist(header + "\n" + pricelistLine())).toBe(false);
+    expect(looksLikeAlsoPricelist(header + "\n" + pricelistLine())).toBe(true);
     // ProductID sem dígitos (tokens puramente textuais)
     expect(looksLikeAlsoPricelist([pricelistLine({ ProductID: "ABC" }), pricelistLine({ ProductID: "DEF" })].join("\n"))).toBe(false);
     // ProductID com espaços (não é um token)
@@ -277,6 +278,17 @@ describe("C.3.4.3.1 — nome canónico decide (contrato C.3.4.3.1); nome genéri
     expect(parsed.mapping["skuFornecedor"]).toBe("supplierSku");
   });
 });
+
+
+  it("novo pricelist header-driven tem prioridade sobre stock mesmo com nome generico", () => {
+    const txt = [
+      "ProductID\tEuropeanArticleNumber\tManufacturerPartNumber\tDescription\tCategoryText1\tCategoryText2\tCategoryText3\tNetPrice\tNetRetailPrice\tAvailableQuantity",
+      "1009318\t010343812031\tC13S041068\tEPSON Photo paper\tImpressao\tConsumiveis\tPapel\t37.46\t\t0",
+    ].join("\n");
+
+    expect(looksLikeAlsoPricelist(txt, { minDataLines: 1 })).toBe(true);
+    expect(uploadSource({ fileName: "export.txt", csvText: txt }).format).toBe("also_pricelist");
+  });
 
 describe("C.3.4.3.1 — sourceFormat auto aplica as MESMAS regras (payloads sem formato)", () => {
   it("auto: pricelist por conteúdo; stock por header; senão csv", () => {
