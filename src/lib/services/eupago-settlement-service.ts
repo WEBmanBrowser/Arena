@@ -28,7 +28,8 @@ import { and, eq } from "drizzle-orm";
 import { confirmOrderPayment } from "@/lib/orders";
 import { createAuditLog } from "@/lib/audit";
 import { ProviderError } from "@/lib/providers/errors";
-import { EUPAGO_PROVIDER_ID, getEupagoWebhookKey } from "@/lib/providers/eupago/config";
+import { EUPAGO_PROVIDER_ID } from "@/lib/providers/eupago/config";
+import { resolveEupagoWebhookKey } from "@/lib/services/eupago-config-service";
 import { verifyEupagoWebhook } from "@/lib/providers/eupago/webhook-crypto";
 import { normalizeEupagoEvent, type NormalizedEupagoEvent } from "@/lib/providers/eupago/events";
 import {
@@ -114,7 +115,7 @@ function buildTrustedMetadata(event: NormalizedEupagoEvent): Record<string, stri
 export async function processEupagoWebhook(
   input: ProcessWebhookInput
 ): Promise<ProcessWebhookResult> {
-  const key = input.webhookKey ?? getEupagoWebhookKey();
+  const key = input.webhookKey ?? await resolveEupagoWebhookKey();
 
   // 1. Signature (and, only afterwards, decryption).
   const verified = await verifyEupagoWebhook(key, input.rawBody, input.headers);

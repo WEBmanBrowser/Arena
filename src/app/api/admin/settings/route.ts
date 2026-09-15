@@ -16,7 +16,13 @@ export async function GET() {
   await ensureDefaultShippingConfiguration();
   const all = await db.select().from(settings);
   const map: Record<string, string> = {};
-  for (const s of all) map[s.key] = s.value || "";
+  for (const s of all) {
+    // Eupago-managed keys are NEVER exposed by the generic endpoint (not
+    // even ciphertext/metadata). They are served presence-only by the
+    // dedicated, RBAC'd /api/admin/settings/eupago routes.
+    if (s.key.startsWith("eupago_")) continue;
+    map[s.key] = s.value || "";
+  }
   const shippingClasses = await listShippingClasses(true);
   const freeShipping = await getFreeShippingSettings();
   return NextResponse.json({ settings: map, shippingClasses, freeShipping });
@@ -27,6 +33,17 @@ export async function PUT(req: NextRequest) {
   if (!user || !isAdmin(user.role)) return NextResponse.json({ error: "Não autorizado" }, { status: 403 });
 
   const body = await req.json();
+
+  // Eupago-managed keys are writable ONLY through the dedicated Eupago
+  // routes (encryption + validation + audit). Reject the whole request
+  // BEFORE any write so a mixed payload cannot partially persist.
+  if (
+    body !== null &&
+    typeof body === "object" &&
+    Object.keys(body).some((key) => key.startsWith("eupago_"))
+  ) {
+    return NextResponse.json({ error: "EUPAGO_MANAGED_KEY" }, { status: 400 });
+  }
 
   if (body?.shippingConfig) {
     const cfg = body.shippingConfig;

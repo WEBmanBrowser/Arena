@@ -76,6 +76,10 @@
   // - BULK_PREVIEW_SECRET    (>=32 chars; admin bulk price preview)
   // - EUPAGO_API_KEY / EUPAGO_OAUTH_CLIENT_ID / EUPAGO_OAUTH_CLIENT_SECRET /
   //   EUPAGO_WEBHOOK_KEY     (Eupago payments + webhook verification)
+  // - SETTINGS_ENCRYPTION_KEY (64 hex chars / 32 bytes; encrypts Backoffice-managed
+  //   secrets at rest, e.g. Eupago credentials in the settings table. REQUIRED
+  //   before saving any Backoffice secret; rotation orphans existing rows,
+  //   which then fail closed until re-saved.)
   // - EMAIL_API_KEY          (outbound email; without it emails are logged, not sent)
   // Optional non-secret vars: EUPAGO_ENVIRONMENT (default sandbox), EMAIL_FROM,
   // NEXT_PUBLIC_SITE_URL / SITE_URL, ORDER_RESERVATION_MINUTES, R2_PUBLIC_URL.

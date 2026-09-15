@@ -1,5 +1,6 @@
 "use client";
 import { useState, useEffect } from "react";
+import Link from "next/link";
 
 export default function AdminSettingsPage() {
   const [settings, setSettings] = useState<Record<string, string>>({});
@@ -75,6 +76,16 @@ export default function AdminSettingsPage() {
       </div>
 
       <div className="space-y-6">
+        <div className="bg-white border rounded-xl p-6">
+          <div className="flex items-center justify-between">
+            <div>
+              <h3 className="font-bold text-slate-800">Eupago — Pagamentos</h3>
+              <p className="text-xs text-slate-500">Credenciais, webhooks e teste de ligação (segredos encriptados, nunca mostrados).</p>
+            </div>
+            <Link href="/admin/settings/eupago" className="px-3 py-1.5 bg-sky-600 text-white rounded text-sm font-medium hover:bg-sky-700">Gerir Eupago</Link>
+          </div>
+        </div>
+
         <div className="bg-white border rounded-xl p-6">
           <div className="flex items-center justify-between mb-4">
             <div>
