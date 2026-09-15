@@ -107,6 +107,17 @@ describe("B.3.1 — provider errors: message sanitization before persistence", (
     expect(clean).toContain("REDACTED");
   });
 
+  it("redacts ApiKey-scheme credentials (C.4 Wintouch)", () => {
+    const dirty = "request failed: Authorization: ApiKey wintouch-secret-xyz-123";
+    const clean = sanitizeErrorMessage(dirty);
+    expect(clean).not.toContain("wintouch-secret-xyz-123");
+    expect(clean).toContain("REDACTED");
+  });
+
+  it("does not redact variable names that merely mention apikey", () => {
+    expect(sanitizeErrorMessage("missing configuration: WINTOUCH_API_KEY")).toContain("WINTOUCH_API_KEY");
+  });
+
   it("truncates long messages and handles non-error input", () => {
     expect(sanitizeErrorMessage("x".repeat(5000)).length).toBe(500);
     expect(sanitizeErrorMessage(undefined)).toBe("UNKNOWN_ERROR");
