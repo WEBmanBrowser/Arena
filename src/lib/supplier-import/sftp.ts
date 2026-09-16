@@ -72,6 +72,8 @@ export interface SftpSourceConfig {
 export interface SftpFetchOptions {
   /** Transporte injetável (produção = service binding). */
   fetcherImpl?: (req: SftpWorkerRequest) => Promise<WorkerEnvelope>;
+  /** Exclusivamente para uma operação explícita de regeneração de preview. */
+  forceRead?: boolean;
   timeoutMs?: number;
   maxBytes?: number;
   maxAttempts?: number;
@@ -231,7 +233,7 @@ export async function fetchSftpSource(
   const mtimeHit = st.mtime !== null && !!cfg.lastRemoteMtime && st.mtime === cfg.lastRemoteMtime;
   // Otimização CONSERVADORA: só evita a transferência quando AMBOS os
   // validadores existem e batem (servidor que omite attrs → transfere sempre).
-  if (sizeHit && mtimeHit) return { kind: "not_modified", stat: st };
+  if (sizeHit && mtimeHit && !opts.forceRead) return { kind: "not_modified", stat: st };
   const content = await readSftpSource(cfg, opts);
   return { kind: "content", content };
 }

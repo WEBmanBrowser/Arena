@@ -118,6 +118,7 @@ export default function SupplierSourcesPanel({ supplierId, supplierName }: { sup
   // Uma sincronização por clique, e nunca duas em voo: o busy é local e a
   // corrida ativa é confirmada pelo servidor (claim Postgres, SOURCE_ALREADY_RUNNING).
   const [busySourceId, setBusySourceId] = useState<number | null>(null);
+  const [busyOperation, setBusyOperation] = useState<"sync" | "regenerate" | null>(null);
   const [syncResults, setSyncResults] = useState<Record<number, { kind: "ok" | "info" | "err"; text: string; importId?: number } | undefined>>({});
   const mounted = useRef(true);
   useEffect(() => {
@@ -246,6 +247,7 @@ export default function SupplierSourcesPanel({ supplierId, supplierName }: { sup
   const syncNow = async (s: SourceRow) => {
     if (busySourceId !== null) return; // dupla proteção contra duplo clique
     setBusySourceId(s.id);
+    setBusyOperation("sync");
     setSyncResults((prev) => ({ ...prev, [s.id]: { kind: "info", text: "A sincronizar…" } }));
     try {
       const res = await fetch(`/api/admin/supplier-sources/${s.id}/sync`, { method: "POST" });
@@ -281,7 +283,58 @@ export default function SupplierSourcesPanel({ supplierId, supplierName }: { sup
       setSyncResults((prev) => ({ ...prev, [s.id]: { kind: "err", text: "Falha de rede ao sincronizar." } }));
     } finally {
       await load(); // refresh do resultado/observabilidade
-      if (mounted.current) setBusySourceId(null);
+      if (mounted.current) {
+        setBusySourceId(null);
+        setBusyOperation(null);
+      }
+    }
+  };
+
+  const regeneratePreview = async (s: SourceRow) => {
+    if (busySourceId !== null) return; // dupla proteção contra duplo clique
+    setBusySourceId(s.id);
+    setBusyOperation("regenerate");
+    setSyncResults((prev) => ({ ...prev, [s.id]: { kind: "info", text: "A regenerar preview…" } }));
+    try {
+      const res = await fetch(`/api/admin/supplier-sources/${s.id}/regenerate`, { method: "POST" });
+      const data = await readBody(res);
+      if (res.ok && data?.run) {
+        const run = data.run as SyncOutcome;
+        if (run.status === "success") {
+          setSyncResults((prev) => ({
+            ...prev,
+            [s.id]: { kind: "ok", text: "Novo preview regenerado — rever e aplicar", importId: run.importId ?? undefined },
+          }));
+        } else {
+          setSyncResults((prev) => ({
+            ...prev,
+            [s.id]: {
+              kind: "info",
+              text:
+                run.noChangeReason === "remote_metadata"
+                  ? "Regeneração sem novo preview: metadata remota sem alteração."
+                  : run.noChangeReason === "content_hash"
+                    ? "Regeneração sem novo preview: conteúdo igual ao último snapshot."
+                    : run.noChangeReason === "http_304"
+                      ? "Regeneração sem novo preview: servidor indicou que não houve alteração."
+                      : "Regeneração sem novo preview.",
+            },
+          }));
+        }
+      } else {
+        setSyncResults((prev) => ({
+          ...prev,
+          [s.id]: { kind: "err", text: supplierImportErrorMessage(data?.error) || "Falha ao regenerar preview" },
+        }));
+      }
+    } catch {
+      setSyncResults((prev) => ({ ...prev, [s.id]: { kind: "err", text: "Falha de rede ao regenerar o preview." } }));
+    } finally {
+      await load();
+      if (mounted.current) {
+        setBusySourceId(null);
+        setBusyOperation(null);
+      }
     }
   };
 
@@ -514,8 +567,18 @@ export default function SupplierSourcesPanel({ supplierId, supplierName }: { sup
                     title={s.enabled ? "Executa a sincronização agora; o resultado é sempre um preview para revisão" : "Ative a fonte para sincronizar"}
                     className="px-2 py-1 rounded bg-sky-600 text-white font-medium disabled:opacity-40"
                   >
-                    {busySourceId === s.id ? "A sincronizar…" : "Sincronizar agora"}
+                    {busySourceId === s.id && busyOperation === "sync" ? "A sincronizar…" : "Sincronizar agora"}
                   </button>
+                  {s.sourceType === "sftp" && (
+                    <button
+                      onClick={() => regeneratePreview(s)}
+                      disabled={!s.enabled || busySourceId !== null}
+                      title={s.enabled ? "Força nova leitura do ficheiro e cria um NOVO preview para revisão, sem aplicar automaticamente" : "Ative a fonte para regenerar o preview"}
+                      className="px-2 py-1 rounded bg-indigo-600 text-white font-medium disabled:opacity-40"
+                    >
+                      {busySourceId === s.id && busyOperation === "regenerate" ? "A regenerar…" : "Regenerar preview"}
+                    </button>
+                  )}
                 </td>
               </tr>
             ))}

@@ -20,6 +20,7 @@ import { eq, sql } from "drizzle-orm";
 
 const getCurrentUserMock = vi.fn();
 const runSupplierSourceMock = vi.fn();
+const regenerateSupplierSourcePreviewMock = vi.fn();
 
 vi.mock("@/lib/auth", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/auth")>();
@@ -27,7 +28,11 @@ vi.mock("@/lib/auth", async (importOriginal) => {
 });
 vi.mock("@/lib/services/supplier-source-service", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/services/supplier-source-service")>();
-  return { ...actual, runSupplierSource: (...args: unknown[]) => runSupplierSourceMock(...args) };
+  return {
+    ...actual,
+    runSupplierSource: (...args: unknown[]) => runSupplierSourceMock(...args),
+    regenerateSupplierSourcePreview: (...args: unknown[]) => regenerateSupplierSourcePreviewMock(...args),
+  };
 });
 
 import { GET as collectionGET, POST as collectionPOST } from "@/app/api/admin/supplier-sources/route";
@@ -37,7 +42,9 @@ import {
   PUT as detailPUT,
 } from "@/app/api/admin/supplier-sources/[id]/route";
 import { POST as syncPOST } from "@/app/api/admin/supplier-sources/[id]/sync/route";
+import { POST as regeneratePOST } from "@/app/api/admin/supplier-sources/[id]/regenerate/route";
 import { SupplierSourceError } from "@/lib/supplier-import/source";
+import { supplierImportErrorMessage } from "@/lib/supplier-import/error-messages";
 
 const TAG = "C342API";
 const USER_ID = 990043;
@@ -65,6 +72,7 @@ let supplierId: number;
 beforeEach(async () => {
   getCurrentUserMock.mockReset();
   runSupplierSourceMock.mockReset();
+  regenerateSupplierSourcePreviewMock.mockReset();
   await db.insert(users).values({ id: USER_ID, email: `${TAG}@test.local`, password: "x", name: TAG, role: "admin" }).onConflictDoNothing();
   const [s] = await db.insert(suppliers).values({ name: `${TAG}-Fornecedor`, isActive: true }).returning();
   supplierId = s.id;
@@ -98,12 +106,18 @@ describe("C.3.4.2 — API de fontes: RBAC/CSRF", () => {
   it("mutações exigem manager (staff 403) e Origin válida (sem CSRF 403)", async () => {
     getCurrentUserMock.mockResolvedValue(user("staff"));
     expect((await collectionPOST(req("/api/admin/supplier-sources", { method: "POST", body: {} }))).status).toBe(403);
+    const staffRegenerate = req("/api/admin/supplier-sources/1/regenerate", { method: "POST" });
+    expect((await regeneratePOST(staffRegenerate, asId(1))).status).toBe(403);
+    expect(regenerateSupplierSourcePreviewMock).not.toHaveBeenCalled();
 
     getCurrentUserMock.mockResolvedValue(user("manager"));
     const noCsrf = req("/api/admin/supplier-sources", { method: "POST", body: {}, csrf: false });
     expect((await collectionPOST(noCsrf)).status).toBe(403);
     const noCsrfSync = req("/api/admin/supplier-sources/1/sync", { method: "POST", csrf: false });
     expect((await syncPOST(noCsrfSync, asId(1))).status).toBe(403);
+    const noCsrfRegenerate = req("/api/admin/supplier-sources/1/regenerate", { method: "POST", csrf: false });
+    expect((await regeneratePOST(noCsrfRegenerate, asId(1))).status).toBe(403);
+    expect(regenerateSupplierSourcePreviewMock).not.toHaveBeenCalled();
     const noCsrfPut = req("/api/admin/supplier-sources/1", { method: "PUT", body: {}, csrf: false });
     expect((await detailPUT(noCsrfPut, asId(1))).status).toBe(403);
     const noCsrfPatch = req("/api/admin/supplier-sources/1", { method: "PATCH", body: { enabled: true }, csrf: false });
@@ -321,6 +335,91 @@ describe("C.3.4.2 — POST /sync (ligação à rota + serviço único)", () => {
     const badId = await syncPOST(req("/api/admin/supplier-sources/0/sync", { method: "POST" }), asId("0"));
     expect(badId.status).toBe(404);
     expect(runSupplierSourceMock).not.toHaveBeenCalled();
+  });
+});
+
+// ─── Regenerate preview via API ─────────────────────────
+
+describe("C.3.4.2 — POST /regenerate (ligação à rota + serviço único)", () => {
+  it("manager passa; devolve o resumo seguro do novo preview", async () => {
+    getCurrentUserMock.mockResolvedValue(user("manager"));
+    regenerateSupplierSourcePreviewMock.mockResolvedValue({
+      runId: 8,
+      status: "success",
+      noChangeReason: undefined,
+      httpStatus: null,
+      durationMs: 17,
+      importId: 88,
+      rowCount: 1,
+      newCount: 1,
+      updatedCount: 0,
+      missingCount: 0,
+      etag: null,
+      lastModified: null,
+      remoteSize: 123,
+      remoteMtime: "1725667200",
+      fileHash: "sha256-real-file-hash",
+      preview: {
+        importId: 88,
+        fileName: "/out/stock.txt",
+        status: "preview",
+        truncated: false,
+        summary: { total: 1 },
+        previewToken: "PREVIEW-TOKEN-NAO-ECOAR",
+        secret: "SFTP-SECRET-NAO-ECOAR",
+      },
+    });
+
+    const res = await regeneratePOST(
+      req("/api/admin/supplier-sources/42/regenerate", { method: "POST" }),
+      asId(42)
+    );
+    expect(res.status).toBe(200);
+    expect(regenerateSupplierSourcePreviewMock).toHaveBeenCalledTimes(1);
+    expect(regenerateSupplierSourcePreviewMock).toHaveBeenCalledWith(42, USER_ID);
+
+    const body = await res.json();
+    expect(body.run.status).toBe("success");
+    expect(body.run.importId).toBe(88);
+    expect(body.run.fileHash).toBe("sha256-real-file-hash");
+    expect(body.run.previewSummary).toEqual({
+      importId: 88,
+      fileName: "/out/stock.txt",
+      summary: { total: 1 },
+      status: "preview",
+      truncated: false,
+    });
+    expect(body.run.previewToken).toBeUndefined();
+    expect(body.run.previewSummary.previewToken).toBeUndefined();
+    const serialized = JSON.stringify(body);
+    expect(serialized).not.toContain("PREVIEW-TOKEN-NAO-ECOAR");
+    expect(serialized).not.toContain("SFTP-SECRET-NAO-ECOAR");
+  });
+
+  it("SupplierSourceError tipado → código e mensagem seguros, sem internals", async () => {
+    getCurrentUserMock.mockResolvedValue(user("manager"));
+    regenerateSupplierSourcePreviewMock.mockRejectedValueOnce(new SupplierSourceError("SOURCE_TYPE_UNSUPPORTED", 400));
+
+    const res = await regeneratePOST(
+      req("/api/admin/supplier-sources/43/regenerate", { method: "POST" }),
+      asId(43)
+    );
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toBe("SOURCE_TYPE_UNSUPPORTED");
+    expect(body.message).toBe(supplierImportErrorMessage("SOURCE_TYPE_UNSUPPORTED"));
+    expect(body.stack).toBeUndefined();
+    expect(JSON.stringify(body)).not.toMatch(/SELECT|secret|password|stack/i);
+  });
+
+  it("id inválido → 404 sem chamar o serviço", async () => {
+    getCurrentUserMock.mockResolvedValue(user("manager"));
+    const res = await regeneratePOST(
+      req("/api/admin/supplier-sources/0/regenerate", { method: "POST" }),
+      asId("0")
+    );
+    expect(res.status).toBe(404);
+    expect(regenerateSupplierSourcePreviewMock).not.toHaveBeenCalled();
   });
 });
 
