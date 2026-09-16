@@ -163,6 +163,15 @@ export interface NormalizedSupplierRow {
   alsoManufacturerName?: string | null;
   /** ALSO pricelist: CategoryText1/2/3 joined (supplier category hierarchy). */
   alsoCategoryPath?: string | null;
+  /**
+   * ALSO pricelist: os três níveis SEPARADOS (fonte estrutural da hierarquia
+   * de categorias no apply). Vazio no ficheiro → null. `alsoCategoryPath`
+   * permanece derivado apenas para exibição/histórico — nunca é reconstruído
+   * nem "re-split" no apply.
+   */
+  alsoCategoryText1?: string | null;
+  alsoCategoryText2?: string | null;
+  alsoCategoryText3?: string | null;
   /** ALSO stock: AvailableNextDate (data prevista). Raw trimmed, YYYY-MM-DD or empty. */
   alsoAvailableNextDate?: string | null;
   /** ALSO stock: AvailableNextQuantity (-1 → null/unknown). Null when -1/empty. */

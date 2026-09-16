@@ -1028,6 +1028,15 @@ export const supplierImportRows = pgTable("supplier_import_rows", {
   manufacturerPartNumber: varchar("manufacturer_part_number", { length: 100 }),
   manufacturerName: varchar("manufacturer_name", { length: 255 }),
   supplierCategoryPath: text("supplier_category_path"),
+  // ── C.3.4.5: níveis de categoria ALSO estruturados (fonte da hierarquia) ──
+  // Os três níveis do pricelist, guardados SEPARADAMENTE do path de exibição
+  // acima (que permanece apenas histórico/display e nunca alimenta o apply).
+  // NULL nos três = sem informação estrutural (incl. previews anteriores à
+  // coluna): o apply NÃO constrói categorias a partir de supplier_category_path
+  // e o produto novo mantém categoryId NULL. Vazio no ficheiro → NULL.
+  supplierCategoryText1: varchar("supplier_category_text1", { length: 255 }),
+  supplierCategoryText2: varchar("supplier_category_text2", { length: 255 }),
+  supplierCategoryText3: varchar("supplier_category_text3", { length: 255 }),
   availableNextDate: date("available_next_date"),
   availableNextQuantity: integer("available_next_quantity"),
   availabilityTimestamp: timestamp("availability_timestamp", { withTimezone: true }),

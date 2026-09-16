@@ -46,6 +46,7 @@ import {
 } from "@/db/schema";
 import { syncProductCost } from "@/lib/services/product-supplier-service";
 import { supplierImportApplyCheckpoint } from "@/lib/supplier-import/apply-checkpoint";
+import { ensureCategoryHierarchy } from "@/lib/supplier-import/category-hierarchy";
 import { computeAutomaticPrice, loadPricingContext } from "@/lib/services/pricing-engine-service";
 import { createAuditLog } from "@/lib/audit";
 import { slugify } from "@/lib/utils";
@@ -240,6 +241,10 @@ export interface SupplierImportPreviewLine {
   alsoManufacturerPartNumber?: string | null;
   alsoManufacturerName?: string | null;
   alsoCategoryPath?: string | null;
+  // C.3.4.5: níveis estruturados (fonte da hierarquia; NULL em previews antigos)
+  alsoCategoryText1?: string | null;
+  alsoCategoryText2?: string | null;
+  alsoCategoryText3?: string | null;
   alsoAvailableNextDate?: string | null;
   alsoAvailableNextQuantity?: number | null;
   alsoAvailabilityTimestamp?: string | null;
@@ -721,6 +726,9 @@ export async function previewSupplierImport(input: PreviewInput): Promise<Suppli
       alsoManufacturerPartNumber: (row as any).alsoManufacturerPartNumber ?? null,
       alsoManufacturerName: (row as any).alsoManufacturerName ?? null,
       alsoCategoryPath: (row as any).alsoCategoryPath ?? null,
+      alsoCategoryText1: (row as any).alsoCategoryText1 ?? null,
+      alsoCategoryText2: (row as any).alsoCategoryText2 ?? null,
+      alsoCategoryText3: (row as any).alsoCategoryText3 ?? null,
       alsoAvailableNextDate: (row as any).alsoAvailableNextDate ?? null,
       alsoAvailableNextQuantity: (row as any).alsoAvailableNextQuantity ?? null,
       alsoAvailabilityTimestamp: (row as any).alsoAvailabilityTimestamp ?? null,
@@ -799,6 +807,11 @@ export async function previewSupplierImport(input: PreviewInput): Promise<Suppli
         manufacturerPartNumber: (line as any).alsoManufacturerPartNumber ?? null,
         manufacturerName: (line as any).alsoManufacturerName ?? null,
         supplierCategoryPath: (line as any).alsoCategoryPath ?? null,
+        // C.3.4.5: níveis estruturados (a única fonte da hierarquia no apply;
+        // três NULL = sem informação estrutural = nunca criar categorias).
+        supplierCategoryText1: (line as any).alsoCategoryText1 ?? null,
+        supplierCategoryText2: (line as any).alsoCategoryText2 ?? null,
+        supplierCategoryText3: (line as any).alsoCategoryText3 ?? null,
         availableNextDate: (line as any).alsoAvailableNextDate ? (line as any).alsoAvailableNextDate : null,
         availableNextQuantity: (line as any).alsoAvailableNextQuantity ?? null,
         availabilityTimestamp: (() => {
@@ -923,6 +936,10 @@ interface ClaimedRow {
   manufacturer_part_number: string | null;
   manufacturer_name: string | null;
   supplier_category_path: string | null;
+  // C.3.4.5: níveis estruturados; três NULL = sem informação estrutural.
+  supplier_category_text1: string | null;
+  supplier_category_text2: string | null;
+  supplier_category_text3: string | null;
   available_next_date: string | null;
   available_next_quantity: number | null;
   availability_timestamp: string | null;
@@ -1185,6 +1202,34 @@ async function createProductFromRow(tx: NodePgDatabase, row: ClaimedRow, context
   // Deterministic slug: no Date.now(), so a resumed batch cannot fork names.
   const slug = `${slugify(label)}-${context.importId}-${row.row_number}`.slice(0, 500);
 
+  // C.3.4.5 — a hierarquia vem SEMPRE dos 3 níveis estruturados; nunca do
+  // path de display (nenhum split(" / ")). Níveis vazios são ignorados
+  // (A,NULL,C → A→C) e 3×NULL = sem informação estrutural = nenhuma
+  // categoria: o produto nasce com categoryId NULL. Produtos existentes
+  // nunca passam por aqui (ramo stock-only), logo ficam intocados.
+  const hierarchyLevels = [
+    row.supplier_category_text1 ?? "",
+    row.supplier_category_text2 ?? "",
+    row.supplier_category_text3 ?? "",
+  ].map((level) => level.trim()).filter((level) => level.length > 0);
+
+  let newCategoryId: number | null = null;
+  if (hierarchyLevels.length > 0) {
+    const ensured = await ensureCategoryHierarchy(tx, hierarchyLevels);
+    if (!ensured.ok) {
+      // Fail closed: sem slug determinístico disponível, a linha não é
+      // aplicada em vez de ficar ligada à categoria errada.
+      return {
+        productId: null, sku: null,
+        failure: {
+          code: "CATEGORY_SLUG_EXHAUSTED",
+          message: "Não foi possível garantir a hierarquia de categorias da linha (espaço de slugs esgotado) — a linha não foi aplicada",
+        },
+      };
+    }
+    newCategoryId = ensured.categoryId;
+  }
+
   const insertWith = async (sku: string): Promise<number | null> => {
     const [created] = await tx.insert(products).values({
       name: label,
@@ -1198,6 +1243,7 @@ async function createProductFromRow(tx: NodePgDatabase, row: ClaimedRow, context
       priceMode: "auto",
       stock: row.stock ?? 0,
       isActive: true,
+      ...(newCategoryId !== null ? { categoryId: newCategoryId } : {}),
     }).onConflictDoNothing({ target: products.sku }).returning({ id: products.id });
     return created?.id ?? null;
   };
@@ -1572,6 +1618,7 @@ export async function applySupplierImport(input: ApplyInput): Promise<ApplyOutco
                     r.supplier_stock, r.diff_status, r.changed_fields,
                     r.lead_time_days, r.supplier_sku, r.internal_sku, r.ean, r.name,
                     r.manufacturer_part_number, r.manufacturer_name, r.supplier_category_path,
+                    r.supplier_category_text1, r.supplier_category_text2, r.supplier_category_text3,
                     r.available_next_date, r.available_next_quantity, r.availability_timestamp
         `));
         if (claimed.length === 0) return { claimed: 0, effects: [] as RowEffect[] };
@@ -2204,6 +2251,9 @@ export async function reopenSupplierImportPreview(importId: number): Promise<Sup
       manufacturerPartNumber: supplierImportRows.manufacturerPartNumber,
       manufacturerName: supplierImportRows.manufacturerName,
       supplierCategoryPath: supplierImportRows.supplierCategoryPath,
+      supplierCategoryText1: supplierImportRows.supplierCategoryText1,
+      supplierCategoryText2: supplierImportRows.supplierCategoryText2,
+      supplierCategoryText3: supplierImportRows.supplierCategoryText3,
       availableNextDate: supplierImportRows.availableNextDate,
       availableNextQuantity: supplierImportRows.availableNextQuantity,
       availabilityTimestamp: supplierImportRows.availabilityTimestamp,
@@ -2232,6 +2282,9 @@ export async function reopenSupplierImportPreview(importId: number): Promise<Sup
     alsoManufacturerPartNumber: (r as any).manufacturerPartNumber ?? null,
     alsoManufacturerName: (r as any).manufacturerName ?? null,
     alsoCategoryPath: (r as any).supplierCategoryPath ?? null,
+    alsoCategoryText1: (r as any).supplierCategoryText1 ?? null,
+    alsoCategoryText2: (r as any).supplierCategoryText2 ?? null,
+    alsoCategoryText3: (r as any).supplierCategoryText3 ?? null,
     alsoAvailableNextDate: (r as any).availableNextDate ? String((r as any).availableNextDate).slice(0, 10) : null,
     alsoAvailableNextQuantity: (r as any).availableNextQuantity ?? null,
     alsoAvailabilityTimestamp: (r as any).availabilityTimestamp ? ( (r as any).availabilityTimestamp instanceof Date ? (r as any).availabilityTimestamp.toISOString() : String((r as any).availabilityTimestamp)) : null,

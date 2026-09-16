@@ -85,10 +85,17 @@ describe("C.3.4.3.1 persistência — A: preview persistido com snapshot genéri
     expect(preview.lines[0].alsoManufacturerPartNumber).toBe("MPN-A123");
     expect(preview.lines[0].alsoManufacturerName).toBe("BrandA");
     expect(preview.lines[0].alsoCategoryPath).toBe("Eletronica / Cabos / USB");
+    // C.3.4.5: níveis estruturados viajam lado a lado com o path de display
+    expect(preview.lines[0].alsoCategoryText1).toBe("Eletronica");
+    expect(preview.lines[0].alsoCategoryText2).toBe("Cabos");
+    expect(preview.lines[0].alsoCategoryText3).toBe("USB");
     const [row] = await db.select().from(supplierImportRows).where(eq(supplierImportRows.importId, preview.importId)).limit(1);
     expect(row.manufacturerPartNumber).toBe("MPN-A123");
     expect(row.manufacturerName).toBe("BrandA");
     expect(row.supplierCategoryPath).toBe("Eletronica / Cabos / USB");
+    expect(row.supplierCategoryText1).toBe("Eletronica");
+    expect(row.supplierCategoryText2).toBe("Cabos");
+    expect(row.supplierCategoryText3).toBe("USB");
     // available_next_* devem ser null para pricelist
     expect(row.availableNextDate).toBeNull();
     expect(row.availableNextQuantity).toBeNull();
@@ -131,6 +138,10 @@ describe("B: reopen preserva snapshot", () => {
     const reopened = await reopenSupplierImportPreview(preview.importId);
     expect(reopened.lines[0].alsoManufacturerPartNumber).toBe("MPN-RE");
     expect(reopened.lines[0].alsoCategoryPath).toBe("CatA");
+    // C.3.4.5: reopen devolve os 3 níveis estruturados (vazios → null)
+    expect(reopened.lines[0].alsoCategoryText1).toBe("CatA");
+    expect(reopened.lines[0].alsoCategoryText2).toBeNull();
+    expect(reopened.lines[0].alsoCategoryText3).toBeNull();
     expect(reopened.reopened).toBe(true);
     expect(reopened.previewToken).not.toBe(preview.previewToken); // fresh token, same binding
   });
@@ -164,6 +175,11 @@ describe("C: apply pricelist persiste MPN/path em product_suppliers e lastSyncAt
     // snapshot tem manufacturerName
     const [snap] = await db.select().from(supplierImportRows).where(eq(supplierImportRows.importId, preview.importId)).limit(1);
     expect(snap.manufacturerName).toBe("BrandPrice");
+    // C.3.4.5: snapshot guarda os níveis estruturados; o apply sobre produto
+    // EXISTENTE nunca toca categorias (catCount já assertions acima).
+    expect(snap.supplierCategoryText1).toBe("NovaCat");
+    expect(snap.supplierCategoryText2).toBe("Sub");
+    expect(snap.supplierCategoryText3).toBeNull();
   });
 });
 
