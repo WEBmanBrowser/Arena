@@ -29,6 +29,7 @@ import { and, eq, sql } from "drizzle-orm";
 import {
   createSftpSource,
   loadSupplierSourceRow,
+  regenerateSupplierSourcePreview,
   runSupplierSource,
   setSupplierSourceEnabled,
   updateSftpSource,
@@ -202,6 +203,54 @@ describe("C.3.4.4 [E] — run success: preview + observabilidade, nunca apply", 
     const [link] = await db.select().from(productSuppliers)
       .where(and(eq(productSuppliers.productId, prodRow.id), eq(productSuppliers.supplierId, supplierId))).limit(1);
     expect(link.supplierStock).toBeNull();
+  });
+});
+
+describe("C.3.4.4 [E] — regeneração explícita de preview", () => {
+  it("força nova leitura, cria um novo preview e preserva a idempotência do sync normal", async () => {
+    const sourceId = await makeSource();
+    const remote: FakeRemote = { bytes: stockBytes("25"), mtime: 1725667200, calls: [] };
+    const first = await runSupplierSource(sourceId, MANAGER.id, depsFor(remote));
+
+    expect(first.status).toBe("success");
+    expect(first.importId).not.toBeNull();
+    const firstImportBefore = (await db.select().from(supplierImports).where(eq(supplierImports.id, first.importId!)).limit(1))[0];
+    const firstRowsBefore = await db.select().from(supplierImportRows).where(eq(supplierImportRows.importId, first.importId!));
+
+    remote.calls = [];
+    const regenerated = await regenerateSupplierSourcePreview(sourceId, MANAGER.id, depsFor(remote));
+
+    expect(regenerated.status).toBe("success");
+    expect(remote.calls).toEqual(["stat", "read"]);
+    expect(regenerated.importId).not.toBe(first.importId);
+    expect(regenerated.fileHash).toBe(first.fileHash);
+    expect(regenerated.fileHash).toBe(sha256Hex(remote.bytes));
+
+    const imports = await db.select().from(supplierImports).where(eq(supplierImports.sourceId, sourceId));
+    expect(imports).toHaveLength(2);
+    expect(imports.map((imp) => imp.id)).toEqual(expect.arrayContaining([first.importId!, regenerated.importId!]));
+    expect(imports.every((imp) => imp.status === "preview")).toBe(true);
+
+    const firstImportAfter = (await db.select().from(supplierImports).where(eq(supplierImports.id, first.importId!)).limit(1))[0];
+    const firstRowsAfter = await db.select().from(supplierImportRows).where(eq(supplierImportRows.importId, first.importId!));
+    expect(firstImportAfter).toEqual(firstImportBefore);
+    expect(firstRowsAfter).toEqual(firstRowsBefore);
+
+    const regeneratedRun = await getRun(regenerated.runId);
+    expect(regeneratedRun.status).toBe("success");
+    expect(regeneratedRun.importId).toBe(regenerated.importId);
+
+    const [prodRow] = await db.select().from(products).where(eq(products.sku, `${TAG}-PROD`)).limit(1);
+    expect(prodRow.stock).toBe(5);
+    const [link] = await db.select().from(productSuppliers)
+      .where(and(eq(productSuppliers.productId, prodRow.id), eq(productSuppliers.supplierId, supplierId))).limit(1);
+    expect(link.supplierStock).toBeNull();
+
+    remote.calls = [];
+    const normalAgain = await runSupplierSource(sourceId, MANAGER.id, depsFor(remote));
+    expect(normalAgain.status).toBe("no_change");
+    expect(normalAgain.noChangeReason).toBe("remote_metadata");
+    expect(remote.calls).toEqual(["stat"]);
   });
 });
 

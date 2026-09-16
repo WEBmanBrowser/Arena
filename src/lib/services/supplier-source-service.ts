@@ -145,7 +145,8 @@ export interface RunSupplierSourceOutcome {
  * atualiza a observabilidade da fonte. NUNCA aplica nada.
  */
 /** Deps de run: HTTPS (fetchImpl) + SFTP (fetcherImpl) — cada ramo usa as suas. */
-export type RunSupplierSourceDeps = FetchSourceOptions & SftpFetchOptions;
+export type RunSupplierSourceDeps = FetchSourceOptions & Omit<SftpFetchOptions, "forceRead">;
+type SftpSourceSyncMode = "normal" | "regenerate_preview";
 
 export async function runSupplierSource(
   sourceId: number,
@@ -386,6 +387,20 @@ export async function runSupplierSource(
   }
 }
 
+export async function regenerateSupplierSourcePreview(
+  sourceId: number,
+  userId: number,
+  deps: RunSupplierSourceDeps = {}
+): Promise<RunSupplierSourceOutcome> {
+  const [source] = await db.select().from(supplierSources).where(eq(supplierSources.id, sourceId)).limit(1);
+  if (!source) throw new SupplierSourceError("SOURCE_NOT_FOUND", 404);
+  if (source.sourceType !== "sftp") {
+    throw new SupplierSourceError("SOURCE_TYPE_UNSUPPORTED", 400);
+  }
+  if (!source.enabled) throw new SupplierSourceError("SOURCE_DISABLED", 409);
+  return runSftpSourceSync(source, userId, deps, "regenerate_preview");
+}
+
 /**
  * C.3.4.4 — sincronização de UMA fonte SFTP (worker also-sftp-fetcher).
  *
@@ -402,7 +417,8 @@ export async function runSupplierSource(
 async function runSftpSourceSync(
   source: typeof supplierSources.$inferSelect,
   userId: number,
-  deps: RunSupplierSourceDeps
+  deps: RunSupplierSourceDeps,
+  mode: SftpSourceSyncMode = "normal"
 ): Promise<RunSupplierSourceOutcome> {
   const runId = await claimSourceRun(source.id);
   const startedAt = Date.now();
@@ -452,7 +468,7 @@ async function runSftpSourceSync(
         lastRemoteSize: source.lastRemoteSize,
         lastRemoteMtime: source.lastRemoteMtime,
       },
-      deps
+      mode === "regenerate_preview" ? { ...deps, forceRead: true } : deps
     );
 
     if (result.kind === "not_modified") {
@@ -510,7 +526,7 @@ async function runSftpSourceSync(
       .orderBy(desc(supplierImports.id))
       .limit(1);
 
-    if (lastRelevant && lastRelevant.fileHash === hash) {
+    if (mode !== "regenerate_preview" && lastRelevant && lastRelevant.fileHash === hash) {
       const durationMs = Date.now() - startedAt;
       const now = new Date();
       await db.transaction(async (tx) => {
