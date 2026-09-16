@@ -92,3 +92,33 @@ describe("D — supplier-SKU guidance is shown next to the supplier picker", () 
     expect(textareaIdx).toBeGreaterThan(ruleIdx);
   });
 });
+
+describe("E — SupplierImportPanel encadeia Apply cooperativo", () => {
+  it("envia o token apenas na primeira request e continua por pending", () => {
+    expect(panel).toContain("const applyInFlight = useRef(false);");
+    expect(panel).toContain("while (true)");
+    expect(panel).toContain("body?.status === \"partial\"");
+    expect(panel).toContain("Number(body?.pending ?? 0) > 0");
+    expect(panel).toContain("!body?.error");
+    expect(panel).toContain("token = undefined");
+    expect(panel).not.toContain("batchesDone < batchesTotal");
+  });
+
+  it("impede reentrância local e desativa os dois Retomar enquanto está busy", () => {
+    expect(panel).toContain("if (applyInFlight.current) return;");
+    expect(panel).toContain("applyInFlight.current = true;");
+    expect(panel).toContain("applyInFlight.current = false;");
+
+    const resumeButtons = [...panel.matchAll(/<button[\s\S]*?<\/button>/g)]
+      .map((match) => match[0])
+      .filter((button) => button.includes("run(") && button.includes("Retomar") && button.includes("disabled={busy}"));
+    expect(resumeButtons.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("mantém o polling observacional", () => {
+    const runStart = panel.indexOf("const run = async");
+    const pollingStart = panel.indexOf("const tick = async () =>");
+    expect(runStart).toBeGreaterThan(pollingStart);
+    expect(panel).toContain("if (p.status !== \"applying\") setWatchId(null);");
+  });
+});

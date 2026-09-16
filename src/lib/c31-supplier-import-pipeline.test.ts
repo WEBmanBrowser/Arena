@@ -30,6 +30,7 @@ import {
   users,
 } from "@/db/schema";
 import { and, eq, inArray, sql } from "drizzle-orm";
+import { SUPPLIER_IMPORT_BATCH_SIZE } from "@/lib/supplier-import/constants";
 
 const getCurrentUserMock = vi.fn();
 vi.mock("@/lib/auth", async (importOriginal) => {
@@ -446,9 +447,9 @@ describe("C.3.1 — apply consumes the snapshot, never the browser", () => {
     expect(await db.select().from(stockMovements).where(inArray(stockMovements.productId, [p1.id, p2.id]))).toHaveLength(0);
   });
 
-  it("applies 1200 lines in 3 batches of 500", async () => {
+  it("applies 1001 lines through 3 sequential one-batch requests", async () => {
     await globalRule(20);
-    const count = 1200;
+    const count = 1001;
     const created = await db.insert(products).values(Array.from({ length: count }, (_, i) => ({
       name: `${TAG} bulk ${i}`, slug: `${TAG.toLowerCase()}-bulk-${i}`, sku: `${TAG}-BULK-${i}`,
       price: "100.00", vatRate: "23.00", priceMode: "auto", stock: 0,
@@ -467,10 +468,31 @@ describe("C.3.1 — apply consumes the snapshot, never the browser", () => {
     expect(await db.select({ id: supplierImportRows.id }).from(supplierImportRows)
       .where(eq(supplierImportRows.importId, json.importId))).toHaveLength(count);
 
-    const applied = await apply(json.importId, json.previewToken);
-    expect(applied.json).toMatchObject({
-      status: "completed", appliedNow: count, applied: count, batchesDone: 3, batchesTotal: 3, pending: 0, repriced: count,
+    const first = await apply(json.importId, json.previewToken);
+    expect(first.json).toMatchObject({
+      status: "partial", appliedNow: SUPPLIER_IMPORT_BATCH_SIZE,
+      applied: SUPPLIER_IMPORT_BATCH_SIZE, pending: 501,
+      batchesDone: 1, batchesTotal: 3,
     });
+    expect(first.json.error).toBeUndefined();
+    const [checkpoint] = await db.select({ status: supplierImports.status, errorSummary: supplierImports.errorSummary })
+      .from(supplierImports).where(eq(supplierImports.id, json.importId));
+    expect(checkpoint).toMatchObject({ status: "partial", errorSummary: null });
+
+    // A continuation is a new HTTP request and must not carry the preview token.
+    const second = await apply(json.importId);
+    expect(second.json).toMatchObject({
+      status: "partial", appliedNow: SUPPLIER_IMPORT_BATCH_SIZE,
+      applied: 1000, pending: 1, batchesDone: 2, batchesTotal: 3,
+    });
+    expect(second.json.error).toBeUndefined();
+
+    const applied = await apply(json.importId);
+    expect(applied.json).toMatchObject({
+      status: "completed", appliedNow: 1, applied: count,
+      batchesDone: 3, batchesTotal: 3, pending: 0, repriced: 1,
+    });
+    expect(applied.json.error).toBeUndefined();
 
     const ids = created.map((c) => c.id);
     const priced = await db.select({ id: products.id, price: products.price, costPrice: products.costPrice, stock: products.stock })
