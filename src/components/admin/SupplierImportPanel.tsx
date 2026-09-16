@@ -17,7 +17,7 @@
  *    e um token novo. Cai no MESMO cartão de preview e no MESMO botão Aplicar
  *    (`run(importId, previewToken)`): não há um segundo motor de apply.
  */
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { formatImportErrors } from "@/lib/import-error-text";
 import { supplierImportErrorMessage } from "@/lib/supplier-import/error-messages";
 
@@ -225,6 +225,8 @@ export default function SupplierImportPanel({ openImportId = null }: { openImpor
   const [historyVersion, setHistoryVersion] = useState(0);
   /** Import id being watched, or null. The progress effect owns the polling. */
   const [watchId, setWatchId] = useState<number | null>(null);
+  /** Prevents two local Apply/Resume chains from running concurrently. */
+  const applyInFlight = useRef(false);
   // C.3.2 — profile mapping manual + save
   const [manualMapping, setManualMapping] = useState<Record<string, string>>({});
   const [saveProfileChecked, setSaveProfileChecked] = useState(false);
@@ -387,29 +389,56 @@ export default function SupplierImportPanel({ openImportId = null }: { openImpor
     }
   };
 
-  /** Apply the FIRST time with the signed token; resume with nothing but the id. */
+  /**
+   * Apply the FIRST time with the signed token; after each cooperative partial
+   * response, resume with nothing but the id. The loop is intentionally a
+   * sequence of HTTP requests: the server owns exactly one batch per request.
+   */
   const run = async (importId: number, previewToken?: string) => {
+    if (applyInFlight.current) return;
+
+    applyInFlight.current = true;
     setBusy(true);
     setError("");
     setOutcome(null);
     try {
-      const res = await fetch("/api/admin/supplier-import/apply", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(previewToken ? { importId, previewToken } : { importId }),
-      });
-      const body = await readBody(res);
-      if (!res.ok) {
-        setError(messageFor(body));
+      let token = previewToken;
+
+      while (true) {
+        const res = await fetch("/api/admin/supplier-import/apply", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(token ? { importId, previewToken: token } : { importId }),
+        });
+        const body = await readBody(res);
+
+        if (!res.ok) {
+          setError(messageFor(body));
+          refreshHistory();
+          break;
+        }
+
+        setOutcome(body);
         refreshHistory();
-        return;
+
+        const continueApplying =
+          body?.status === "partial" &&
+          Number(body?.pending ?? 0) > 0 &&
+          !body?.error;
+        if (!continueApplying) break;
+
+        // Only the explicit first Apply/Resume request carries the signed
+        // preview token. Every continuation is an id-only resume.
+        token = undefined;
       }
-      setOutcome(body);
+
+      // Progress remains observational; it never starts another Apply.
       setWatchId(importId);
-      refreshHistory();
     } catch {
       setError("Não foi possível contactar o servidor.");
+      setWatchId(importId);
     } finally {
+      applyInFlight.current = false;
       setBusy(false);
     }
   };
@@ -775,7 +804,8 @@ export default function SupplierImportPanel({ openImportId = null }: { openImpor
           {resumable && preview && (
             <button
               onClick={() => { stopWatching(); void run(preview.importId); }}
-              className="mt-3 px-3 py-1.5 bg-amber-500 text-white rounded-lg text-xs font-medium hover:bg-amber-600"
+              disabled={busy}
+              className="mt-3 px-3 py-1.5 bg-amber-500 text-white rounded-lg text-xs font-medium hover:bg-amber-600 disabled:opacity-50"
             >
               Retomar aplicação (sem reenviar o ficheiro)
             </button>
@@ -848,7 +878,8 @@ export default function SupplierImportPanel({ openImportId = null }: { openImpor
                       historyProgress[h.id]?.canResume ? (
                         <button
                           onClick={() => { stopWatching(); void run(h.id); }}
-                          className="px-2 py-1 bg-amber-500 text-white rounded text-[11px] font-medium hover:bg-amber-600"
+                          disabled={busy}
+                          className="px-2 py-1 bg-amber-500 text-white rounded text-[11px] font-medium hover:bg-amber-600 disabled:opacity-50"
                         >
                           Retomar
                         </button>

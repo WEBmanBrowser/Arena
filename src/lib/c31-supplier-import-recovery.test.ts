@@ -267,24 +267,32 @@ describe("C.3.1 â€” heartbeat owns the import", () => {
     expect(link.lastCostPrice).toBe("50.00"); // a single cost transition
   });
 
-  it("a worker killed mid-run leaves the committed batch applied and the rest pending", async () => {
+  it("commits one batch per request and recovers a failed continuation", async () => {
     const total = SUPPLIER_IMPORT_BATCH_SIZE + 1;
     const created = await makeBulk(total);
     const { json } = await previewWith(created.map((c) => ({ sku: c.sku, cost: "10,00", stock: "1" })));
     expect(json.summary).toMatchObject({ total, actionable: total });
     expect(json.batchesTotal).toBe(2);
 
-    // Die on the first row of the second batch.
-    gate.throwAt = SUPPLIER_IMPORT_BATCH_SIZE + 1;
-    const crashed = await apply(json.importId, json.previewToken);
-    expect(crashed.status).toBe(200);
-    expect(crashed.json).toMatchObject({
-      status: "partial", appliedNow: SUPPLIER_IMPORT_BATCH_SIZE, batchesDone: 1,
+    // The first request must return after exactly one committed batch. The
+    // first row of the next batch is never reached in this request.
+    const first = await apply(json.importId, json.previewToken);
+    expect(first.json).toMatchObject({
+      status: "partial", appliedNow: SUPPLIER_IMPORT_BATCH_SIZE,
+      batchesDone: 1, pending: 1,
     });
+    expect(first.json.error).toBeUndefined();
+    expect(gate.calls).toBe(SUPPLIER_IMPORT_BATCH_SIZE);
+
+    // A failure in the next request rolls back that whole batch and is a real
+    // error partial, while the first committed batch remains applied.
+    gate.throwAt = gate.calls + 1;
+    const crashed = await apply(json.importId);
+    expect(crashed.status).toBe(200);
+    expect(crashed.json).toMatchObject({ status: "partial", appliedNow: 0, batchesDone: 1, pending: 1 });
     expect(crashed.json.error.code).toBe("APPLY_BATCH_FAILED");
     expect(crashed.json.error.message).toContain("worker morreu");
 
-    // Batch 1 is committed; the rolled-back batch is fully pending again.
     const rows = await db.select().from(supplierImportRows).where(eq(supplierImportRows.importId, json.importId));
     expect(rows.filter((r) => r.applied)).toHaveLength(SUPPLIER_IMPORT_BATCH_SIZE);
     expect(rows.filter((r) => !r.applied)).toHaveLength(1);
@@ -300,7 +308,6 @@ describe("C.3.1 â€” heartbeat owns the import", () => {
     expect(untouched.costPrice).toBeNull();
     expect(untouched.stock).toBe(0);
     expect(await db.select().from(stockMovements).where(eq(stockMovements.productId, lastProduct.id))).toHaveLength(0);
-    // and no half-written link for the rolled-back row
     const [link] = await db.select().from(productSuppliers).where(eq(productSuppliers.productId, lastProduct.id));
     expect(link.costPrice).toBe("50.00");
 
@@ -311,51 +318,75 @@ describe("C.3.1 â€” heartbeat owns the import", () => {
     const [nowApplied] = await db.select().from(products).where(eq(products.id, lastProduct.id));
     expect(nowApplied.costPrice).toBe("10.00");
 
-    // Exactly one movement per product for the whole saga, crash included.
     const movements = await db.select({ id: stockMovements.id, product: stockMovements.productId })
       .from(stockMovements).where(inArray(stockMovements.productId, created.map((c) => c.id)));
     expect(movements).toHaveLength(total);
     expect(new Set(movements.map((m) => m.product)).size).toBe(total);
   }, 120000);
 
-  it("a live worker refreshes the heartbeat every committed batch, so it is never stealable", async () => {
+  it("refreshes the heartbeat during a batch and hands off as partial", async () => {
     const total = SUPPLIER_IMPORT_BATCH_SIZE + 1;
     const created = await makeBulk(total);
     const { json } = await previewWith(created.map((c) => ({ sku: c.sku, cost: "10,00" })));
 
-    // An import abandoned long enough to be reclaimed: this worker takes it over.
+    // An import abandoned long enough to be reclaimed: this worker takes it
+    // over, but must return after its first batch rather than entering batch 2.
     await setStatus(json.importId, { status: "partial" });
     await setHeartbeatAge(json.importId, IMPORT_HEARTBEAT_TTL_MS + 60_000);
 
     let release!: () => void;
     gate.hold = new Promise<void>((r) => { release = r; });
-    gate.holdAt = SUPPLIER_IMPORT_BATCH_SIZE + 1; // first row of the second batch
+    gate.holdAt = 1;
 
     const running = applySupplierImport({ importId: json.importId, userId: MANAGER.id });
-
-    // Wait until batch 1 has committed and the worker is inside batch 2.
     for (let i = 0; i < 400; i += 1) {
-      const progress = await getImportProgress(json.importId);
-      if (progress && progress.batchesDone >= 1 && gate.calls > SUPPLIER_IMPORT_BATCH_SIZE) break;
+      if (gate.calls >= 1) break;
       await new Promise((r) => setTimeout(r, 10));
     }
-    expect(gate.calls).toBeGreaterThan(SUPPLIER_IMPORT_BATCH_SIZE);
+    expect(gate.calls).toBe(1);
 
-    // The heartbeat that makes it "alive" is the one batch 1 wrote, not the one
-    // the claim wrote: the pre-existing stale timestamp is gone.
     const mid = await getImportProgress(json.importId);
-    expect(mid).toMatchObject({ status: "applying", batchesDone: 1, pending: 1, canResume: false, stale: false });
+    expect(mid).toMatchObject({ status: "applying", batchesDone: 0, pending: total, canResume: false, stale: false });
     expect((await apply(json.importId)).json.error).toBe("IMPORT_IN_PROGRESS");
     expect((await apply(json.importId, json.previewToken)).json.error).toBe("IMPORT_IN_PROGRESS");
 
     release();
-    const done = await running;
-    expect(done).toMatchObject({ status: "completed", applied: total, batchesDone: 2 });
-    const after = await getImportProgress(json.importId);
-    expect(after).toMatchObject({ status: "completed", pending: 0, canResume: false, batchesDone: 2, batchesTotal: 2 });
-    // A finished import is never offered as resumable, however old its heartbeat gets.
+    const checkpoint = await running;
+    expect(checkpoint).toMatchObject({
+      status: "partial", appliedNow: SUPPLIER_IMPORT_BATCH_SIZE,
+      applied: SUPPLIER_IMPORT_BATCH_SIZE, pending: 1, batchesDone: 1,
+    });
+    expect(checkpoint.error).toBeUndefined();
+    const afterCheckpoint = await getImportProgress(json.importId);
+    expect(afterCheckpoint).toMatchObject({ status: "partial", pending: 1, canResume: true, batchesDone: 1, batchesTotal: 2 });
+
+    // The next request owns the handoff and completes the final row.
+    const done = await apply(json.importId);
+    expect(done).toMatchObject({ status: 200, json: { status: "completed", applied: total, batchesDone: 2 } });
+    expect((await getImportProgress(json.importId))!.canResume).toBe(false);
     await setHeartbeatAge(json.importId, IMPORT_HEARTBEAT_TTL_MS + 60_000);
     expect((await getImportProgress(json.importId))!.canResume).toBe(false);
+  }, 120000);
+
+  it("serializes two continuations from the same partial checkpoint", async () => {
+    const total = SUPPLIER_IMPORT_BATCH_SIZE + 1;
+    const created = await makeBulk(total);
+    const { json } = await previewWith(created.map((c) => ({ sku: c.sku, cost: "10,00" })));
+
+    const checkpoint = await apply(json.importId, json.previewToken);
+    expect(checkpoint.json).toMatchObject({ status: "partial", appliedNow: SUPPLIER_IMPORT_BATCH_SIZE, pending: 1 });
+    expect(checkpoint.json.error).toBeUndefined();
+
+    const outcomes = await Promise.all([apply(json.importId), apply(json.importId)]);
+    const winners = outcomes.filter((outcome) => outcome.json.appliedNow === 1);
+    expect(winners).toHaveLength(1);
+    const loser = outcomes.find((outcome) => outcome.json.appliedNow !== 1)!;
+    expect(loser.status === 409 || loser.json.idempotent === true).toBe(true);
+    expect(outcomes.some((outcome) => outcome.json.status === "completed")).toBe(true);
+
+    const rows = await db.select().from(supplierImportRows).where(eq(supplierImportRows.importId, json.importId));
+    expect(rows.filter((row) => row.applied)).toHaveLength(total);
+    expect((await getImportProgress(json.importId))!.pending).toBe(0);
   }, 120000);
 
   it("refuses to resume an import marked failed, and demands a new preview", async () => {
@@ -409,7 +440,7 @@ describe("C.3.1 â€” completion cannot outrun the rows", () => {
     release();
     const done = await running;
     expect(done.status).toBe("partial");
-    expect(done.error?.code).toBe("PENDING_ROWS_REMAIN");
+    expect(done.error).toBeUndefined();
     expect(done).toMatchObject({ appliedNow: 1, pending: 1, resumed: false });
 
     const mid = await getImportProgress(json.importId);

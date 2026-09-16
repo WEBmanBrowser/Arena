@@ -1544,9 +1544,12 @@ async function outcomeFor(importId: number, totals: Partial<ApplyOutcome> = {}):
 }
 
 /**
- * Apply â€” or resume â€” a persisted snapshot in batches of
- * SUPPLIER_IMPORT_BATCH_SIZE rows, one transaction per batch.
+ * Apply â€” or resume â€” a persisted snapshot with one cooperative batch per
+ * HTTP request. The batch size remains SUPPLIER_IMPORT_BATCH_SIZE; this request
+ * limit is server-side and is not caller-controlled.
  */
+const MAX_BATCHES_PER_APPLY_REQUEST = 1;
+
 export async function applySupplierImport(input: ApplyInput): Promise<ApplyOutcome> {
   const snapshot = await loadImport(input.importId);
   if (!snapshot) throw new SupplierImportError("IMPORT_NOT_FOUND", 404);
@@ -1591,8 +1594,10 @@ export async function applySupplierImport(input: ApplyInput): Promise<ApplyOutco
   const totals = { appliedNow: 0, created: 0, updated: 0, repriced: 0, skipped: 0 };
   let lastError: { code: string; message: string } | null = null;
 
-  for (let guard = 0; ; guard += 1) {
-    // No unbounded loop, whatever the data does.
+  for (let guard = 0; guard < MAX_BATCHES_PER_APPLY_REQUEST; guard += 1) {
+    // The one-batch limit is an HTTP contract. Keep this defensive check so a
+    // future accidental loop change fails closed instead of doing more work in
+    // one request.
     if (guard > snapshot.rowCount + 1) {
       lastError = { code: "APPLY_STALLED", message: "O apply não progrediu; importação interrompida" };
       break;
@@ -2022,6 +2027,19 @@ export async function applySupplierImport(input: ApplyInput): Promise<ApplyOutco
       errorSummary: { ...lastError, at: new Date().toISOString(), applied: counts.applied, pending: counts.pending },
     }).where(and(eq(supplierImports.id, snapshot.id), eq(supplierImports.status, "applying")));
     return outcomeFor(snapshot.id, { ...totals, resumed: !fromPreview, error: lastError });
+  }
+
+  // A committed batch yields the import to the next HTTP request. `partial`
+  // is the existing resumable state, so claimImport remains the single
+  // server-side ownership gate for the handoff. This is a normal checkpoint,
+  // not an error: clear a previous error summary after a successful retry.
+  if (totals.appliedNow > 0 && counts.pending > 0) {
+    await db.update(supplierImports).set({
+      status: "partial",
+      heartbeatAt: new Date(),
+      errorSummary: null,
+    }).where(and(eq(supplierImports.id, snapshot.id), eq(supplierImports.status, "applying")));
+    return outcomeFor(snapshot.id, { ...totals, resumed: !fromPreview });
   }
 
   // â”€â”€ `completed` is only reachable with nothing pending â”€â”€
