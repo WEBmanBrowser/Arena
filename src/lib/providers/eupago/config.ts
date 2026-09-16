@@ -9,12 +9,17 @@
  *  request, a database row or a webhook payload can ever influence the URL.
  *
  * SECRETS
- *  API key / OAuth client id + secret / webhook key are read from the server
- *  environment only. They are never persisted, never logged, never serialized
- *  and never reachable from client bundles (this module is server-only: it is
- *  imported exclusively by server-side services and route handlers).
- *  Configuration FAILS CLOSED — a missing or malformed value throws a
- *  normalized ProviderError instead of falling back to a default.
+ *  This module reads the API key / OAuth client id + secret / webhook key
+ *  from the server environment only. The EFFECTIVE configuration used by the
+ *  payment runtime is resolved by `@/lib/services/eupago-config-service`:
+ *  a complete Backoffice block (AES-256-GCM encrypted at rest in the
+ *  `settings` table) wins; otherwise the ENV getters below apply unchanged;
+ *  a partial Backoffice block fails closed and is never mixed with ENV.
+ *  Secrets are never logged, never serialized and never reachable from client
+ *  bundles (this module is server-only: it is imported exclusively by
+ *  server-side services and route handlers). Configuration FAILS CLOSED — a
+ *  missing or malformed value throws a normalized ProviderError instead of
+ *  falling back to a default.
  */
 
 import { ProviderError } from "../errors";

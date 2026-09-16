@@ -297,6 +297,31 @@ export const ALSO_PRICELIST_HEADERS = [
   "ManufacturerName",
 ] as const;
 
+/**
+ * Um nível de categoria ALSO como campo estruturado do snapshot: trimmed,
+ * limitado ao teto da coluna varchar(255) e vazio → null (nunca ""). É a ÚNICA
+ * fonte do apply para a hierarquia; `alsoCategoryPath` (junção " / ") é apenas
+ * exibição/histórico e nunca é re-dividido.
+ */
+function alsoCategoryLevel(
+  raw: string,
+  field: string,
+  warn: (field: string, value: string, code: string, message: string) => void
+): string | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  if (trimmed.length > SNAPSHOT_LIMITS.name) {
+    warn(
+      field,
+      trimmed,
+      "CATEGORY_TEXT_TRUNCATED",
+      `Nível de categoria limitado a ${SNAPSHOT_LIMITS.name} caracteres no snapshot`
+    );
+    return trimmed.slice(0, SNAPSHOT_LIMITS.name);
+  }
+  return trimmed;
+}
+
 /** Pricelist TSV without header -> SupplierFileParse */
 export function parseAlsoPricelist(
   rawText: string | Uint8Array,
@@ -509,6 +534,10 @@ export function parseAlsoPricelist(
 
         const catParts = [rawCat1, rawCat2, rawCat3].filter(Boolean);
         const catPath = catParts.length ? catParts.join(" / ") : null;
+        // Níveis estruturados (fonte do apply); path acima fica só para exibição.
+        const cat1 = alsoCategoryLevel(rawCat1, "categorytext1", warning);
+        const cat2 = alsoCategoryLevel(rawCat2, "categorytext2", warning);
+        const cat3 = alsoCategoryLevel(rawCat3, "categorytext3", warning);
 
         rows.push({
           rowNumber: idx,
@@ -524,6 +553,9 @@ export function parseAlsoPricelist(
           alsoManufacturerPartNumber: mpn,
           alsoManufacturerName: brand,
           alsoCategoryPath: catPath,
+          alsoCategoryText1: cat1,
+          alsoCategoryText2: cat2,
+          alsoCategoryText3: cat3,
         });
       }
 
@@ -659,6 +691,10 @@ export function parseAlsoPricelist(
     const brand = rawBrand ? rawBrand.trim().slice(0, 255) || null : null;
     const catParts = [rawCat1, rawCat2, rawCat3].map((s) => s.trim()).filter(Boolean);
     const catPath = catParts.length ? catParts.join(" / ") : null;
+    // Níveis estruturados (fonte do apply); path acima fica só para exibição.
+    const cat1 = alsoCategoryLevel(rawCat1, "categorytext1", warning);
+    const cat2 = alsoCategoryLevel(rawCat2, "categorytext2", warning);
+    const cat3 = alsoCategoryLevel(rawCat3, "categorytext3", warning);
 
     // Malformed detection: if line has no tabs but we expect at least 9 tabs, warn
     if (cols.length < 10) {
@@ -681,6 +717,9 @@ export function parseAlsoPricelist(
       alsoManufacturerPartNumber: mpn,
       alsoManufacturerName: brand,
       alsoCategoryPath: catPath,
+      alsoCategoryText1: cat1,
+      alsoCategoryText2: cat2,
+      alsoCategoryText3: cat3,
     });
   }
 

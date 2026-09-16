@@ -28,7 +28,8 @@ import { and, eq, sql } from "drizzle-orm";
 import { ProviderError } from "@/lib/providers/errors";
 import { getPaymentProvider } from "@/lib/providers/registry";
 import { MAX_PROVIDER_AMOUNT_CENTS, PROVIDER_CURRENCY } from "@/lib/providers/money-boundary";
-import { EUPAGO_PROVIDER_ID, getEupagoConfig, type EupagoConfig } from "@/lib/providers/eupago/config";
+import { EUPAGO_PROVIDER_ID, type EupagoConfig } from "@/lib/providers/eupago/config";
+import { resolveEupagoConfig } from "@/lib/services/eupago-config-service";
 import {
   createCardRequest,
   createMbwayRequest,
@@ -214,7 +215,7 @@ async function markReconciliationRequired(
 export async function createEupagoPayment(
   input: CreateEupagoPaymentInput
 ): Promise<CreateEupagoPaymentResult> {
-  const config = input.config ?? getEupagoConfig();
+  const config = input.config ?? await resolveEupagoConfig();
   const attempt = await armPaymentAttempt({
     orderId: input.orderId,
     method: input.method,
@@ -353,7 +354,7 @@ export async function recoverPaymentAttempt(input: {
   config?: EupagoConfig;
   fetchImpl?: typeof fetch;
 }): Promise<RecoverAttemptResult> {
-  const config = input.config ?? getEupagoConfig();
+  const config = input.config ?? await resolveEupagoConfig();
   const [attempt] = await db
     .select()
     .from(paymentAttempts)

@@ -21,7 +21,8 @@ import { paymentAttempts, refundAttempts } from "@/db/schema";
 import { and, eq } from "drizzle-orm";
 import { createAuditLog } from "@/lib/audit";
 import { ProviderError } from "@/lib/providers/errors";
-import { EUPAGO_PROVIDER_ID, getEupagoConfig, type EupagoConfig } from "@/lib/providers/eupago/config";
+import { EUPAGO_PROVIDER_ID, type EupagoConfig } from "@/lib/providers/eupago/config";
+import { resolveEupagoConfig } from "@/lib/services/eupago-config-service";
 import { submitEupagoRefund } from "@/lib/providers/eupago/refunds";
 
 export type RefundAttemptRow = typeof refundAttempts.$inferSelect;
@@ -111,7 +112,7 @@ export async function armEupagoRefund(refundId: number): Promise<RefundAttemptRo
  * call per attempt even under concurrent operators.
  */
 export async function executeEupagoRefund(input: ExecuteRefundInput): Promise<ExecuteRefundResult> {
-  const config = input.config ?? getEupagoConfig();
+  const config = input.config ?? await resolveEupagoConfig();
   const armed = await armEupagoRefund(input.refundId);
 
   if (armed.status !== "pending" && armed.status !== "processing") {
