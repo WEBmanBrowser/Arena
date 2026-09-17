@@ -17,8 +17,26 @@
  */
 export const IMPORT_HEARTBEAT_TTL_MS = 5 * 60 * 1000;
 
-/** Rows applied per committed transaction. ~500 keeps locks short. */
+/**
+ * Chunk size used to PERSIST the snapshot (supplier_import_rows INSERTs).
+ * This is a write-amplification knob only: it never decides how much work one
+ * Apply request may do.
+ */
 export const SUPPLIER_IMPORT_BATCH_SIZE = 500;
+
+/**
+ * Rows applied per committed Apply transaction — the row ceiling of a single
+ * POST /apply.
+ *
+ * Deliberately smaller than the persistence chunk: the apply batch is the unit
+ * that holds row locks, writes products/product_suppliers/stock_movements and
+ * has to hand the import over to the next HTTP request. 50 keeps one request
+ * short and the transaction small, and it is a SERVER-side constant — the
+ * browser never chooses it. (Before this constant existed, apply reused the
+ * 500-row persistence chunk, so a single POST could hold a 500-row
+ * transaction.)
+ */
+export const SUPPLIER_IMPORT_APPLY_BATCH_SIZE = 50;
 
 /** Hard row ceiling, inherited from the CSV parser limit (20 000 lines — stock ALSO has ~15 255). */
 export const SUPPLIER_IMPORT_MAX_ROWS = 20000;

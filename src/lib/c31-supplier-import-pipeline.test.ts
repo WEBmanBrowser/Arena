@@ -30,7 +30,7 @@ import {
   users,
 } from "@/db/schema";
 import { and, eq, inArray, sql } from "drizzle-orm";
-import { SUPPLIER_IMPORT_BATCH_SIZE } from "@/lib/supplier-import/constants";
+import { SUPPLIER_IMPORT_APPLY_BATCH_SIZE, SUPPLIER_IMPORT_BATCH_SIZE } from "@/lib/supplier-import/constants";
 
 const getCurrentUserMock = vi.fn();
 vi.mock("@/lib/auth", async (importOriginal) => {
@@ -447,9 +447,9 @@ describe("C.3.1 — apply consumes the snapshot, never the browser", () => {
     expect(await db.select().from(stockMovements).where(inArray(stockMovements.productId, [p1.id, p2.id]))).toHaveLength(0);
   });
 
-  it("applies 1001 lines through 3 sequential one-batch requests", async () => {
+  it("applies 101 lines through 3 sequential one-batch requests of at most 50 rows", async () => {
     await globalRule(20);
-    const count = 1001;
+    const count = 101;
     const created = await db.insert(products).values(Array.from({ length: count }, (_, i) => ({
       name: `${TAG} bulk ${i}`, slug: `${TAG.toLowerCase()}-bulk-${i}`, sku: `${TAG}-BULK-${i}`,
       price: "100.00", vatRate: "23.00", priceMode: "auto", stock: 0,
@@ -460,19 +460,25 @@ describe("C.3.1 — apply consumes the snapshot, never the browser", () => {
 
     const csvText = csvFile(...created.map((p, i) => line({ sku: `${TAG}-BULK-${i}`, name: `linha ${i}`, cost: "10,00", stock: String(i % 7) })));
     const { json } = await preview(csvText);
-    expect(json.summary).toMatchObject({ total: count, ready: count, actionable: count });
+    expect(json.summary).toMatchObject({
+      total: count, ready: count, actionable: count,
+      // A new snapshot is created already marked with the Apply batch size.
+      applyBatchSize: SUPPLIER_IMPORT_APPLY_BATCH_SIZE,
+    });
+    // 101 actionable rows at 50 per Apply batch (NOT the 500-row persistence chunk).
     expect(json.batchesTotal).toBe(3);
-    expect(json.lines).toHaveLength(200); // the response is paginated…
-    expect(json.truncated).toBe(true);
+    expect(json.batchSize).toBe(SUPPLIER_IMPORT_APPLY_BATCH_SIZE);
+    expect(json.lines).toHaveLength(101); // the response is paginated…
+    expect(json.truncated).toBe(false);
     // …while the snapshot is complete.
     expect(await db.select({ id: supplierImportRows.id }).from(supplierImportRows)
       .where(eq(supplierImportRows.importId, json.importId))).toHaveLength(count);
 
     const first = await apply(json.importId, json.previewToken);
     expect(first.json).toMatchObject({
-      status: "partial", appliedNow: SUPPLIER_IMPORT_BATCH_SIZE,
-      applied: SUPPLIER_IMPORT_BATCH_SIZE, pending: 501,
-      batchesDone: 1, batchesTotal: 3,
+      status: "partial", appliedNow: SUPPLIER_IMPORT_APPLY_BATCH_SIZE,
+      applied: 50, pending: 51,
+      batchesDone: 1, batchesTotal: 3, batchSize: SUPPLIER_IMPORT_APPLY_BATCH_SIZE,
     });
     expect(first.json.error).toBeUndefined();
     const [checkpoint] = await db.select({ status: supplierImports.status, errorSummary: supplierImports.errorSummary })
@@ -482,8 +488,8 @@ describe("C.3.1 — apply consumes the snapshot, never the browser", () => {
     // A continuation is a new HTTP request and must not carry the preview token.
     const second = await apply(json.importId);
     expect(second.json).toMatchObject({
-      status: "partial", appliedNow: SUPPLIER_IMPORT_BATCH_SIZE,
-      applied: 1000, pending: 1, batchesDone: 2, batchesTotal: 3,
+      status: "partial", appliedNow: SUPPLIER_IMPORT_APPLY_BATCH_SIZE,
+      applied: 100, pending: 1, batchesDone: 2, batchesTotal: 3,
     });
     expect(second.json.error).toBeUndefined();
 
@@ -506,6 +512,68 @@ describe("C.3.1 — apply consumes the snapshot, never the browser", () => {
     expect(movements).toHaveLength(created.filter((_, i) => i % 7 !== 0).length);
     expect(new Set(movements.map((m) => m.product)).size).toBe(movements.length);
   }, 180000);
+
+  it("applies 1001 lines without any POST claiming more than the apply batch size", async () => {
+    // Two different sizes on purpose: the snapshot is still persisted in
+    // SUPPLIER_IMPORT_BATCH_SIZE chunks, while one POST applies at most
+    // SUPPLIER_IMPORT_APPLY_BATCH_SIZE rows.
+    expect(SUPPLIER_IMPORT_BATCH_SIZE).toBe(500);
+    expect(SUPPLIER_IMPORT_APPLY_BATCH_SIZE).toBe(50);
+
+    await globalRule(20);
+    const count = 1001;
+    const batchesTotal = Math.ceil(count / SUPPLIER_IMPORT_APPLY_BATCH_SIZE);
+    const created = await db.insert(products).values(Array.from({ length: count }, (_, i) => ({
+      name: `${TAG} many ${i}`, slug: `${TAG.toLowerCase()}-many-${i}`, sku: `${TAG}-MANY-${i}`,
+      price: "100.00", vatRate: "23.00", priceMode: "auto", stock: 0,
+    }))).returning({ id: products.id });
+    await db.insert(productSuppliers).values(created.map((p, i) => ({
+      productId: p.id, supplierId, costPrice: "50.00", isPreferred: true, supplierSku: `${TAG}-MANY-${i}`,
+    })));
+
+    const csvText = csvFile(...created.map((p, i) => line({ sku: `${TAG}-MANY-${i}`, name: `linha ${i}`, cost: "10,00", stock: String(i % 7) })));
+    const { json } = await preview(csvText);
+    expect(json.summary).toMatchObject({ total: count, ready: count, actionable: count });
+    expect(json.batchesTotal).toBe(batchesTotal);
+    const snapshotRows = await db.select({ id: supplierImportRows.id }).from(supplierImportRows)
+      .where(eq(supplierImportRows.importId, json.importId));
+    expect(snapshotRows).toHaveLength(count);
+
+    // One cooperative request per batch, from the token-carrying first apply to
+    // the id-only continuations. Every single POST is checked: never more than
+    // the apply ceiling, and batches_done advances exactly once per POST.
+    let applied = 0;
+    let batchesDone = 0;
+    for (let request = 1; request <= batchesTotal; request += 1) {
+      const body = (await apply(json.importId, request === 1 ? json.previewToken : undefined)).json;
+      expect(body.error).toBeUndefined();
+      expect(body.appliedNow).toBeGreaterThan(0);
+      expect(body.appliedNow).toBeLessThanOrEqual(SUPPLIER_IMPORT_APPLY_BATCH_SIZE);
+      expect(body.batchSize).toBe(SUPPLIER_IMPORT_APPLY_BATCH_SIZE);
+      applied += body.appliedNow;
+      batchesDone += 1;
+      expect(body).toMatchObject({
+        status: request === batchesTotal ? "completed" : "partial",
+        applied,
+        pending: count - applied,
+        batchesDone, // exactly one committed batch per request
+        batchesTotal,
+      });
+    }
+    expect(applied).toBe(count);
+
+    const ids = created.map((c) => c.id);
+    const priced = await db.select({ id: products.id, price: products.price, costPrice: products.costPrice, stock: products.stock })
+      .from(products).where(inArray(products.id, ids));
+    expect(priced).toHaveLength(count);
+    expect(priced.every((p) => p.price === "14.99" && p.costPrice === "10.00")).toBe(true);
+
+    const movements = await db.select({ id: stockMovements.id, product: stockMovements.productId })
+      .from(stockMovements).where(inArray(stockMovements.productId, ids));
+    // exactly one movement per line that changed stock, never two for a product
+    expect(movements).toHaveLength(created.filter((_, i) => i % 7 !== 0).length);
+    expect(new Set(movements.map((m) => m.product)).size).toBe(movements.length);
+  }, 300000);
 
   it("is idempotent: re-applying a completed import re-applies nothing", async () => {
     await globalRule(20);
@@ -580,6 +648,9 @@ describe("C.3.1 — progress endpoint", () => {
     expect(idle.json).toMatchObject({
       importId: json.importId, status: "preview", supplierId, total: 3, applied: 0, pending: 2,
       errors: 1, conflicts: 0, batchesDone: 0, batchesTotal: 1, canResume: false, stale: false,
+      // The apply ceiling is part of the progress contract: one POST = one batch
+      // of at most this many rows.
+      batchSize: SUPPLIER_IMPORT_APPLY_BATCH_SIZE,
     });
     expect(idle.json.startedAt).toBeNull();
     expect(idle.json.completedAt).toBeNull();
