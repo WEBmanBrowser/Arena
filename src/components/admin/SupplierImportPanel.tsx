@@ -58,6 +58,10 @@ type PreviewResult = {
   summary: {
     total: number; ready: number; newProducts: number; conflicts: number; errors: number;
     actionable: number; withCost?: number; withStock?: number; batchesTotal?: number;
+    // Rows applied per Apply request (server-side constant). Present on
+    // snapshots created after the Apply size was decoupled from the snapshot
+    // chunk; absent on legacy imports (rebased on their first claim).
+    applyBatchSize?: number;
   };
   lines: PreviewLine[];
   truncated: boolean;
@@ -68,6 +72,8 @@ type PreviewResult = {
   };
   previewToken: string;
   batchesTotal: number;
+  /** Rows applied per Apply request: the server-side ceiling of one POST. */
+  batchSize: number;
   /**
    * C.3.4.3.1 — formato EFETIVO do parser (also_pricelist/also_stock/csv/xlsx).
    * A UI mostra o mecanismo real: num ficheiro ALSO o mapeamento C.3.2 NÃO é
@@ -93,6 +99,8 @@ type Progress = {
   conflicts: number;
   batchesDone: number;
   batchesTotal: number;
+  /** Rows applied per Apply request: the server-side ceiling of one POST. */
+  batchSize: number;
   startedAt: string | null;
   completedAt: string | null;
   heartbeatAt: string | null;

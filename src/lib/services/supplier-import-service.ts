@@ -57,6 +57,7 @@ import {
   MDTECH_SKU_DIGITS,
   MDTECH_SKU_PREFIX,
   MDTECH_SKU_SEQUENCE,
+  SUPPLIER_IMPORT_APPLY_BATCH_SIZE,
   SUPPLIER_IMPORT_BATCH_SIZE,
   SUPPLIER_IMPORT_KEY_CHUNK,
   SUPPLIER_IMPORT_MISSING_LIMIT,
@@ -741,7 +742,9 @@ export async function previewSupplierImport(input: PreviewInput): Promise<Suppli
   const unchangedCount = lines.filter((l) => l.diffStatus === "unchanged").length;
   const changedCount = lines.filter((l) => l.diffStatus === "changed").length;
   const actionable = planSummary.ready + planSummary.newProducts - unchangedCount;
-  const batchesTotal = Math.ceil(actionable / SUPPLIER_IMPORT_BATCH_SIZE);
+  // The number of batches an operator will have to run is decided by the APPLY
+  // size, never by the snapshot persistence chunk: one batch = one POST.
+  const batchesTotal = Math.ceil(actionable / SUPPLIER_IMPORT_APPLY_BATCH_SIZE);
   const missing = await detectMissingProducts(supplier.id, lines);
 
   // â”€â”€ The snapshot is persisted atomically â”€â”€
@@ -769,6 +772,10 @@ export async function previewSupplierImport(input: PreviewInput): Promise<Suppli
       mapping: parsed.mapping,
       summary: {
         ...planSummary, actionable, batchesTotal, ignoredColumns: parsed.ignoredColumns, missingProducts: missing,
+        // Marks this snapshot as already carrying the decoupled Apply batch
+        // size. A legacy import (no marker) is rebased once, on its first
+        // claim, instead of being recalculated on every request.
+        applyBatchSize: SUPPLIER_IMPORT_APPLY_BATCH_SIZE,
         // C.3.4.4: contagens do diff â€” SÃ“ em also_stock (genÃ©ricos inalterados).
         ...(isStockOnly ? { diffChanged: changedCount, diffUnchanged: unchangedCount } : {}),
       },
@@ -865,7 +872,9 @@ export async function previewSupplierImport(input: PreviewInput): Promise<Suppli
       importId: importRow.id, supplierId: supplier.id, fileHash, rowCount: parsed.rows.length,
     }),
     batchesTotal,
-    batchSize: SUPPLIER_IMPORT_BATCH_SIZE,
+    // The Apply batch ceiling this snapshot will use — server-side, never
+    // caller-controlled.
+    batchSize: SUPPLIER_IMPORT_APPLY_BATCH_SIZE,
     profileUsed: resolution.type,
     profileName: resolution.profileId ? `Perfil #${resolution.profileId}` : undefined,
   };
@@ -893,24 +902,77 @@ async function loadImport(importId: number): Promise<ImportSnapshot | null> {
   };
 }
 
+/** The pending rows a claim would still take — the honest "work left"
+ * definition, identical to the predicate the apply batch claims with.
+ */
+const pendingRowsSql = (importId: unknown) => sql`(
+  SELECT count(*) FROM ${supplierImportRows} pending_row
+   WHERE pending_row.import_id = ${importId}
+     AND pending_row.applied = false
+     AND pending_row.status IN ('ready','new_product')
+     AND (pending_row.diff_status IS NULL OR pending_row.diff_status <> 'unchanged')
+)`;
+
+/**
+ * Marker persisted in `summary` by every snapshot created with the decoupled
+ * Apply batch size. Its absence identifies a LEGACY import: one whose
+ * `batches_total` was still counted with the snapshot persistence chunk.
+ */
+const applyBatchSizeMarker = (summary: unknown) =>
+  sql`(${summary} -> 'applyBatchSize') IS NULL`;
+
 /**
  * Atomically take ownership of an import.
  *
  * First apply: from `preview` only, and only with a token matching the snapshot.
- * Resume: from `partial`, or from an `applying` whose heartbeat is stale â€” a
+ * Resume: from `partial`, or from an `applying` whose heartbeat is stale — a
  * running import cannot be stolen, and two racing reclaimers cannot both win
  * because the loser re-reads the updated row version.
+ *
+ * ── Legacy rebase (one statement, one winner) ──
+ * An import created before the Apply batch size was decoupled from the
+ * persistence chunk stores a `batches_total` counted in 500-row batches, while
+ * its rows will now be applied 50 at a time: the stored total would understate
+ * the work and the progress bar would lie. So the FIRST successful claim of a
+ * legacy import rebases it exactly once:
+ *
+ *     batches_total = batches_done + ceil(pending_claimable / 50)
+ *
+ * The claimable-row count, the new `batches_total`, the `applyBatchSize` marker
+ * and the ownership flip happen in THIS single conditional UPDATE, which is
+ * what keeps them consistent under concurrency:
+ *  - the state/heartbeat predicate is re-evaluated by the database for the
+ *    winner, so of two racing reclaimers exactly one wins and a fresh
+ *    `applying` heartbeat can never be stolen;
+ *  - the marker makes the rebase idempotent: every later request sees it and
+ *    never recalculates (or shrinks) the total again;
+ *  - `batches_done` is carried over untouched, so a legacy import that already
+ *    committed batches keeps its history;
+ *  - `ceil(pending/50) >= 0`, so the new total is never below `batches_done`
+ *    and the `batches_done <= batches_total` CHECK constraint always holds.
+ *
+ * New imports already carry the marker, so they are never rebased.
  */
 async function claimImport(importId: number, mode: "first" | "resume"): Promise<boolean> {
   const predicate = mode === "first"
     ? sql`${supplierImports.status} = 'preview'`
     : sql`(${supplierImports.status} = 'partial' OR (${supplierImports.status} = 'applying' AND ${staleHeartbeatCondition()}))`;
 
+  const isLegacy = applyBatchSizeMarker(supplierImports.summary);
+  const rebasedTotal = sql`${supplierImports.batchesDone} + CEIL(${pendingRowsSql(supplierImports.id)}::numeric / ${SUPPLIER_IMPORT_APPLY_BATCH_SIZE}::numeric)::integer`;
+
   const result = await db.execute(sql`
     UPDATE ${supplierImports}
        SET status = 'applying',
            started_at = COALESCE(${supplierImports.startedAt}, now()),
-           heartbeat_at = now()
+           heartbeat_at = now(),
+           batches_total = CASE WHEN ${isLegacy} THEN ${rebasedTotal} ELSE ${supplierImports.batchesTotal} END,
+           summary = CASE
+             WHEN ${isLegacy}
+               THEN COALESCE(${supplierImports.summary}, '{}'::jsonb)
+                    || jsonb_build_object('applyBatchSize', ${SUPPLIER_IMPORT_APPLY_BATCH_SIZE}::int)
+             ELSE ${supplierImports.summary}
+           END
      WHERE ${predicate} AND ${supplierImports.id} = ${importId}
     RETURNING id
   `);
@@ -1518,6 +1580,8 @@ export interface ApplyOutcome {
   pending: number;
   batchesDone: number;
   batchesTotal: number;
+  /** Row ceiling of one POST /apply — server-side, never caller-controlled. */
+  batchSize: number;
   idempotent: boolean;
   resumed: boolean;
   error?: { code: string; message: string };
@@ -1538,6 +1602,7 @@ async function outcomeFor(importId: number, totals: Partial<ApplyOutcome> = {}):
     appliedNow: 0, applied: counts.applied, created: 0, updated: 0, repriced: 0, skipped: 0,
     conflicts: counts.conflicts, errors: counts.errors, pending: counts.pending,
     batchesDone: snapshot?.batchesDone ?? 0, batchesTotal: snapshot?.batchesTotal ?? 0,
+    batchSize: SUPPLIER_IMPORT_APPLY_BATCH_SIZE,
     idempotent: false, resumed: false,
     ...totals,
   };
@@ -1545,10 +1610,60 @@ async function outcomeFor(importId: number, totals: Partial<ApplyOutcome> = {}):
 
 /**
  * Apply â€” or resume â€” a persisted snapshot with one cooperative batch per
- * HTTP request. The batch size remains SUPPLIER_IMPORT_BATCH_SIZE; this request
- * limit is server-side and is not caller-controlled.
+ * HTTP request. A batch is at most SUPPLIER_IMPORT_APPLY_BATCH_SIZE rows, and
+ * MAX_BATCHES_PER_APPLY_REQUEST is the second, independent ceiling: one POST
+ * commits at most one batch. Both are server-side, never caller-controlled, and
+ * neither of them is the snapshot persistence chunk.
  */
 const MAX_BATCHES_PER_APPLY_REQUEST = 1;
+
+/**
+ * Safe, classified description of a failed apply, in the exact shape the batch
+ * loop reports to the operator. Storage failures never leak SQL, params or
+ * stack traces; anything else keeps its (human-authored) message under
+ * APPLY_BATCH_FAILED.
+ */
+function applyFailureDetail(e: unknown): { code: string; message: string } {
+  const storage = classifyImportStorageFailure(e);
+  if (storage) return { code: storage.code, message: storage.message };
+  return {
+    code: "APPLY_BATCH_FAILED",
+    message: e instanceof Error && e.message.trim()
+      ? e.message.trim()
+      : supplierImportErrorMessage("APPLY_BATCH_FAILED"),
+  };
+}
+
+/**
+ * Last line of defence after a claim: an import that was taken over must not be
+ * left `applying` without an error when the request dies OUTSIDE the batch
+ * transaction (supplier lookup, counting, handoff or outcome building).
+ *
+ * The UPDATE is conditional on `status = 'applying'` on purpose: a completion
+ * this request already committed — or the `failed` state written by the
+ * supplier-lookup branch — must never be downgraded to `partial` by a late
+ * failure. Counting is best-effort too: if the database itself is unavailable
+ * there is nothing to write, and the heartbeat TTL still lets the operator
+ * resume.
+ */
+async function recordPostClaimFailure(importId: number, e: unknown): Promise<void> {
+  try {
+    const detail = applyFailureDetail(e);
+    const counts = await countRows(importId).catch(() => null);
+    await db.update(supplierImports).set({
+      status: "partial",
+      heartbeatAt: new Date(),
+      errorSummary: {
+        ...detail,
+        at: new Date().toISOString(),
+        ...(counts ? { applied: counts.applied, pending: counts.pending } : {}),
+      },
+    }).where(and(eq(supplierImports.id, importId), eq(supplierImports.status, "applying")));
+  } catch {
+    // Nothing more can be written: the batch transaction already rolled back
+    // and the stale heartbeat keeps the import resumable.
+  }
+}
 
 export async function applySupplierImport(input: ApplyInput): Promise<ApplyOutcome> {
   const snapshot = await loadImport(input.importId);
@@ -1578,6 +1693,30 @@ export async function applySupplierImport(input: ApplyInput): Promise<ApplyOutco
     throw new SupplierImportError("IMPORT_IN_PROGRESS", 409, "Outra importação está a decorrer com heartbeat ativo");
   }
 
+  // From here on the import is OWNED by this request. If anything outside the
+  // batch transaction throws, the import must not be left as an `applying` with
+  // no error: the failure is recorded (best-effort, and only while the import is
+  // still `applying`) and the error still propagates to the route.
+  try {
+    return await runClaimedApply(snapshot, input, fromPreview);
+  } catch (e) {
+    await recordPostClaimFailure(snapshot.id, e);
+    throw e;
+  }
+}
+
+/**
+ * The claimed half of an apply: everything after ownership was taken.
+ *
+ * Kept in its own function so the ownership guard above is the single place
+ * that has to reason about a failure AFTER the claim, while the row/batch
+ * semantics below stay exactly as they were.
+ */
+async function runClaimedApply(
+  snapshot: ImportSnapshot,
+  input: ApplyInput,
+  fromPreview: boolean
+): Promise<ApplyOutcome> {
   const [supplier] = await db.select({ id: suppliers.id, name: suppliers.name }).from(suppliers)
     .where(eq(suppliers.id, snapshot.supplierId)).limit(1);
   if (!supplier) {
@@ -1612,7 +1751,7 @@ export async function applySupplierImport(input: ApplyInput): Promise<ApplyOutco
                AND status IN ('ready','new_product')
                AND (diff_status IS NULL OR diff_status <> 'unchanged')
              ORDER BY row_number
-             LIMIT ${SUPPLIER_IMPORT_BATCH_SIZE}
+             LIMIT ${SUPPLIER_IMPORT_APPLY_BATCH_SIZE}
              FOR UPDATE SKIP LOCKED
           )
           UPDATE ${supplierImportRows} AS r
@@ -1995,7 +2134,7 @@ export async function applySupplierImport(input: ApplyInput): Promise<ApplyOutco
         else if (effect === "repriced") totals.repriced += 1;
         else totals.skipped += 1;
       }
-      if (batch.claimed < SUPPLIER_IMPORT_BATCH_SIZE) break;
+      if (batch.claimed < SUPPLIER_IMPORT_APPLY_BATCH_SIZE) break;
     } catch (e) {
       // The full technical error belongs in the server log only. A real
       // database/storage failure is classified into a safe category â€” never
@@ -2003,17 +2142,7 @@ export async function applySupplierImport(input: ApplyInput): Promise<ApplyOutco
       // (human-authored) message under APPLY_BATCH_FAILED, which is what the
       // recovery tests assert a killed worker reports.
       console.error(`supplier import apply batch (import ${snapshot.id}):`, e);
-      const storage = classifyImportStorageFailure(e);
-      if (storage) {
-        lastError = { code: storage.code, message: storage.message };
-      } else {
-        lastError = {
-          code: "APPLY_BATCH_FAILED",
-          message: e instanceof Error && e.message.trim()
-            ? e.message.trim()
-            : supplierImportErrorMessage("APPLY_BATCH_FAILED"),
-        };
-      }
+      lastError = applyFailureDetail(e);
       break;
     }
   }
@@ -2107,6 +2236,8 @@ export interface ImportProgress {
   conflicts: number;
   batchesDone: number;
   batchesTotal: number;
+  /** Row ceiling of one POST /apply — server-side, never caller-controlled. */
+  batchSize: number;
   startedAt: string | null;
   completedAt: string | null;
   heartbeatAt: string | null;
@@ -2114,6 +2245,18 @@ export interface ImportProgress {
   canResume: boolean;
   stale: boolean;
   heartbeatTtlMs: number;
+}
+
+/**
+ * Whether a persisted `summary` already carries the Apply batch size marker.
+ * A missing (or JSON-null) marker identifies a LEGACY import that
+ * `claimImport` will rebase on its first claim — the same condition, evaluated
+ * in SQL there and in JS here.
+ */
+function hasApplyBatchSizeMarker(summary: unknown): boolean {
+  if (!summary || typeof summary !== "object" || Array.isArray(summary)) return false;
+  const value = (summary as Record<string, unknown>).applyBatchSize;
+  return value !== undefined && value !== null;
 }
 
 export async function getImportProgress(importId: number): Promise<ImportProgress | null> {
@@ -2129,6 +2272,7 @@ export async function getImportProgress(importId: number): Promise<ImportProgres
       heartbeatAt: supplierImports.heartbeatAt,
       batchesDone: supplierImports.batchesDone,
       batchesTotal: supplierImports.batchesTotal,
+      summary: supplierImports.summary,
       stale: sql<boolean>`${staleHeartbeatCondition()} AND ${supplierImports.status} = 'applying'`,
     })
     .from(supplierImports)
@@ -2138,6 +2282,16 @@ export async function getImportProgress(importId: number): Promise<ImportProgres
   if (!row) return null;
 
   const counts = await countRows(importId);
+  // ── Legacy imports: an EFFECTIVE total, read-only ──
+  // An import persisted before the Apply batch size was decoupled still stores
+  // a total counted in 500-row batches. Until its first claim rebases it
+  // (claimImport), /progress must still show how many batches the work really
+  // is, without writing anything: batches_done + ceil(pending/50). The
+  // `Math.max` keeps the reported total monotonic — it can never fall below
+  // either the batches already committed or the value already stored.
+  const isLegacy = !hasApplyBatchSizeMarker(row.summary);
+  const effectiveTotal = row.batchesDone + Math.ceil(counts.pending / SUPPLIER_IMPORT_APPLY_BATCH_SIZE);
+  const batchesTotal = isLegacy ? Math.max(row.batchesTotal, effectiveTotal) : row.batchesTotal;
   return {
     importId: row.id,
     status: row.status,
@@ -2150,7 +2304,8 @@ export async function getImportProgress(importId: number): Promise<ImportProgres
     errors: counts.errors,
     conflicts: counts.conflicts,
     batchesDone: row.batchesDone,
-    batchesTotal: row.batchesTotal,
+    batchesTotal,
+    batchSize: SUPPLIER_IMPORT_APPLY_BATCH_SIZE,
     startedAt: row.startedAt ? row.startedAt.toISOString() : null,
     completedAt: row.finishedAt ? row.finishedAt.toISOString() : null,
     heartbeatAt: row.heartbeatAt ? row.heartbeatAt.toISOString() : null,
@@ -2378,7 +2533,7 @@ export async function reopenSupplierImportPreview(importId: number): Promise<Sup
       importId: row.id, supplierId: row.supplierId, fileHash: row.fileHash, rowCount: row.rowCount,
     }),
     batchesTotal: row.batchesTotal,
-    batchSize: SUPPLIER_IMPORT_BATCH_SIZE,
+    batchSize: SUPPLIER_IMPORT_APPLY_BATCH_SIZE,
     reopened: true,
   };
 }
