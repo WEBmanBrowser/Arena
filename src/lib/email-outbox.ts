@@ -241,12 +241,22 @@ export async function requeueEmailNotification(input: {
 
   if (!row) {
     // Distinguish "no such row / wrong state" from "claim still too fresh".
+    //
+    // `CLAIM_STILL_ACTIVE` is only meaningful to a caller that ASKED to release an
+    // abandoned claim (that is the only caller who could have resolved it): the
+    // default requeue path must not report a dispatching row as if the operator had
+    // requested its release.
     const [current] = await db
       .select({ status: emailNotifications.status, dispatchStartedAt: emailNotifications.dispatchStartedAt })
       .from(emailNotifications)
       .where(eq(emailNotifications.id, input.id))
       .limit(1);
-    if (current?.status === "dispatching" && current.dispatchStartedAt && now - current.dispatchStartedAt.getTime() < STRANDED_CLAIM_MS) {
+    if (
+      input.allowStrandedClaim === true &&
+      current?.status === "dispatching" &&
+      current.dispatchStartedAt &&
+      now - current.dispatchStartedAt.getTime() < STRANDED_CLAIM_MS
+    ) {
       return { ok: false, code: "CLAIM_STILL_ACTIVE" };
     }
     return { ok: false, code: "NOT_REQUEUEABLE" };

@@ -240,9 +240,9 @@ describe("B.3.5 anomaly resolution", () => {
     });
 
     // note is mandatory
-    await expect(resolveReconciliationAnomaly(observation.id, resolver.id, "")).rejects.toMatchObject({ code: "INVALID_NOTE" });
+    await expect(resolveReconciliationAnomaly(observation.id, resolver.id, "", "MANUALLY_RECONCILED")).rejects.toMatchObject({ code: "INVALID_NOTE" });
 
-    const resolved = await resolveReconciliationAnomaly(observation.id, resolver.id, "Confirmado com extrato bancário — diferença de taxas.");
+    const resolved = await resolveReconciliationAnomaly(observation.id, resolver.id, "Confirmado com extrato bancário — diferença de taxas.", "MANUALLY_RECONCILED");
     expect(resolved.status).toBe("resolved");
     expect(resolved.resolvedBy).toBe(resolver.id);
     expect(resolved.resolutionNote).toContain("extrato");
@@ -252,8 +252,8 @@ describe("B.3.5 anomaly resolution", () => {
     expect(audit[0].userId).toBe(resolver.id);
 
     // resolving twice rejected
-    await expect(resolveReconciliationAnomaly(observation.id, resolver.id, "segunda vez — já resolvido")).rejects.toBeInstanceOf(ReconciliationError);
-    await expect(resolveReconciliationAnomaly(observation.id, resolver.id, "nova tentativa válida")).rejects.toMatchObject({ code: "OBSERVATION_NOT_OPEN" });
+    await expect(resolveReconciliationAnomaly(observation.id, resolver.id, "segunda vez — já resolvido", "MANUALLY_RECONCILED")).rejects.toBeInstanceOf(ReconciliationError);
+    await expect(resolveReconciliationAnomaly(observation.id, resolver.id, "nova tentativa válida", "MANUALLY_RECONCILED")).rejects.toMatchObject({ code: "OBSERVATION_NOT_OPEN" });
 
     // anomalies are never auto-fixed: internal state untouched by resolution
     const [payment] = await db.select().from(payments).where(eq(payments.orderId, order.id)).limit(1);

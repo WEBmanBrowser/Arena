@@ -5,14 +5,14 @@ Branch: `arena/01a0b1f0-arena` (single checkpoint `e338f948` already pushed; thi
 Status: **all cycle-2 edits live in the working tree, uncommitted**
 Cycle-1 document (`docs/integrations/eupago-p0-report.md`, verdict “READY FOR FINAL REVIEW”) is **superseded** by this cycle: the review returned BLOCKED and the findings below were fixed.
 
-Cycle-2 delta vs the pushed checkpoint `e338f948`: 17 files (15 modified, 2 new).
+Cycle-2 delta vs the pushed checkpoint `e338f948`: **19 files (16 modified, 3 new) — 2263 insertions, 64 deletions** (measured with `git diff --shortstat e338f948 73c69c62`; an earlier revision of this line said 17 files / 15 modified / 2 new, which did not match the real delta).
 The whole P0 body of work (cycle 1 + cycle 2) is uncommitted relative to `14fa0f8f` — see section I.
 
 ---
 
 ## A. Files touched in cycle 2 (vs checkpoint `e338f948`)
 
-Modified (15):
+Modified (16):
 
 | file | why |
 | --- | --- |
@@ -31,13 +31,15 @@ Modified (15):
 | `drizzle/meta/_journal.json` | 0017 journal entry |
 | `src/lib/payments-p0-outbox.test.ts` | new dispatch/stranded-claim/concurrency tests |
 | `src/lib/payments-p0-migration-0017.test.ts` | DDL↔snapshot parity assertions |
+| `docs/integrations/eupago-p0-report.md` | cycle-1 report marked as superseded (review verdict BLOCKED) |
 
-New (2):
+New (3):
 
 | file | why |
 | --- | --- |
 | `src/lib/services/financial-anomalies.ts` | durable anomaly read/write model (`reconciliation_observations`, `payment_anomaly`) |
 | `src/lib/payments-p0-anomalies.test.ts` | HIGH-1/HIGH-2 end-to-end anomaly suite (14 tests) |
+| `docs/integrations/eupago-p0-cycle2-report.md` | this report (A–J; delta measured above) |
 
 Not touched in cycle 2 (verified by blob comparison against `e338f948`): all other P0 files, in particular `src/lib/eupago-config-routes.test.ts`, `src/app/api/admin/settings/eupago/route.ts`, auth/CSRF modules, Cloudflare config, Wintouch, checkout payment-method wiring.
 

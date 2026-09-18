@@ -3829,6 +3829,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "resolution_code": {
+          "name": "resolution_code",
+          "type": "varchar(30)",
+          "primaryKey": false,
+          "notNull": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp",

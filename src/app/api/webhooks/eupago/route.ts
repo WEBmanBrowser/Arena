@@ -72,10 +72,18 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 200 for every other handled outcome (including duplicates, ignored events
-    // and recorded financial anomalies) so the provider stops retrying a delivery
-    // we have already reasoned about and persisted.
-    return NextResponse.json({ received: true, outcome: result.outcome }, { status: 200 });
+    // C1/C2/C3 — a recorded financial anomaly must NOT look like a normal
+    // duplicate to the caller: the outcome is explicitly marked as an anomaly.
+    // The status stays 200 on purpose: the money evidence is persisted and ONLY a
+    // human can resolve it, so a provider retry would change nothing (and the
+    // event is terminal for the retry machinery — see `isAnomalyWebhookEvent`).
+    const anomaly = result.outcome === "payment_anomaly";
+    return NextResponse.json(
+      anomaly
+        ? { received: true, anomaly: true, outcome: result.outcome, code: result.code ?? null }
+        : { received: true, outcome: result.outcome },
+      { status: 200 }
+    );
   } catch (e) {
     if (isProviderError(e) && e.code === "WEBHOOK_INVALID") {
       // Signature/structure failure — fail closed, no provider detail leaked.

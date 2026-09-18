@@ -122,6 +122,16 @@ Eupago de um ledger virgem:
   linhas que precisam de atenção, com destinatário **mascarado**.
 - Recuperação manual: `POST /api/admin/email-outbox/[id]/requeue` (admin, CSRF,
   auditado, uma linha por pedido).
+- **C4 — dispatch preso (crash entre o commit e o envio).** Uma linha que ficou
+  `queued` é drenada por `POST /api/admin/email-outbox/dispatch-queued`
+  (admin, CSRF, auditado `email_outbox.queued_dispatched`, lote limitado a 1–20
+  linhas, por omissão 5; só linhas `queued`, mais antigas primeiro). Uma linha em
+  `dispatching` **não** é varrida: a sua claim só é libertada pela decisão
+  explícita `POST /api/admin/email-outbox/[id]/requeue?releaseStrandedClaim=1`,
+  que só re-arma uma claim **abandonada** (mais antiga que `STRANDED_CLAIM_MS`,
+  15 min); uma claim recente é recusada com `CLAIM_STILL_ACTIVE`. Uma requeue
+  normal (sem a flag) de uma linha `dispatching` responde `NOT_REQUEUEABLE`.
+  `delivery_unknown` continua a exigir decisão humana por linha.
 - **Não** existe Cloudflare Cron Trigger para isto neste checkpoint.
 
 ## 5. H3 — webhooks que esgotaram o orçamento
@@ -140,6 +150,30 @@ tentativas). Quando o orçamento acaba e o evento não é correlacionável:
 - se os metadados confiáveis persistidos bastarem (caso dos reembolsos), a
   resposta encaminha para a recuperação de reembolso existente
   (`USE_REFUND_RECOVERY`).
+
+### 5.1 Anomalias duráveis (C1/C2/C3) e classificação de resolução (C6)
+
+- Um `Paid` autenticado que **não** pode ser liquidado em coerência com o estado
+  real nunca termina como `duplicate`/200 silencioso: o evento passa a `anomaly`
+  (terminal para os retries) e a resposta 200 leva `{"anomaly":true,...}`.
+  Códigos possíveis: `LATE_PAID` (tentativa terminal `expired`/`cancelled`/
+  `failed`, incluindo `LATE_PAID:ATTEMPT_*`, ou encomenda não liquidável),
+  `DOUBLE_CHARGE`, `PAYMENT_NOT_COHERENT` (movimento diferente no mesmo
+  pagamento), `PROVIDER_EVENT_CONFLICT` (o mesmo `trid` reapareceu com payload
+  autenticado semanticamente diferente), `AMOUNT_MISMATCH`,
+  `CURRENCY_MISMATCH`, `METHOD_MISMATCH`, `METHOD_MISSING`, `IDENTIFIER_MISMATCH`,
+  `REFERENCE_MISMATCH`, `ATTEMPT_NOT_FOUND`, `AMOUNT_MISSING`,
+  `REFUND_ATTEMPT_NOT_FOUND`, `ORIGINAL_PAYMENT_NOT_FOUND`.
+- Nenhuma anomalia reativa a encomenda, mexe em stock, confirma pagamento ou
+  emite reembolso automático; o `trid` e os campos do movimento ficam registados.
+- Movimentos autenticados sem candidato local (`ATTEMPT_NOT_FOUND`,
+  `ORIGINAL_PAYMENT_NOT_FOUND`) ficam registados na auditoria
+  (`payment.provider_unattributed_movement`) e visíveis nos contadores de
+  operação existentes — nunca em silêncio.
+- Fechar uma anomalia exige **classificação explícita** além da nota (3–500
+  caracteres): `REFUNDED` (só aceite com reembolso `succeeded` registado),
+  `MANUALLY_RECONCILED`, `FALSE_POSITIVE`, `ACCEPTED_EXCEPTION`; ator, data e
+  código ficam na linha e na auditoria (`reconciliation.anomaly_resolved`).
 
 ## 6. M4 — `bank_transfer`: evidência
 
@@ -168,3 +202,39 @@ reais) e com transporte Eupago **simulado** (`fetchImpl` injetado):
   a ligação validada e **falha o teste** perante qualquer tentativa de HTTP real
   (mesmo quando a aplicação converte a exceção num estado UNKNOWN).
 - Nenhum pagamento, reembolso ou chamada real é feito a partir da suite.
+
+## 8. Questões de contrato EM ABERTO (não inventar respostas)
+
+As decisões fail-closed abaixo **não** dependem de suposições sobre o
+comportamento da Eupago, mas a sua classificação operacional beneficia de
+respostas oficiais. Nenhuma destas perguntas está respondida pelo repositório.
+
+1. **Semântica do `trid`** — o `trid` identifica a **transação durante toda a
+   vida** (e pode reaparecer com estado/valor diferentes ao longo do tempo) ou
+   identifica **uma notificação** (um `trid` por entrega)? A implementação atual
+   assume apenas o que é observável localmente: um `trid` já concluído que volte
+   com payload autenticado diferente é escalado como `PROVIDER_EVENT_CONFLICT`
+   (nunca respondido como `duplicate`).
+2. **Transições de estado** — pode uma operação já notificada como
+   `Expired` / `Cancel` / `Error` voltar a ser notificada como `Paid` (com o
+   mesmo `trid`)? Se sim, com que prazo? Hoje esse caso é tratado como
+   `LATE_PAID` (anomalia durável, sem reativação de encomenda, sem stock, sem
+   reembolso automático) e nunca como duplicado silencioso.
+3. **Política oficial de re-tentativas de webhook** — para HTTP `503`, a Eupago
+   reentrega oficialmente? Com que número de tentativas e durante quanto tempo?
+   A nossa resposta a um evento adiado é `503` + `Retry-After: 60`; **não** há
+   prova documental de que a Eupago respeita `Retry-After`.
+4. **`Retry-After`** — a Eupago interpreta/honra o cabeçalho `Retry-After` ou
+   reentrega num intervalo próprio? Se reentrega num intervalo próprio, qual?
+5. **Códigos re-tentáveis** — que códigos HTTP/condições levam a reentrega e
+   quais são considerados definitivos? (Determina se um `503` nosso é mesmo
+   reavaliado e se um `200` com anomalia termina definitivamente o ciclo de
+   tentativas.)
+6. **Ordenação e idempotência** — a Eupago garante entrega em ordem? Garante
+   entrega *at-least-once* com o mesmo `provider_event_id`/payload, ou o mesmo
+   movimento pode chegar com identificadores de evento diferentes?
+
+Classificação: **RESIDUAL RISK / CONTRACT VALIDATION REQUIRED** — nada aqui
+autoriza relaxar o fail-closed; enquanto não houver resposta oficial, um
+`Paid` autenticado incoerente continua a produzir anomalia durável + auditoria,
+e um evento adiado continua a responder `503`.

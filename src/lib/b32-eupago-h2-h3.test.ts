@@ -28,6 +28,7 @@ import {
   payments,
   products,
   providerWebhookEvents,
+  reconciliationObservations,
   refundAttempts,
   stockMovements,
   users,
@@ -82,6 +83,7 @@ async function cleanup() {
   const rows = await db.select({ id: orders.id }).from(orders).where(like(orders.orderNumber, "H23-%"));
   const ids = rows.map((r) => r.id);
   if (ids.length) {
+    await db.delete(reconciliationObservations).where(inArray(reconciliationObservations.orderId, ids));
     await db.delete(refundAttempts).where(inArray(refundAttempts.orderId, ids));
     await db.delete(paymentAttempts).where(inArray(paymentAttempts.orderId, ids));
     await db.delete(payments).where(inArray(payments.orderId, ids));

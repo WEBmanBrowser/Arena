@@ -1003,8 +1003,38 @@ export const RECONCILIATION_ANOMALY_CODES = [
   "DOUBLE_CHARGE",
   "LATE_PAID",
   "PAYMENT_NOT_COHERENT",
+  /**
+   * PAYMENT P0 (C2) — the SAME `trid` reappeared with a SEMANTICALLY DIFFERENT
+   * authenticated payload (different status/amount/currency/method), so the
+   * recorded delivery and the new one are not interchangeable. Recorded instead
+   * of answering `duplicate`; the provider contract question (does a `trid`
+   * identify a transaction for its whole life, or one notification?) is
+   * documented as outstanding in `docs/integrations/eupago-p0-rollout.md`.
+   */
+  "PROVIDER_EVENT_CONFLICT",
 ] as const;
 export type ReconciliationAnomalyCode = (typeof RECONCILIATION_ANOMALY_CODES)[number];
+
+/**
+ * C6 — WHY an operator closed a reconciliation anomaly. A free-text note alone is
+ * not a classification: these codes make the operational decision explicit and
+ * auditable. No code lets the caller claim "money moved" without evidence:
+ * `REFUNDED` is only accepted when a `succeeded` refund attempt for that
+ * order/payment is already recorded (`REFUND_EVIDENCE_REQUIRED` otherwise), and
+ * an out-of-band refund must be classified as `MANUALLY_RECONCILED`, which
+ * asserts reconciliation — not a system-verified refund.
+ */
+export const RECONCILIATION_RESOLUTION_CODES = [
+  /** The money was returned to the customer (refund executed, in or out of band). */
+  "REFUNDED",
+  /** Reconciled manually against the bank/provider statement; nothing to refund. */
+  "MANUALLY_RECONCILED",
+  /** The observation was wrong / duplicated; there is no money to act on. */
+  "FALSE_POSITIVE",
+  /** Real divergence, consciously accepted (documented exception). */
+  "ACCEPTED_EXCEPTION",
+] as const;
+export type ReconciliationResolutionCode = (typeof RECONCILIATION_RESOLUTION_CODES)[number];
 
 export const reconciliationObservations = pgTable("reconciliation_observations", {
   id: serial("id").primaryKey(),
@@ -1040,6 +1070,13 @@ export const reconciliationObservations = pgTable("reconciliation_observations",
   resolvedBy: integer("resolved_by"),
   resolvedAt: timestamp("resolved_at"),
   resolutionNote: varchar("resolution_note", { length: 500 }),
+  /**
+   * C6 — mandatory CLASSIFICATION of the resolution (closed set, see
+   * `RECONCILIATION_RESOLUTION_CODES`). Stored next to the note, the actor and the
+   * timestamp, so "why was this anomaly closed" is answerable from the row itself.
+   * NULL only for rows resolved before this column existed.
+   */
+  resolutionCode: varchar("resolution_code", { length: 30 }),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 }, (t) => [
   index("reconciliation_observations_order_idx").on(t.orderId),

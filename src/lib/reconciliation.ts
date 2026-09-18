@@ -27,6 +27,8 @@ import {
   reconciliationObservations,
   refundAttempts,
   RECONCILIATION_ANOMALY_CODES,
+  RECONCILIATION_RESOLUTION_CODES,
+  type ReconciliationResolutionCode,
 } from "@/db/schema";
 import { and, desc, eq } from "drizzle-orm";
 import { createAuditLog } from "@/lib/audit";
@@ -214,13 +216,36 @@ export async function listOpenAnomalies(): Promise<Array<typeof reconciliationOb
     .limit(200);
 }
 
+/**
+ * C6 — resolve ONE anomaly with an EXPLICIT classification.
+ *
+ * A free-text note alone does not say WHY the anomaly was closed, and an
+ * operator must never be able to close a money divergence as if the money had
+ * been returned. The resolution therefore requires:
+ *   • `code`  — one of `RECONCILIATION_RESOLUTION_CODES` (closed set);
+ *   • `note`  — 3–500 characters of accountable explanation;
+ * and the actor + timestamp are stored on the row (plus the audit entry).
+ *
+ * `REFUNDED` additionally requires EVIDENCE inside the system: at least one
+ * `succeeded` refund attempt for the anomaly's order/payment. A refund executed
+ * out of band must be recorded through the refund ledger first, or classified as
+ * `MANUALLY_RECONCILED` (the operator's statement, with the note as evidence
+ * trail) — the system never claims money was returned without a record.
+ */
 export async function resolveReconciliationAnomaly(
   observationId: number,
   actorId: number,
-  note: string
+  note: string,
+  code: ReconciliationResolutionCode
 ): Promise<typeof reconciliationObservations.$inferSelect> {
   if (typeof note !== "string" || note.trim().length < 3 || note.trim().length > 500) {
     fail("INVALID_NOTE", "Nota de resolução obrigatória (3–500 caracteres)");
+  }
+  if (typeof code !== "string" || code.trim().length === 0) {
+    fail("RESOLUTION_CODE_REQUIRED", "Classificação da resolução obrigatória");
+  }
+  if (!(RECONCILIATION_RESOLUTION_CODES as readonly string[]).includes(code)) {
+    fail("INVALID_RESOLUTION_CODE", "Classificação de resolução inválida");
   }
 
   const observation = await db.transaction(async (tx) => {
@@ -233,6 +258,28 @@ export async function resolveReconciliationAnomaly(
     if (!current) fail("OBSERVATION_NOT_FOUND", "Observação não encontrada");
     if (current.status !== "open") fail("OBSERVATION_NOT_OPEN", "Observação não está aberta");
 
+    if (code === "REFUNDED") {
+      // Evidence gate: a `REFUNDED` classification may only be recorded when a
+      // SUCCEEDED refund attempt exists for this observation's money.
+      const evidence = await tx
+        .select({ id: refundAttempts.id })
+        .from(refundAttempts)
+        .where(
+          and(
+            eq(refundAttempts.orderId, current.orderId),
+            eq(refundAttempts.status, "succeeded"),
+            current.paymentId != null ? eq(refundAttempts.paymentId, current.paymentId) : undefined
+          )
+        )
+        .limit(1);
+      if (evidence.length === 0) {
+        fail(
+          "REFUND_EVIDENCE_REQUIRED",
+          "Sem reembolso registado como concluído: registe o reembolso no ledger ou classifique como MANUALLY_RECONCILED"
+        );
+      }
+    }
+
     const [updated] = await tx
       .update(reconciliationObservations)
       .set({
@@ -240,6 +287,7 @@ export async function resolveReconciliationAnomaly(
         resolvedBy: actorId,
         resolvedAt: new Date(),
         resolutionNote: note.trim(),
+        resolutionCode: code,
       })
       .where(and(eq(reconciliationObservations.id, observationId), eq(reconciliationObservations.status, "open")))
       .returning();
@@ -252,9 +300,14 @@ export async function resolveReconciliationAnomaly(
     action: "reconciliation.anomaly_resolved",
     entity: "reconciliation_observation",
     entityId: observation.id,
-    details: { orderId: observation.orderId, anomalyCode: observation.anomalyCode },
+    details: {
+      orderId: observation.orderId,
+      anomalyCode: observation.anomalyCode,
+      resolutionCode: observation.resolutionCode,
+    },
   });
   return observation;
 }
 
-export { RECONCILIATION_ANOMALY_CODES };
+export { RECONCILIATION_ANOMALY_CODES, RECONCILIATION_RESOLUTION_CODES };
+export type { ReconciliationResolutionCode };

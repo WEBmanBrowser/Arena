@@ -39,6 +39,8 @@ import { normalizeEupagoEvent, type NormalizedEupagoEvent } from "@/lib/provider
 import {
   claimWebhookEvent,
   deferWebhookEvent,
+  escalateWebhookEventConflict,
+  getWebhookEvent,
   isAnomalyWebhookEvent,
   markWebhookEventAnomaly,
   markWebhookEventIgnored,
@@ -104,6 +106,26 @@ export interface ProcessWebhookResult {
   readonly trid?: string;
 }
 
+/**
+ * C2 — fields of an authenticated payload that were PROVABLY different from the
+ * payload of the same `trid` already on record. Only fields that are persisted
+ * for the previous delivery are compared, so a conflict is only reported when it
+ * is determinable from stored evidence.
+ */
+interface PayloadConflict {
+  readonly fields: string[];
+  readonly persistedEventType: string | null;
+  readonly receivedEventType: string;
+  readonly persistedAmountCents: number | null;
+  readonly receivedAmountCents: number | null;
+  readonly persistedCurrency: string | null;
+  readonly receivedCurrency: string | null;
+  readonly persistedMethod: string | null;
+  readonly receivedMethod: string | null;
+  readonly persistedOriginalTrid: string | null;
+  readonly receivedOriginalTrid: string | null;
+}
+
 export interface ProcessWebhookInput {
   /** Byte-exact raw body. MUST NOT be re-serialized before it reaches here. */
   readonly rawBody: string;
@@ -145,11 +167,104 @@ function buildTrustedMetadata(event: NormalizedEupagoEvent): Record<string, stri
   return meta;
 }
 
+/** Anomaly code persisted on an event that already ended in an anomaly. */
+function anomalyCodeOf(event: { metadata?: Record<string, string | number | boolean> | null; lastError?: string | null }): string {
+  const stored = event.metadata?.anomalyCode;
+  if (typeof stored === "string" && stored.length > 0) return stored;
+  return event.lastError && event.lastError.length > 0 ? event.lastError : "PAYMENT_ANOMALY";
+}
+
+/**
+ * C2 — compare an authenticated redelivery against the payload ALREADY ON RECORD
+ * for the same `trid`.
+ *
+ * Only persisted, signature-verified fields are compared, and only when BOTH
+ * sides carry a value: the comparison therefore never invents a divergence that
+ * the stored evidence cannot prove. A byte-identical redelivery yields `null`.
+ */
+function describePayloadConflict(
+  persisted: { eventType: string | null; metadata: Record<string, string | number | boolean> | null },
+  event: NormalizedEupagoEvent
+): PayloadConflict | null {
+  const meta = persisted.metadata ?? {};
+  const fields: string[] = [];
+
+  const receivedEventType = `${event.kind}.${event.status.toLowerCase()}`;
+  if (persisted.eventType && persisted.eventType !== receivedEventType) fields.push("event_type");
+
+  const persistedAmountCents = typeof meta.amountCents === "number" ? meta.amountCents : null;
+  if (persistedAmountCents !== null && event.amountCents !== null && persistedAmountCents !== event.amountCents) {
+    fields.push("amount");
+  }
+
+  const persistedCurrency = typeof meta.currency === "string" ? meta.currency : null;
+  if (persistedCurrency && event.currency && persistedCurrency !== event.currency) fields.push("currency");
+
+  const persistedMethod = typeof meta.method === "string" ? meta.method : null;
+  if (persistedMethod && event.method && persistedMethod !== event.method) fields.push("method");
+
+  const persistedOriginalTrid = typeof meta.originalTrid === "string" ? meta.originalTrid : null;
+  if (persistedOriginalTrid && event.originalTrid && persistedOriginalTrid !== event.originalTrid) {
+    fields.push("original_trid");
+  }
+
+  if (fields.length === 0) return null;
+
+  return {
+    fields,
+    persistedEventType: persisted.eventType ?? null,
+    receivedEventType,
+    persistedAmountCents,
+    receivedAmountCents: event.amountCents,
+    persistedCurrency,
+    receivedCurrency: event.currency,
+    persistedMethod,
+    receivedMethod: event.method,
+    persistedOriginalTrid,
+    receivedOriginalTrid: event.originalTrid,
+  };
+}
+
+/**
+ * Deterministic fingerprint of ONE divergence between a concluded delivery and
+ * its redelivery. Stored on the event row so a redelivery of the SAME divergent
+ * payload is idempotent, while a DIFFERENT divergence is still recorded.
+ */
+function conflictFingerprint(conflict: PayloadConflict): string {
+  return JSON.stringify([
+    [...conflict.fields].sort(),
+    conflict.receivedEventType,
+    conflict.receivedAmountCents,
+    conflict.receivedCurrency,
+    conflict.receivedMethod,
+    conflict.receivedOriginalTrid,
+  ]).slice(0, 200);
+}
+
+/**
+ * Best local candidate for a movement, used to keep a conflict ATTRIBUTED when
+ * that is provable: first the attempt that already owns the `trid` (the settled
+ * money record), then the ordinary identifier/reference correlation.
+ */
+async function findCandidateAttemptTx(tx: DbOrTx, event: NormalizedEupagoEvent) {
+  const [byMovement] = await tx
+    .select()
+    .from(paymentAttempts)
+    .where(
+      and(
+        eq(paymentAttempts.provider, EUPAGO_PROVIDER_ID),
+        eq(paymentAttempts.providerTransactionId, event.trid)
+      )
+    )
+    .limit(1);
+  if (byMovement) return byMovement;
+  return correlateAttempt(tx, event);
+}
+
 /**
  * Full inbound webhook pipeline: verify → normalize → (one tx) claim → settle →
  * processed → (post-commit) notify.
- */
-export async function processEupagoWebhook(
+ */export async function processEupagoWebhook(
   input: ProcessWebhookInput
 ): Promise<ProcessWebhookResult> {
   const key = input.webhookKey ?? await resolveEupagoWebhookKey();
@@ -175,6 +290,38 @@ export async function processEupagoWebhook(
     eventType: `${event.kind}.${event.status.toLowerCase()}`,
     metadata: buildTrustedMetadata(event),
   });
+
+  // ── C2 — a CONCLUDED delivery must not silently change meaning. ──────────
+  //
+  // The `trid` is the delivery identity. When it is already on record AND the
+  // previous delivery concluded financially (`processed` or `anomaly`), a
+  // redelivery whose authenticated payload differs in a field we PERSISTED
+  // (status/kind, amount, currency, method, original trid) is NOT the same
+  // statement and can never be answered as a plain duplicate: that would hide a
+  // divergence between what was concluded and what the provider now says.
+  //
+  // `ignored` deliveries are deliberately EXCLUDED: they concluded nothing about
+  // money, and their re-evaluation paths (bounded budget grant / the audited
+  // B.3.5.2 refund recovery) must keep working unchanged.
+  if (
+    registration.duplicate &&
+    (registration.event.status === "processed" || isAnomalyWebhookEvent(registration.event))
+  ) {
+    const conflict = describePayloadConflict(registration.event, event);
+    if (conflict) {
+      const fingerprint = conflictFingerprint(conflict);
+      const recorded =
+        typeof registration.event.metadata?.eventConflict === "string"
+          ? registration.event.metadata.eventConflict
+          : null;
+      if (recorded !== fingerprint) {
+        return escalateConcludedConflict(registration.event, event, conflict, fingerprint);
+      }
+      // This exact divergence is already recorded: answer with the anomaly that
+      // exists (never a plain duplicate, never a second anomaly row).
+      return { outcome: "payment_anomaly", code: anomalyCodeOf(registration.event), trid: event.trid };
+    }
+  }
 
   if (registration.duplicate && registration.event.status === "processed") {
     return { outcome: "duplicate", trid: event.trid };
@@ -205,17 +352,27 @@ export async function processEupagoWebhook(
         extraGrantedAttempts: recoveryGrants(registration.event),
       });
       if (!claimed) {
-        if (registration.event.status === "processed") {
-          return { outcome: "duplicate", code: "CLAIM_BUDGET_EXHAUSTED", notificationId: null } satisfies SettlementStepResult;
+        // C8 — NEVER answer from the pre-claim snapshot: the delivery that won
+        // the claim may have concluded the event while this one was waiting for
+        // the row lock (or the budget may simply be exhausted). Re-read the row
+        // that REALLY exists and answer coherently with it.
+        const current = (await getWebhookEvent(registration.event.id, tx)) ?? registration.event;
+        if (current.status === "processed") {
+          return { outcome: "duplicate", code: "CONSUMED_BY_CONCURRENT_DELIVERY", notificationId: null } satisfies SettlementStepResult;
         }
-        if (isAnomalyWebhookEvent(registration.event)) {
+        if (isAnomalyWebhookEvent(current)) {
           // Terminal for the retry machinery: the money evidence is already
           // recorded and only a human can resolve it.
           return {
             outcome: "payment_anomaly",
-            code: typeof registration.event.metadata?.anomalyCode === "string" ? registration.event.metadata.anomalyCode : "PAYMENT_ANOMALY",
+            code: anomalyCodeOf(current),
             notificationId: null,
           } satisfies SettlementStepResult;
+        }
+        if (current.status === "ignored") {
+          // Already reasoned about and dismissed: answering `deferred` here would
+          // make the provider retry a delivery we have concluded on.
+          return { outcome: "mismatch", code: current.lastError ?? "IGNORED", notificationId: null } satisfies SettlementStepResult;
         }
         return { outcome: "deferred", code: "CLAIM_BUDGET_EXHAUSTED", notificationId: null } satisfies SettlementStepResult;
       }
@@ -255,9 +412,257 @@ export async function processEupagoWebhook(
   }
 }
 
+/**
+ * C2 — record a CONFLICT between a concluded delivery and its authenticated
+ * redelivery, in ONE transaction: durable anomaly (when the movement can be
+ * attributed to a local attempt/payment) + audit + event escalation.
+ *
+ * Nothing financial is settled, no stock moves, no order state changes, no
+ * refund is issued and no provider is called. The original webhook evidence
+ * (payload hash, event type, metadata, processed_at) is preserved — this is an
+ * escalation, not a replay.
+ */
+async function escalateConcludedConflict(
+  persisted: { id: number; eventType: string | null; metadata: Record<string, string | number | boolean> | null },
+  event: NormalizedEupagoEvent,
+  conflict: PayloadConflict,
+  fingerprint: string
+): Promise<ProcessWebhookResult> {
+  const code = "PROVIDER_EVENT_CONFLICT" satisfies SettlementAnomalyCode;
+
+  await db.transaction(async (tx) => {
+    await assertEupagoLedgerReady(tx);
+
+    // The conditional escalation is the arbitration point: only the delivery that
+    // MOVES the event to `anomaly` for this fingerprint writes the evidence, so a
+    // redelivery (or a concurrent twin) can never duplicate the anomaly/audit.
+    const escalated = await escalateWebhookEventConflict(persisted.id, code, fingerprint, tx);
+    if (!escalated) return;
+
+    const candidate = await findCandidateAttemptTx(tx, event);
+    const details = {
+      provider: EUPAGO_PROVIDER_ID,
+      trid: event.trid,
+      code,
+      anomalyCode: code,
+      conflictFields: conflict.fields,
+      persistedEventType: conflict.persistedEventType,
+      receivedEventType: conflict.receivedEventType,
+      persistedAmountCents: conflict.persistedAmountCents,
+      receivedAmountCents: conflict.receivedAmountCents,
+      persistedCurrency: conflict.persistedCurrency,
+      receivedCurrency: conflict.receivedCurrency,
+      persistedMethod: conflict.persistedMethod,
+      receivedMethod: conflict.receivedMethod,
+      persistedOriginalTrid: conflict.persistedOriginalTrid,
+      receivedOriginalTrid: conflict.receivedOriginalTrid,
+      settled: false,
+    };
+
+    if (candidate) {
+      const anomaly = await recordSettlementAnomalyTx(tx, {
+        orderId: candidate.orderId,
+        paymentId: candidate.paymentId ?? null,
+        code,
+        amountCents: event.amountCents,
+        currency: event.currency ?? candidate.currency,
+        movementId: event.trid,
+      });
+      await createAuditLogTx(tx, {
+        userId: null,
+        action: "payment.provider_anomaly_recorded",
+        entity: "payment_attempt",
+        entityId: candidate.id,
+        details: {
+          ...details,
+          orderId: candidate.orderId,
+          paymentId: candidate.paymentId ?? null,
+          attemptId: candidate.id,
+          attemptState: candidate.status,
+          anomalyId: anomaly?.id ?? null,
+        },
+      });
+    } else {
+      // No local candidate can be proven: the conflict is still recorded durably
+      // (event + audit) instead of being acknowledged as a duplicate.
+      await createAuditLogTx(tx, {
+        userId: null,
+        action: "payment.provider_event_conflict",
+        entity: "provider_webhook_event",
+        entityId: persisted.id,
+        details: { ...details, attributed: false },
+      });
+    }
+
+  });
+
+  return { outcome: "payment_anomaly", code, trid: event.trid };
+}
+
 // ─── Payment movements ────────────────────────────────────
 
+type PaymentAttemptRow = typeof paymentAttempts.$inferSelect;
+
+/**
+ * HIGH-1(c) — an authenticated movement that correlates to an attempt ALREADY
+ * settled with a DIFFERENT trid is evidence of a second charge. It is recorded
+ * durably (its own trid is kept outside the unique (provider, transaction)
+ * constraint of the attempt row) and an operator must reconcile/refund it.
+ */
+async function recordSecondMovementTx(
+  tx: DbOrTx,
+  attempt: PaymentAttemptRow,
+  event: NormalizedEupagoEvent
+): Promise<SettlementStepResult> {
+  const anomalyCode: SettlementAnomalyCode = "PAYMENT_NOT_COHERENT";
+  const anomaly = await recordSettlementAnomalyTx(tx, {
+    orderId: attempt.orderId,
+    paymentId: attempt.paymentId ?? null,
+    code: anomalyCode,
+    amountCents: event.amountCents,
+    currency: event.currency ?? attempt.currency,
+    movementId: event.trid,
+  });
+  await createAuditLogTx(tx, {
+    userId: null,
+    action: "payment.provider_anomaly_recorded",
+    entity: "payment_attempt",
+    entityId: attempt.id,
+    details: {
+      orderId: attempt.orderId,
+      paymentId: attempt.paymentId ?? null,
+      provider: EUPAGO_PROVIDER_ID,
+      amountCents: event.amountCents,
+      currency: event.currency ?? attempt.currency,
+      trid: event.trid,
+      code: "PROVIDER_TRANSACTION_CONFLICT",
+      anomalyCode,
+      anomalyId: anomaly?.id ?? null,
+      settledTrid: attempt.providerTransactionId,
+      previousState: attempt.status,
+      settled: true,
+    },
+  });
+  return {
+    outcome: "payment_anomaly",
+    code: `${anomalyCode}:PROVIDER_TRANSACTION_CONFLICT`,
+    notificationId: null,
+  };
+}
+
+/**
+ * C1 — classify an authenticated, amount-matched `Paid` movement against the
+ * attempt state that REALLY exists, after the conditional write lost.
+ *
+ *   (A) settled with the SAME trid      → legitimate idempotent duplicate;
+ *   (B) settled with a DIFFERENT trid   → second movement → financial anomaly;
+ *   (C) terminal non-paid (expired / cancelled / failed) + authenticated `Paid`
+ *       → money arrived for a movement the provider already closed → LATE_PAID
+ *       anomaly, NEVER a silent duplicate (no reactivation, no stock, no refund);
+ *   (D) anything else (still pending / unknown) → fail closed and let the
+ *       provider's bounded retry re-evaluate; nothing is invented.
+ *
+ * The terminal case is also the deterministic CAS-loss case: `FOR UPDATE` means
+ * a pending row cannot change underneath us, so a lost CAS can only mean the row
+ * was NOT pending. The caller re-reads the row before calling this, so the
+ * classification never relies on a stale snapshot.
+ */
+async function classifyPaidAgainstAttempt(
+  tx: DbOrTx,
+  attempt: PaymentAttemptRow,
+  event: NormalizedEupagoEvent
+): Promise<SettlementStepResult> {
+  if (attempt.status === "paid") {
+    if (attempt.providerTransactionId === event.trid) return { outcome: "duplicate" };
+    return recordSecondMovementTx(tx, attempt, event);
+  }
+
+  if (attempt.status === "expired" || attempt.status === "cancelled" || attempt.status === "failed") {
+    const reason = `LATE_PAID:ATTEMPT_${attempt.status.toUpperCase()}`;
+    const anomaly = await recordSettlementAnomalyTx(tx, {
+      orderId: attempt.orderId,
+      paymentId: attempt.paymentId ?? null,
+      code: "LATE_PAID",
+      amountCents: event.amountCents,
+      currency: event.currency ?? attempt.currency,
+      movementId: event.trid,
+    });
+    await createAuditLogTx(tx, {
+      userId: null,
+      action: "payment.provider_anomaly_recorded",
+      entity: "payment_attempt",
+      entityId: attempt.id,
+      details: {
+        orderId: attempt.orderId,
+        paymentId: attempt.paymentId ?? null,
+        provider: EUPAGO_PROVIDER_ID,
+        amountCents: event.amountCents,
+        currency: event.currency ?? attempt.currency,
+        trid: event.trid,
+        code: reason,
+        anomalyCode: "LATE_PAID",
+        anomalyId: anomaly?.id ?? null,
+        previousState: attempt.status,
+        previouslyRecordedTrid: attempt.providerTransactionId,
+        settled: false,
+      },
+    });
+    return { outcome: "payment_anomaly", code: reason, notificationId: null };
+  }
+
+  return { outcome: "deferred", code: "ATTEMPT_STATE_UNSETTLED", notificationId: null };
+}
+
+/**
+ * C3 — an AUTHENTICATED movement that claims money (a `Paid` payment or a refund
+ * callback) but CONTRADICTS the local record. It is never settled, never
+ * confirmed, never discounted and never refunded automatically; instead the
+ * specific contradiction becomes a durable, auditable anomaly bound to the local
+ * candidate so an operator can act on it.
+ */
+async function recordClaimedMovementConflictTx(
+  tx: DbOrTx,
+  attempt: PaymentAttemptRow,
+  event: NormalizedEupagoEvent,
+  reasonCode: SettlementAnomalyCode,
+  candidateSource: string
+): Promise<void> {
+  const anomaly = await recordSettlementAnomalyTx(tx, {
+    orderId: attempt.orderId,
+    paymentId: attempt.paymentId ?? null,
+    code: reasonCode,
+    amountCents: event.amountCents,
+    currency: event.currency ?? attempt.currency,
+    movementId: event.trid,
+  });
+  await createAuditLogTx(tx, {
+    userId: null,
+    action: "payment.provider_anomaly_recorded",
+    entity: "payment_attempt",
+    entityId: attempt.id,
+    details: {
+      orderId: attempt.orderId,
+      paymentId: attempt.paymentId ?? null,
+      provider: EUPAGO_PROVIDER_ID,
+      amountCents: event.amountCents,
+      currency: event.currency ?? attempt.currency,
+      trid: event.trid,
+      code: reasonCode,
+      anomalyCode: reasonCode,
+      anomalyId: anomaly?.id ?? null,
+      previousState: attempt.status,
+      candidateSource,
+      settled: false,
+    },
+  });
+}
+
 async function settlePaymentEvent(tx: DbOrTx, event: NormalizedEupagoEvent): Promise<SettlementStepResult> {
+  // C3 — only a movement that CLAIMS MONEY can raise a financial anomaly. A
+  // contradictory Expired/Cancel/Error carries no money and keeps its existing
+  // (ignored/deferred) semantics.
+  const claimsMoney = event.status === "Paid";
+
   const correlated = await correlateAttempt(tx, event);
   if (!correlated) {
     // H2 — DECIDE BETWEEN "TERMINALLY IGNORED" AND "RE-EVALUABLE".
@@ -272,6 +677,32 @@ async function settlePaymentEvent(tx: DbOrTx, event: NormalizedEupagoEvent): Pro
     // correlation is TRANSIENT, so the event is deferred rather than ignored;
     // the provider's redelivery of the same trid re-evaluates it against the
     // local state as it exists then. Nothing is created, nothing is called.
+    // C3 — DEFINITIVE non-correlation of a money-claiming movement. There is no
+    // local candidate to attribute a reconciliation row to (the observation table
+    // requires an order), so the delivery is recorded durably in the AUDIT TRAIL
+    // and stays visible through the existing operational surfaces (dashboard
+    // `IGNORED_PAYMENT_WEBHOOK` + the admin webhook-anomaly list with the
+    // `ignored_payment` filter). Nothing is created, nothing is called.
+    const transientAbsence = !event.identifier && !!event.reference;
+    if (claimsMoney && !transientAbsence) {
+      await createAuditLogTx(tx, {
+        userId: null,
+        action: "payment.provider_unattributed_movement",
+        entity: "provider_webhook_event",
+        details: {
+          provider: EUPAGO_PROVIDER_ID,
+          trid: event.trid,
+          amountCents: event.amountCents,
+          currency: event.currency,
+          method: event.method,
+          identifier: event.identifier,
+          reference: event.reference,
+          reason: "ATTEMPT_NOT_FOUND",
+          attributed: false,
+          settled: false,
+        },
+      });
+    }
     if (event.identifier) return { outcome: "mismatch", code: "ATTEMPT_NOT_FOUND" };
     if (event.reference) return { outcome: "deferred", code: "DEFERRED_REFERENCE_NOT_YET_PERSISTED" };
     return { outcome: "mismatch", code: "ATTEMPT_NOT_FOUND" };
@@ -290,15 +721,28 @@ async function settlePaymentEvent(tx: DbOrTx, event: NormalizedEupagoEvent): Pro
   // Strict correlation before ANY financial effect. When the provider supplies
   // both local correlation fields, they must both point to the SAME attempt;
   // never fall back from a mismatched identifier to a reference (or vice versa).
+  // C3 — every branch below refuses the settlement (no confirmation, no stock,
+  // no refund, no `processed`). When the movement CLAIMS MONEY the refusal is
+  // additionally made DURABLE as a reconciliation anomaly bound to this
+  // candidate, so it cannot vanish as an `ignored` row with only a `lastError`.
   if (event.identifier && attempt.providerIdentifier !== event.identifier) {
+    if (claimsMoney) await recordClaimedMovementConflictTx(tx, attempt, event, "IDENTIFIER_MISMATCH", "identifier");
     return { outcome: "mismatch", code: "IDENTIFIER_MISMATCH" };
   }
   if (event.reference && attempt.providerReference !== event.reference) {
+    if (claimsMoney) await recordClaimedMovementConflictTx(tx, attempt, event, "REFERENCE_MISMATCH", "reference");
     return { outcome: "mismatch", code: "REFERENCE_MISMATCH" };
   }
-  if (!event.method) return { outcome: "mismatch", code: "METHOD_MISSING" };
-  if (attempt.method !== event.method) return { outcome: "mismatch", code: "METHOD_MISMATCH" };
+  if (!event.method) {
+    if (claimsMoney) await recordClaimedMovementConflictTx(tx, attempt, event, "METHOD_MISSING", "method");
+    return { outcome: "mismatch", code: "METHOD_MISSING" };
+  }
+  if (attempt.method !== event.method) {
+    if (claimsMoney) await recordClaimedMovementConflictTx(tx, attempt, event, "METHOD_MISMATCH", "method");
+    return { outcome: "mismatch", code: "METHOD_MISMATCH" };
+  }
   if (!event.currency || event.currency !== attempt.currency) {
+    if (claimsMoney) await recordClaimedMovementConflictTx(tx, attempt, event, "CURRENCY_MISMATCH", "currency");
     return { outcome: "mismatch", code: "CURRENCY_MISMATCH" };
   }
 
@@ -350,50 +794,17 @@ async function settlePaymentEvent(tx: DbOrTx, event: NormalizedEupagoEvent): Pro
 
   // Paid: the amount must match EXACTLY, in integer cents.
   if (event.amountCents === null || event.amountCents !== attempt.amountCents) {
+    if (claimsMoney) await recordClaimedMovementConflictTx(tx, attempt, event, "AMOUNT_MISMATCH", "amount");
     return { outcome: "mismatch", code: "AMOUNT_MISMATCH" };
   }
 
-  if (attempt.status === "paid") {
-    // Same fund movement re-delivered after settlement → idempotent no-op.
-    if (attempt.providerTransactionId === event.trid) return { outcome: "duplicate" };
-
-    // HIGH-1(c) — a DIFFERENT, authenticated movement correlated to an attempt
-    // that is already settled is EVIDENCE OF A SECOND CHARGE. It is never
-    // dismissed as a technical divergence: the movement is recorded durably (its
-    // own trid is kept, outside the unique (provider, transaction) constraint of
-    // the attempt row) and the operator must reconcile/refund it.
-    const anomalyCode: SettlementAnomalyCode = "PAYMENT_NOT_COHERENT";
-    const anomaly = await recordSettlementAnomalyTx(tx, {
-      orderId: attempt.orderId,
-      paymentId: attempt.paymentId ?? null,
-      code: anomalyCode,
-      amountCents: event.amountCents,
-      currency: event.currency,
-      movementId: event.trid,
-    });
-    await createAuditLogTx(tx, {
-      userId: null,
-      action: "payment.provider_anomaly_recorded",
-      entity: "payment_attempt",
-      entityId: attempt.id,
-      details: {
-        orderId: attempt.orderId,
-        paymentId: attempt.paymentId ?? null,
-        provider: EUPAGO_PROVIDER_ID,
-        amountCents: event.amountCents,
-        currency: event.currency,
-        trid: event.trid,
-        code: "PROVIDER_TRANSACTION_CONFLICT",
-        anomalyCode,
-        anomalyId: anomaly?.id ?? null,
-        settledTrid: attempt.providerTransactionId,
-      },
-    });
-    return {
-      outcome: "payment_anomaly",
-      code: `${anomalyCode}:PROVIDER_TRANSACTION_CONFLICT`,
-      notificationId: null,
-    };
+  // C1 — an attempt that is ALREADY settled (same trid → idempotent duplicate;
+  // different trid → second movement) is classified before the CAS, and the CAS
+  // loser is classified through the SAME function against the state it really
+  // has. That is what makes "authenticated Paid for a terminal attempt" a
+  // recorded anomaly instead of a silent duplicate.
+  if (attempt.status !== "pending") {
+    return classifyPaidAgainstAttempt(tx, attempt, event);
   }
 
   // Fenced compare-and-swap: the attempt must still be `pending` AND still be at
@@ -420,8 +831,16 @@ async function settlePaymentEvent(tx: DbOrTx, event: NormalizedEupagoEvent): Pro
     .returning();
 
   if (!claimedAttempt) {
-    // Another delivery already settled this attempt — idempotent no-op.
-    return { outcome: "duplicate" };
+    // C1(D) — the CAS lost. NEVER assume another delivery settled this attempt:
+    // re-read the row that really exists and classify the movement against THAT
+    // state (same trid → duplicate; different trid → anomaly; terminal non-paid
+    // + authenticated Paid → LATE_PAID anomaly; anything else → deferred).
+    const [currentAttempt] = await tx
+      .select()
+      .from(paymentAttempts)
+      .where(eq(paymentAttempts.id, attempt.id))
+      .limit(1);
+    return classifyPaidAgainstAttempt(tx, currentAttempt ?? attempt, event);
   }
 
   // Canonical, centralized confirmation — same transaction. It settles EXACTLY
@@ -557,9 +976,33 @@ async function settleRefundEvent(tx: DbOrTx, event: NormalizedEupagoEvent): Prom
       )
     )
     .limit(1);
-  if (!paymentAttempt) return { outcome: "mismatch", code: "ORIGINAL_PAYMENT_NOT_FOUND" };
+  if (!paymentAttempt) {
+    // C3 — a refund callback whose ORIGINAL movement is unknown cannot be
+    // attributed to an order (the observation table requires one), so it is
+    // recorded durably in the audit trail and stays visible through the existing
+    // refund surfaces (dashboard refund mismatch counter + admin
+    // `ignored_refund` webhook list). No money is moved.
+    await createAuditLogTx(tx, {
+      userId: null,
+      action: "payment.provider_unattributed_movement",
+      entity: "provider_webhook_event",
+      details: {
+        provider: EUPAGO_PROVIDER_ID,
+        kind: "refund",
+        trid: event.trid,
+        originalTrid,
+        amountCents: event.amountCents,
+        currency: event.currency,
+        reason: "ORIGINAL_PAYMENT_NOT_FOUND",
+        attributed: false,
+        settled: false,
+      },
+    });
+    return { outcome: "mismatch", code: "ORIGINAL_PAYMENT_NOT_FOUND" };
+  }
 
   if (event.amountCents === null || event.amountCents <= 0) {
+    await recordClaimedMovementConflictTx(tx, paymentAttempt, event, "AMOUNT_MISSING", "original_trid");
     return { outcome: "mismatch", code: "AMOUNT_MISSING" };
   }
 
@@ -606,7 +1049,15 @@ async function settleRefundEvent(tx: DbOrTx, event: NormalizedEupagoEvent): Prom
       r.amountCents === event.amountCents &&
       r.currency === event.currency
   );
-  if (!target) return { outcome: "ignored", code: "REFUND_ATTEMPT_NOT_FOUND" };
+  if (!target) {
+    // C3 — an authenticated refund callback that correlates to a payment but to NO
+    // matching refund attempt. Its durable anomaly keeps the refund VISIBLE for
+    // the operator; the event itself stays `ignored / REFUND_ATTEMPT_NOT_FOUND`
+    // because that state is exactly what the audited B.3.5.2 refund-recovery path
+    // requires (no re-send, no auto-settlement).
+    await recordClaimedMovementConflictTx(tx, paymentAttempt, event, "REFUND_ATTEMPT_NOT_FOUND", "original_trid");
+    return { outcome: "ignored", code: "REFUND_ATTEMPT_NOT_FOUND" };
+  }
 
   // The B.3.5 balance trigger re-verifies the over-refund invariant on this
   // UPDATE. The predicate also fences against unrelated state transitions.

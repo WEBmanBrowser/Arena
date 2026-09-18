@@ -119,6 +119,11 @@ CREATE TRIGGER "payment_attempts_identity_guard"
 --   • `recorded_by`  → becomes NULLABLE: a system-observed anomaly has no human
 --                      operator behind it (operator-ingested rows keep their id).
 ALTER TABLE "reconciliation_observations" ADD COLUMN "payment_id" integer;--> statement-breakpoint
+-- C6 — explicit CLASSIFICATION of a resolution (REFUNDED / MANUALLY_RECONCILED /
+-- FALSE_POSITIVE / ACCEPTED_EXCEPTION). Nullable so that any pre-existing resolved
+-- row keeps its note, actor and timestamp untouched; NEW resolutions must supply a
+-- code (validated in `resolveReconciliationAnomaly`).
+ALTER TABLE "reconciliation_observations" ADD COLUMN "resolution_code" varchar(30);--> statement-breakpoint
 ALTER TABLE "reconciliation_observations" ALTER COLUMN "recorded_by" DROP NOT NULL;--> statement-breakpoint
 CREATE INDEX "reconciliation_observations_payment_idx" ON "reconciliation_observations" USING btree ("payment_id");--> statement-breakpoint
 ALTER TABLE "reconciliation_observations" ADD CONSTRAINT "reconciliation_observations_payment_id_payments_id_fk" FOREIGN KEY ("payment_id") REFERENCES "public"."payments"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint

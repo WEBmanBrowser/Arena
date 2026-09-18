@@ -2,11 +2,14 @@ import { NextRequest, NextResponse } from "next/server";
 import { getCurrentUser, isManager } from "@/lib/auth";
 import { csrfGuard } from "@/lib/csrf";
 import { ReconciliationError, resolveReconciliationAnomaly } from "@/lib/reconciliation";
+import type { ReconciliationResolutionCode } from "@/db/schema";
 
 /**
  * Explicit, audited resolution of a reconciliation anomaly
- * (manager+ only, POST-only). Anomalies are never auto-fixed; an
- * accountable resolution note is mandatory.
+ * (manager+ only, POST-only). Anomalies are never auto-fixed; the caller must
+ * supply BOTH an accountable note and an explicit CLASSIFICATION
+ * (`code`: REFUNDED / MANUALLY_RECONCILED / FALSE_POSITIVE / ACCEPTED_EXCEPTION).
+ * `REFUNDED` is only accepted when a succeeded refund exists for that money.
  */
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   // CSRF — state-changing admin action requires same-origin (project standard).
@@ -32,7 +35,8 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     const observation = await resolveReconciliationAnomaly(
       observationId,
       user.id,
-      typeof body.note === "string" ? body.note : ""
+      typeof body.note === "string" ? body.note : "",
+      (typeof body.code === "string" ? body.code : "") as ReconciliationResolutionCode
     );
     return NextResponse.json({ observation });
   } catch (e) {

@@ -329,6 +329,57 @@ export async function markWebhookEventAnomaly(
   return row ?? null;
 }
 
+/**
+ * PAYMENT P0 (C2) — FAIL-CLOSED ESCALATION of an ALREADY-CONCLUDED delivery.
+ *
+ * The SAME `trid` reappeared with a SEMANTICALLY DIFFERENT authenticated payload
+ * after the previous delivery had already concluded (settled / anomaly). The
+ * conclusion on record and the new delivery are NOT interchangeable, so the
+ * delivery can neither be replayed nor acknowledged as a duplicate.
+ *
+ * The event is escalated to `anomaly` — terminal for the retry machinery, never
+ * `processed` again, and explicit for operators — while the original evidence
+ * (payload hash, event type, metadata, `processed_at`) is preserved: this is an
+ * escalation of a concluded delivery, not a re-claim and not a replay.
+ *
+ * Predicate: the row must exist AND must not already carry this exact conflict
+ * fingerprint — a redelivery of the same divergent payload is a no-op (returns
+ * null), while a DIFFERENT divergence for the same trid is recorded as a new
+ * occurrence. `attempts` is NOT incremented (no settlement work is consumed) and
+ * no financial value is passed by the caller.
+ */
+export async function escalateWebhookEventConflict(
+  id: number,
+  code: string,
+  /** Fingerprint of the conflicting payload; makes the escalation idempotent. */
+  conflictFingerprint: string,
+  executor: DbOrTx = db
+): Promise<WebhookEventRecord | null> {
+  const now = new Date();
+  const safeCode = sanitizeErrorMessage(code, 80);
+  const safeFingerprint = conflictFingerprint.slice(0, 200);
+  // Idempotent per CONFLICT FINGERPRINT: a redelivery of the same divergent
+  // payload changes nothing (returns null), while a DIFFERENT divergence for the
+  // same trid is recorded as a new occurrence instead of being absorbed.
+  const [row] = await executor
+    .update(providerWebhookEvents)
+    .set({
+      status: "anomaly",
+      lastError: safeCode,
+      updatedAt: now,
+      metadata: sql`coalesce(${providerWebhookEvents.metadata}, '{}'::jsonb)
+        || ${JSON.stringify({ anomalyCode: safeCode, eventConflict: safeFingerprint })}::jsonb`,
+    })
+    .where(
+      and(
+        eq(providerWebhookEvents.id, id),
+        sql`coalesce(${providerWebhookEvents.metadata} ->> 'eventConflict', '') IS DISTINCT FROM ${safeFingerprint}`
+      )
+    )
+    .returning();
+  return row ?? null;
+}
+
 /** True when an event carries a recorded financial anomaly requiring an operator. */
 export function isAnomalyWebhookEvent(
   event: Pick<WebhookEventRecord, "status" | "metadata" | "lastError">

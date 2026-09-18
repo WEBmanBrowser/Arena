@@ -24,8 +24,12 @@
  *     discounted, no refund is issued and no provider is called.
  *   • The anomaly keeps the CANONICAL PAYMENT visible, so a later refund stays
  *     bound to the right payment and therefore to the right `originalTrid`.
- *   • Deduplicated by (provider, providerReference = trid): a redelivery of the
- *     same movement never creates a second anomaly row.
+ *   • Deduplicated per OCCURRENCE, not per movement (C7): a redelivery of the
+ *     SAME occurrence (same movement, same anomaly code, still open, written by
+ *     the system) returns the existing row, while a NEW relevant anomaly for a
+ *     movement whose previous observation is already RESOLVED — or was recorded
+ *     by a human — is recorded as its own row instead of being swallowed by the
+ *     (provider, provider_reference) unique index. See `recordSettlementAnomalyTx`.
  */
 
 import { db } from "@/db";
@@ -40,7 +44,32 @@ import type { DbOrTx } from "@/lib/stock-locks";
 import { EUPAGO_PROVIDER_ID } from "@/lib/providers/eupago/config";
 
 /** Anomaly codes produced by the settlement pipeline itself. */
-export const SETTLEMENT_ANOMALY_CODES = ["DOUBLE_CHARGE", "LATE_PAID", "PAYMENT_NOT_COHERENT"] as const;
+export const SETTLEMENT_ANOMALY_CODES = [
+  "DOUBLE_CHARGE",
+  "LATE_PAID",
+  "PAYMENT_NOT_COHERENT",
+  /**
+   * C2 — the same `trid` reappeared with a semantically different authenticated
+   * payload: the previous conclusion is not interchangeable with this delivery.
+   */
+  "PROVIDER_EVENT_CONFLICT",
+  /**
+   * C3 — AUTHENTICATED movements that contradicted the local record and were
+   * therefore never settled. The SPECIFIC contradiction is preserved (no generic
+   * code) so the operator knows exactly what to verify, and the movement keeps
+   * its `trid` as the observation reference.
+   */
+  "AMOUNT_MISMATCH",
+  "CURRENCY_MISMATCH",
+  "METHOD_MISMATCH",
+  "METHOD_MISSING",
+  "IDENTIFIER_MISMATCH",
+  "REFERENCE_MISMATCH",
+  "ATTEMPT_NOT_FOUND",
+  "AMOUNT_MISSING",
+  "REFUND_ATTEMPT_NOT_FOUND",
+  "ORIGINAL_PAYMENT_NOT_FOUND",
+] as const;
 export type SettlementAnomalyCode = (typeof SETTLEMENT_ANOMALY_CODES)[number];
 
 export interface RecordAnomalyInput {
@@ -74,62 +103,117 @@ async function internalFinancialState(
   return { paidCents: paidRow?.total ?? 0, refundedCents: refundedRow?.total ?? 0 };
 }
 
+/** Upper bound on occurrence suffixes tried for one movement (bounded work). */
+const MAX_ANOMALY_OCCURRENCES = 5;
+
+/**
+ * Reference of the Nth occurrence of an anomaly for the same movement.
+ *
+ * Occurrence 1 keeps the movement id verbatim (the historical and documented
+ * form: `provider_reference = trid`). A NEW occurrence of an anomaly for a
+ * movement that already has a (resolved/human/other-code) observation is
+ * recorded under `#2`, `#3`, … so the unique index can never silently swallow
+ * it (C7).
+ */
+function occurrenceReference(base: string, occurrence: number): string {
+  if (occurrence <= 1) return base;
+  const suffix = `#${occurrence}`;
+  return `${base.slice(0, Math.max(1, 255 - suffix.length))}${suffix}`;
+}
+
+/**
+ * Is the persisted row the SAME anomaly occurrence as the one being recorded?
+ *
+ * Only an OPEN row written by the SYSTEM for the SAME order/payment with the
+ * SAME code qualifies. A resolved row, a row with a different code and a row
+ * ingested by a human (`recordedBy` set) are all DIFFERENT occurrences: the new
+ * financial anomaly must be recorded instead of being absorbed by the old one.
+ */
+function isSameOccurrence(
+  existing: typeof reconciliationObservations.$inferSelect,
+  input: RecordAnomalyInput
+): boolean {
+  return (
+    existing.status === "open" &&
+    existing.recordedBy === null &&
+    existing.anomalyCode === input.code &&
+    existing.orderId === input.orderId &&
+    existing.paymentId === (input.paymentId ?? null)
+  );
+}
+
 /**
  * Write ONE durable anomaly for an authenticated money movement.
  *
- * Idempotent by (provider, trid): if the anomaly already exists the existing row
- * is returned instead of creating a duplicate (the DB also enforces this with a
- * unique index, so concurrent deliveries cannot double-record either).
+ * Idempotent per OCCURRENCE (C7): a redelivery / concurrent delivery of the SAME
+ * anomaly returns the existing row without writing a second one (the DB unique
+ * index on (provider, provider_reference) arbitrates concurrent inserts, so the
+ * insert is retried under the next occurrence suffix when needed). A NEW anomaly
+ * for a movement whose previous observation is already resolved — or was written
+ * by a human operator — is NOT swallowed: it is recorded as a distinct
+ * occurrence (`#2`, `#3`, …) and therefore stays visible to the operator.
+ *
+ * Returns null only when the anomaly could not be recorded within the bounded
+ * occurrence budget; the caller still marks the webhook event as anomalous, so
+ * the delivery itself is never silently dropped.
  */
 export async function recordSettlementAnomalyTx(
   tx: DbOrTx,
   input: RecordAnomalyInput
 ): Promise<typeof reconciliationObservations.$inferSelect | null> {
   const internal = await internalFinancialState(tx, input.orderId);
-  const reference = input.movementId.trim();
-  if (reference.length === 0 || reference.length > 255) return null;
+  const base = input.movementId.trim();
+  if (base.length === 0 || base.length > 255) return null;
 
-  const inserted = await tx
-    .insert(reconciliationObservations)
-    .values({
-      orderId: input.orderId,
-      paymentId: input.paymentId,
-      provider: EUPAGO_PROVIDER_ID,
-      providerReference: reference,
-      observedPaidCents: input.amountCents != null && input.amountCents > 0 ? input.amountCents : 0,
-      observedRefundedCents: 0,
-      currency: input.currency ?? "EUR",
-      observedAt: input.observedAt ?? new Date(),
-      expectedPaidCents: internal.paidCents,
-      internalRefundedCents: internal.refundedCents,
-      anomalyCode: input.code,
-      status: "open",
-      // System observation: there is no human operator behind a double charge.
-      recordedBy: null,
-    })
-    .onConflictDoNothing({
-      // The dedupe index is PARTIAL (`provider_reference IS NOT NULL`), so the
-      // arbitration target has to carry the same predicate — inference without it
-      // fails with 42P10 (which would surface as a 500 instead of an anomaly).
-      target: [reconciliationObservations.provider, reconciliationObservations.providerReference],
-      where: sql`provider_reference IS NOT NULL`,
-    })
-    .returning();
+  for (let occurrence = 1; occurrence <= MAX_ANOMALY_OCCURRENCES; occurrence += 1) {
+    const reference = occurrenceReference(base, occurrence);
+    const inserted = await tx
+      .insert(reconciliationObservations)
+      .values({
+        orderId: input.orderId,
+        paymentId: input.paymentId,
+        provider: EUPAGO_PROVIDER_ID,
+        providerReference: reference,
+        observedPaidCents: input.amountCents != null && input.amountCents > 0 ? input.amountCents : 0,
+        observedRefundedCents: 0,
+        currency: input.currency ?? "EUR",
+        observedAt: input.observedAt ?? new Date(),
+        expectedPaidCents: internal.paidCents,
+        internalRefundedCents: internal.refundedCents,
+        anomalyCode: input.code,
+        status: "open",
+        // System observation: there is no human operator behind a double charge.
+        recordedBy: null,
+      })
+      .onConflictDoNothing({
+        // The dedupe index is PARTIAL (`provider_reference IS NOT NULL`), so the
+        // arbitration target has to carry the same predicate — inference without it
+        // fails with 42P10 (which would surface as a 500 instead of an anomaly).
+        target: [reconciliationObservations.provider, reconciliationObservations.providerReference],
+        where: sql`provider_reference IS NOT NULL`,
+      })
+      .returning();
 
-  if (inserted.length > 0) return inserted[0];
+    if (inserted.length > 0) return inserted[0];
 
-  // Already recorded (redelivery / concurrent delivery) — never duplicate.
-  const [existing] = await tx
-    .select()
-    .from(reconciliationObservations)
-    .where(
-      and(
-        eq(reconciliationObservations.provider, EUPAGO_PROVIDER_ID),
-        eq(reconciliationObservations.providerReference, reference)
+    // The reference is taken. Re-read it: same occurrence → idempotent return;
+    // anything else → this movement needs its NEXT occurrence row.
+    const [existing] = await tx
+      .select()
+      .from(reconciliationObservations)
+      .where(
+        and(
+          eq(reconciliationObservations.provider, EUPAGO_PROVIDER_ID),
+          eq(reconciliationObservations.providerReference, reference)
+        )
       )
-    )
-    .limit(1);
-  return existing ?? null;
+      .limit(1);
+    if (existing && isSameOccurrence(existing, input)) return existing;
+  }
+
+  // Bounded budget exhausted (pathological same-movement churn): the caller
+  // records the anomaly code on the webhook event and in the audit trail.
+  return null;
 }
 
 export interface SettlementAnomalyView {
