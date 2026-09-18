@@ -120,6 +120,13 @@
       "when": 1789514658247,
       "tag": "0016_c345_supplier_category_levels",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1789692309756,
+      "tag": "0017_eupago_p0_ledger_integrity",
+      "breakpoints": true
     }
   ]
 }

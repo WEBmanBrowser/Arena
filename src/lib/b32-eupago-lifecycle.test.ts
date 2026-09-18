@@ -142,10 +142,15 @@ async function createPendingOrder(totalCents = 5000) {
     .set({ reservedStock: 1 })
     .where(eq(products.id, product.id));
 
+  // PAYMENT P0 — the checkout-created placeholder is the MANUAL pending payment
+  // (exactly like POST /api/orders). The canonical EUPAGO payment row is created
+  // by the ledger provisioning when the first Eupago attempt is armed; a
+  // pre-existing bare `provider = 'eupago'` row would be unknown-environment
+  // history and is refused by the ledger environment rules.
   await db.insert(payments).values({
     orderId: order.id,
-    provider: "eupago",
-    method: "mbway",
+    provider: "manual",
+    method: "bank_transfer",
     amount: total,
     currency: "EUR",
     status: "pending",
@@ -372,11 +377,11 @@ describe("B.3.2 — payment creation persistence and idempotency", () => {
       config: CONFIG,
       fetchImpl: lookupFetch,
     });
-    expect(recovered.outcome).toBe("still_ambiguous");
+    expect(recovered.outcome).toBe("unknown");
     expect(recovered.attempt.providerIdentifier).toBe(original);
   });
 
-  it("recovers by identifier lookup and only re-arms on PROVEN absence", async () => {
+  it("recovers by identifier lookup, reports a network absence as UNKNOWN, and only re-arms on an injected PROVEN absence", async () => {
     const { order } = await createPendingOrder();
     const armed = await armPaymentAttempt({ orderId: order.id, method: "multibanco", amountCents: 5000 });
     await db
@@ -384,7 +389,8 @@ describe("B.3.2 — payment creation persistence and idempotency", () => {
       .set({ recoveryState: "reconciliation_required" })
       .where(eq(paymentAttempts.id, armed.id));
 
-    // Provider PROVES absence → safe to recreate.
+    // The provider REPORTS an empty result — that is NOT proof, so the outcome
+    // stays UNKNOWN and the commitment is kept (PAYMENT P0 item 15).
     const absentFetch = (async (url: string) =>
       String(url).includes("/auth/token")
         ? new Response(JSON.stringify({ access_token: "t", expires_in: 300 }), { status: 200 })
@@ -393,13 +399,23 @@ describe("B.3.2 — payment creation persistence and idempotency", () => {
             headers: { "content-type": "application/json" },
           })) as unknown as typeof fetch;
 
-    const absent = await recoverPaymentAttempt({
+    const reportedAbsent = await recoverPaymentAttempt({
       attemptId: armed.id,
       config: CONFIG,
       fetchImpl: absentFetch,
     });
-    expect(absent.outcome).toBe("safe_to_recreate");
-    expect(absent.attempt.recoveryState).toBe("armed");
+    expect(reportedAbsent.outcome).toBe("unknown");
+    expect(reportedAbsent.attempt.recoveryState).toBe("reconciliation_required");
+
+    // PROVEN absence requires an injected positive proof (no real HTTP producer).
+    const proven = await recoverPaymentAttempt({
+      attemptId: armed.id,
+      config: CONFIG,
+      fetchImpl: absentFetch,
+      absenceProof: () => true,
+    });
+    expect(proven.outcome).toBe("proven_absent");
+    expect(proven.attempt.recoveryState).toBe("armed");
 
     // Provider FINDS the creation → adopt its reference, no new create.
     await db
@@ -419,7 +435,7 @@ describe("B.3.2 — payment creation persistence and idempotency", () => {
       config: CONFIG,
       fetchImpl: foundFetch,
     });
-    expect(found.outcome).toBe("recovered");
+    expect(found.outcome).toBe("found");
     expect(found.attempt.providerReference).toBe("987654321");
     expect(found.attempt.providerTransactionId).toBe("T-REC");
   });

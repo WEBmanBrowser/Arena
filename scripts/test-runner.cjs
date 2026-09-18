@@ -116,6 +116,13 @@ async function main() {
     DATABASE_URL: databaseUrl,
     NODE_ENV: 'test',
     BULK_PREVIEW_SECRET: process.env.BULK_PREVIEW_SECRET,
+    // PAYMENT P0 (M3) — the disposable PostgreSQL of THIS process is the only
+    // database the suite may talk to, and src/test-support/setup.ts verifies it
+    // by querying inet_server_port()/inet_server_addr(). Hyperdrive is
+    // unreachable and every real outbound HTTP attempt fails the test.
+    ARENA_TEST_GUARD: '1',
+    ARENA_TEST_PG_URL: databaseUrl,
+    ARENA_TEST_PG_PORT: String(port),
   };
   const child = spawn(process.execPath, [
     path.join(process.cwd(), 'node_modules', 'vitest', 'vitest.mjs'),

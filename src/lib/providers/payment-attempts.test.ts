@@ -243,15 +243,21 @@ describe("B.3.1 — payment attempts: provider validation", () => {
 describe("B.3.1 — bank transfer regression (existing flow untouched)", () => {
   it("keeps the legacy payments table usable and independent from payment_attempts", async () => {
     const order = await createTestOrder("50.00");
+    // M4 — EVIDENCE-BASED FIXTURE. Production code has only ever written
+    // `provider = 'manual'` with `method = 'bank_transfer'` (POST /api/orders);
+    // the previous fixture used `provider = 'bank_transfer'`, which no code path
+    // has ever produced. The fixture now mirrors reality, and the historical
+    // (never written) shape is NOT promoted into a provider by speculation.
     const [legacy] = await db
       .insert(payments)
       .values({
-        orderId: order.id, provider: "bank_transfer", method: "bank_transfer",
+        orderId: order.id, provider: "manual", method: "bank_transfer",
         amount: "50.00", currency: "EUR", status: "pending",
       })
       .returning();
 
-    expect(legacy.provider).toBe("bank_transfer");
+    expect(legacy.provider).toBe("manual");
+    expect(legacy.method).toBe("bank_transfer");
     expect(legacy.status).toBe("pending");
     // No provider attempt rows are implied by a bank transfer order
     expect(await listPaymentAttempts(order.id)).toHaveLength(0);
@@ -260,7 +266,22 @@ describe("B.3.1 — bank transfer regression (existing flow untouched)", () => {
   });
 
   it("does not touch orders/order_items/products schemas used by the existing flow", async () => {
-    const [product] = await db.select().from(products).limit(1);
+    // M4 — self-sufficient fixture: this test asserts that the existing
+    // order/stock flow is untouched, so it must not depend on a seeded product
+    // row existing (the suite shares one database across files).
+    let [product] = await db.select().from(products).limit(1);
+    if (!product) {
+      [product] = await db
+        .insert(products)
+        .values({
+          sku: `B31-REG-${Date.now()}`,
+          name: "B31 regression product",
+          slug: `b31-reg-${Date.now()}`,
+          price: "10.00",
+          stock: 5,
+        })
+        .returning();
+    }
     expect(product).toBeDefined();
     const order = await createTestOrder("10.00");
     const [item] = await db

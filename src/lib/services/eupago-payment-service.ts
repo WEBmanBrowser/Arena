@@ -36,7 +36,8 @@ import {
   createMultibancoReference,
   type EupagoCreateResult,
 } from "@/lib/providers/eupago/payments";
-import { lookupByIdentifier } from "@/lib/providers/eupago/recovery";
+import { lookupByIdentifier, type RecoveryLookupResult } from "@/lib/providers/eupago/recovery";
+import { prepareEupagoLedgerContext } from "@/lib/services/eupago-ledger-service";
 import { createAuditLog } from "@/lib/audit";
 
 export type PaymentAttemptRow = typeof paymentAttempts.$inferSelect;
@@ -157,10 +158,21 @@ export async function armPaymentAttempt(input: {
       .limit(1);
     if (existing) return existing;
 
+    // PAYMENT P0 (items 1/4/17/18) — a NEW Eupago attempt always settles the
+    // canonical `payments` row of the same order, and the ledger environment is
+    // provisioned/verified before the attempt exists.
+    const { payment } = await prepareEupagoLedgerContext(tx, {
+      orderId: input.orderId,
+      method: input.method,
+      amountCents,
+      currency,
+    });
+
     const [row] = await tx
       .insert(paymentAttempts)
       .values({
         orderId: input.orderId,
+        paymentId: payment.id,
         provider: descriptor.id,
         method: input.method,
         status: "pending",
@@ -168,6 +180,9 @@ export async function armPaymentAttempt(input: {
         currency,
         providerIdentifier: generateStableIdentifier(input.orderId),
         recoveryState: "armed",
+        // Explicit (the column defaults to 0): the fencing baseline for any
+        // provider response belonging to this create attempt.
+        operationRevision: 0,
       })
       .returning();
     return row;
@@ -183,12 +198,30 @@ export async function armPaymentAttempt(input: {
 async function claimProviderCall(attemptId: number): Promise<PaymentAttemptRow | null> {
   const [row] = await db
     .update(paymentAttempts)
-    .set({ recoveryState: "requested", providerRequestedAt: new Date(), updatedAt: new Date() })
+    .set({
+      recoveryState: "requested",
+      providerRequestedAt: new Date(),
+      // The claim itself is a state transition → it advances the fencing
+      // revision. Every later writer must present this revision.
+      operationRevision: sql`${paymentAttempts.operationRevision} + 1`,
+      updatedAt: new Date(),
+    })
     .where(and(eq(paymentAttempts.id, attemptId), eq(paymentAttempts.recoveryState, "armed")))
     .returning();
   return row ?? null;
 }
 
+/**
+ * Ambiguous provider outcome → `reconciliation_required`.
+ *
+ * PAYMENT P0 (item 13): the commitment is KEPT. Nothing here ever re-arms the
+ * attempt, and there is deliberately no code path that turns an UNKNOWN outcome
+ * back into `armed`. Two guards apply:
+ *   • a SETTLED attempt (`paid`) is never moved back to reconciliation;
+ *   • the transition is refused while the attempt is already in
+ *     `reconciliation_required` **unless** the caller is recording a new, more
+ *     specific cause (which is what the operator log shows).
+ */
 async function markReconciliationRequired(
   attemptId: number,
   code: string
@@ -198,11 +231,19 @@ async function markReconciliationRequired(
     .set({
       recoveryState: "reconciliation_required",
       operatorActionCode: code.slice(0, 60),
+      operationRevision: sql`${paymentAttempts.operationRevision} + 1`,
       updatedAt: new Date(),
     })
-    .where(eq(paymentAttempts.id, attemptId))
+    .where(
+      and(
+        eq(paymentAttempts.id, attemptId),
+        sql`${paymentAttempts.status} <> 'paid'`
+      )
+    )
     .returning();
-  return row;
+  if (row) return row;
+  const [existing] = await db.select().from(paymentAttempts).where(eq(paymentAttempts.id, attemptId)).limit(1);
+  return existing;
 }
 
 /**
@@ -311,6 +352,12 @@ export async function createEupagoPayment(
   }
 
   // Created. Status stays `pending`: creation is not settlement.
+  //
+  // PAYMENT P0 (item 16) — FENCING. The write-back is conditional on the
+  // revision this call observed (`claimed.operationRevision`). If a webhook or
+  // a recovery already advanced the attempt, this response is STALE: it may
+  // still contribute the additive provider fields it uniquely knows
+  // (reference/entity/expiry) but it can never downgrade a settled state.
   const [row] = await db
     .update(paymentAttempts)
     .set({
@@ -320,8 +367,48 @@ export async function createEupagoPayment(
       expiresAt: result.expiresAt ?? null,
       updatedAt: new Date(),
     })
-    .where(eq(paymentAttempts.id, claimed.id))
+    .where(
+      and(
+        eq(paymentAttempts.id, claimed.id),
+        eq(paymentAttempts.operationRevision, claimed.operationRevision)
+      )
+    )
     .returning();
+
+  if (!row) {
+    const [current] = await db
+      .select()
+      .from(paymentAttempts)
+      .where(eq(paymentAttempts.id, claimed.id))
+      .limit(1);
+
+    // Additive-only repair: the reference is the correlation anchor the
+    // customer-facing reference needs, so it is persisted when still absent,
+    // WITHOUT touching status/recovery_state/completed_at.
+    if (current && current.providerReference === null) {
+      await db
+        .update(paymentAttempts)
+        .set({ providerReference: result.reference, providerEntity: result.entity ?? null, updatedAt: new Date() })
+        .where(and(eq(paymentAttempts.id, claimed.id), sql`${paymentAttempts.providerReference} IS NULL`));
+    }
+
+    await createAuditLog({
+      userId: input.actorId ?? null,
+      action: "payment.provider_response_stale",
+      entity: "payment_attempt",
+      entityId: claimed.id,
+      details: {
+        orderId: input.orderId,
+        provider: EUPAGO_PROVIDER_ID,
+        method: input.method,
+        observedRevision: claimed.operationRevision,
+        currentRevision: current?.operationRevision ?? null,
+        currentStatus: current?.status ?? null,
+      },
+    });
+
+    return { outcome: "created", attempt: current ?? claimed, redirectUrl: result.redirectUrl ?? null };
+  }
 
   await createAuditLog({
     userId: input.actorId ?? null,
@@ -336,30 +423,67 @@ export async function createEupagoPayment(
 
 // ─── Recovery ─────────────────────────────────────────────
 
+/**
+ * PAYMENT P0 (items 13/14/15) — recovery outcomes.
+ *
+ *   found          → the provider CONFIRMS the movement exists; its correlation
+ *                    data is adopted. No new create is ever issued.
+ *   proven_absent  → a POSITIVE absence proof authorized a new create. No
+ *                    production code path can produce this: `absenceProof` is an
+ *                    explicit, injected proof (tests only), so a real HTTP
+ *                    response can never re-arm an attempt.
+ *   unknown        → anything else, including a provider that merely REPORTS
+ *                    absence. The commitment is KEPT, the attempt stays in
+ *                    `reconciliation_required` and is never re-armed.
+ */
 export type RecoverAttemptResult =
-  | { readonly outcome: "recovered"; readonly attempt: PaymentAttemptRow }
-  /** Provider proved nothing exists — a new create may now be authorized. */
-  | { readonly outcome: "safe_to_recreate"; readonly attempt: PaymentAttemptRow }
-  | { readonly outcome: "still_ambiguous"; readonly attempt: PaymentAttemptRow; readonly code: string };
+  /**
+   * The provider CONFIRMS the movement exists for our identifier. Its
+   * correlation data is adopted; nothing is settled (only a verified webhook or
+   * reconciliation can do that) and no create is ever re-issued.
+   */
+  | { readonly outcome: "found"; readonly attempt: PaymentAttemptRow; readonly code?: string }
+  /**
+   * A POSITIVE absence proof authorized re-arming the attempt for a NEW create.
+   *
+   * No production code path can produce this: `absenceProof` is an explicitly
+   * injected predicate (see below), so a network response can never re-arm a
+   * commitment and risk a double charge.
+   */
+  | { readonly outcome: "proven_absent"; readonly attempt: PaymentAttemptRow; readonly code?: string }
+  /** Anything else — keep the commitment, keep reconciliation. */
+  | { readonly outcome: "unknown"; readonly attempt: PaymentAttemptRow; readonly code: string };
 
 /**
  * Resolve an attempt stuck in `reconciliation_required` by asking the provider
  * about our stable identifier.
  *
- * A lookup that times out, 5xxs, fails OAuth or returns garbage keeps the
- * attempt in reconciliation — it is NEVER interpreted as absence.
+ * UNKNOWN is the default and the safe outcome: a lookup that times out, 5xxs,
+ * fails OAuth, returns garbage, or merely reports "nothing found" keeps the
+ * attempt in reconciliation and preserves the commitment.
  */
 export async function recoverPaymentAttempt(input: {
-  attemptId: number;
-  config?: EupagoConfig;
-  fetchImpl?: typeof fetch;
+  readonly attemptId: number;
+  readonly config?: EupagoConfig;
+  readonly fetchImpl?: typeof fetch;
+  /**
+   * POSITIVE absence proof (item 15) — an injected predicate, TESTS ONLY.
+   *
+   * The provider REPORTING that nothing exists for our identifier is an
+   * observation, not proof: Eupago may answer from a replica, an index may
+   * lag, and a create request may still be in flight. Production therefore never
+   * supplies this predicate, which makes `proven_absent` unreachable from a real
+   * HTTP response — no automatic re-create can ever be triggered by the network.
+   */
+  readonly absenceProof?: (lookup: RecoveryLookupResult) => boolean | Promise<boolean>;
 }): Promise<RecoverAttemptResult> {
-  const config = input.config ?? await resolveEupagoConfig();
+  const config = input.config ?? (await resolveEupagoConfig());
   const [attempt] = await db
     .select()
     .from(paymentAttempts)
     .where(eq(paymentAttempts.id, input.attemptId))
     .limit(1);
+
   if (!attempt || attempt.provider !== EUPAGO_PROVIDER_ID || !attempt.providerIdentifier) {
     throw new ProviderError("PAYMENT_NOT_FOUND", {
       provider: EUPAGO_PROVIDER_ID,
@@ -375,31 +499,70 @@ export async function recoverPaymentAttempt(input: {
 
   if (lookup.kind === "ambiguous") {
     const row = await markReconciliationRequired(attempt.id, `LOOKUP_${lookup.reason.toUpperCase()}`);
-    return { outcome: "still_ambiguous", attempt: row, code: row.operatorActionCode! };
+    return { outcome: "unknown", attempt: row, code: row.operatorActionCode ?? "LOOKUP_AMBIGUOUS" };
   }
 
-  if (lookup.kind === "absent") {
-    // Positive proof of absence: the attempt may be re-armed for ONE new call.
-    const [row] = await db
+  if (lookup.kind === "not_found") {
+    const proved = input.absenceProof ? Boolean(await input.absenceProof(lookup)) : false;
+    if (!proved) {
+      // FAIL CLOSED. The commitment is KEPT, the attempt stays in
+      // reconciliation and is NEVER re-armed automatically.
+      const row = await markReconciliationRequired(attempt.id, "ABSENCE_NOT_ACCEPTED");
+      return { outcome: "unknown", attempt: row, code: row.operatorActionCode ?? "ABSENCE_NOT_ACCEPTED" };
+    }
+
+    // Positive proof: re-arm for a NEW create. Bumps the revision so any stale
+    // in-flight response from the previous operation is fenced out.
+    const [rearmed] = await db
       .update(paymentAttempts)
-      .set({ recoveryState: "armed", operatorActionCode: null, updatedAt: new Date() })
-      .where(eq(paymentAttempts.id, attempt.id))
+      .set({
+        recoveryState: "armed",
+        operatorActionCode: null,
+        operationRevision: sql`${paymentAttempts.operationRevision} + 1`,
+        updatedAt: new Date(),
+      })
+      .where(and(eq(paymentAttempts.id, attempt.id), sql`${paymentAttempts.status} NOT IN ('paid','succeeded')`))
       .returning();
-    return { outcome: "safe_to_recreate", attempt: row };
+
+    await createAuditLog({
+      userId: null,
+      action: "payment.provider_absence_proven",
+      entity: "payment_attempt",
+      entityId: attempt.id,
+      details: { orderId: attempt.orderId, provider: EUPAGO_PROVIDER_ID, source: "injected_proof" },
+    });
+
+    return { outcome: "proven_absent", attempt: rearmed ?? attempt };
   }
 
-  const [row] = await db
+  // FOUND — adopt the provider's correlation data. A settled attempt is NEVER
+  // rewritten (the additive fields are still recorded so the reference stays
+  // operationally visible).
+  const [live] = await db
     .update(paymentAttempts)
     .set({
       providerReference: lookup.reference ?? attempt.providerReference,
       providerTransactionId: lookup.transactionId ?? attempt.providerTransactionId,
-      recoveryState: "requested",
-      operatorActionCode: null,
+      recoveryState: attempt.status === "paid" ? attempt.recoveryState : "requested",
+      operatorActionCode: attempt.status === "paid" ? attempt.operatorActionCode : null,
+      operationRevision: sql`${paymentAttempts.operationRevision} + 1`,
+      updatedAt: new Date(),
+    })
+    .where(and(eq(paymentAttempts.id, attempt.id), sql`${paymentAttempts.status} NOT IN ('paid','succeeded')`))
+    .returning();
+
+  if (live) return { outcome: "found", attempt: live };
+
+  const [settledRow] = await db
+    .update(paymentAttempts)
+    .set({
+      providerReference: lookup.reference ?? attempt.providerReference,
+      providerTransactionId: lookup.transactionId ?? attempt.providerTransactionId,
       updatedAt: new Date(),
     })
     .where(eq(paymentAttempts.id, attempt.id))
     .returning();
-  return { outcome: "recovered", attempt: row };
+  return { outcome: "found", attempt: settledRow ?? attempt };
 }
 
 /** Attempts awaiting operator/reconciliation attention (report only). */

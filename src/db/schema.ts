@@ -1,6 +1,6 @@
 import {
   pgTable, serial, varchar, text, integer, boolean, timestamp, date, decimal,
-  jsonb, index, uniqueIndex, check, pgSequence
+  jsonb, index, uniqueIndex, check, pgSequence, foreignKey
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 
@@ -512,10 +512,22 @@ export const payments = pgTable("payments", {
   currency: varchar("currency", { length: 3 }).notNull().default("EUR"),
   status: varchar("status", { length: 50 }).notNull().default("pending"),
   paidAt: timestamp("paid_at"),
+  /**
+   * Non-secret operational context only (e.g. `{ eupagoEnvironment: "sandbox" }`
+   * for a Eupago-backed payment — PAYMENT P0 item 17). NEVER credentials,
+   * tokens, provider payloads, references or card data.
+   */
   metadata: jsonb("metadata"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
-}, (t) => [index("payments_order_idx").on(t.orderId), index("payments_status_idx").on(t.status)]);
+}, (t) => [
+  index("payments_order_idx").on(t.orderId),
+  index("payments_status_idx").on(t.status),
+  // PAYMENT P0 (item 4/5/6) — FK target for the composite
+  // (payment_id, order_id) references that make cross-order linkage
+  // impossible at the PostgreSQL level for attempts and refunds.
+  uniqueIndex("payments_id_order_unique").on(t.id, t.orderId),
+]);
 
 // ─── EMAIL NOTIFICATIONS ──────────────────────────────────
 export const emailNotifications = pgTable("email_notifications", {
@@ -530,6 +542,16 @@ export const emailNotifications = pgTable("email_notifications", {
   referenceType: varchar("reference_type", { length: 50 }),
   referenceId: integer("reference_id"),
   sentAt: timestamp("sent_at"),
+  /**
+   * PAYMENT P0 (item 3/20/M5) — email outbox dispatch fencing.
+   *
+   * `null` = never handed to the transport (eligible for a claim). A non-null
+   * value marks the moment a dispatcher began handing this row to Resend, so a
+   * second dispatcher can never send the same notification concurrently and a
+   * crash mid-flight is visible as `delivery_unknown` instead of being silently
+   * retried.
+   */
+  dispatchStartedAt: timestamp("dispatch_started_at"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
 
@@ -678,6 +700,20 @@ export const providerWebhookEvents = pgTable("provider_webhook_events", {
 export const paymentAttempts = pgTable("payment_attempts", {
   id: serial("id").primaryKey(),
   orderId: integer("order_id").notNull().references(() => orders.id),
+  /**
+   * PAYMENT P0 (item 1) — canonical ledger linkage.
+   *
+   * NULLABLE for historical rows (pre-P0 attempts keep `payment_id = NULL` and
+   * remain readable/append-only history — no automatic financial backfill).
+   * REQUIRED for every NEW Eupago attempt: the database trigger
+   * `payment_attempts_identity_guard` rejects an INSERT whose provider is a real
+   * provider and whose `payment_id` is NULL, and an UPDATE that would turn a
+   * non-provider row into a Eupago row without a payment (M2).
+   *
+   * The composite FK `(payment_id, order_id) → payments(id, order_id)` makes a
+   * cross-order linkage structurally impossible.
+   */
+  paymentId: integer("payment_id"),
   provider: varchar("provider", { length: 50 }).notNull(),
   /** multibanco | mbway | card | … (provider payment method) */
   method: varchar("method", { length: 50 }).notNull(),
@@ -712,11 +748,30 @@ export const paymentAttempts = pgTable("payment_attempts", {
   operatorActionCode: varchar("operator_action_code", { length: 60 }),
   /** Timestamp the single provider create request was issued. */
   providerRequestedAt: timestamp("provider_requested_at"),
+  /**
+   * PAYMENT P0 (item 2/16) — operation fencing.
+   *
+   * Monotonic revision of this attempt's financial state, starting at 0. Every
+   * settlement/state transition increments it, and a late provider response is
+   * only allowed to write ADDITIVE provider fields when the revision it observed
+   * is still current. A stale response (revision advanced in between, e.g. a
+   * webhook already settled the attempt) can never downgrade the settled state.
+   */
+  operationRevision: integer("operation_revision").notNull().default(0),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
 }, (t) => [
   index("pa_order_idx").on(t.orderId),
   index("pa_status_idx").on(t.status),
+  index("pa_payment_idx").on(t.paymentId),
+  // PAYMENT P0 (item 5) — composite linkage attempt → payment → order.
+  // MATCH SIMPLE (PostgreSQL default) means a NULL payment_id row (legacy) is
+  // not checked, while every linked row must agree on the order.
+  foreignKey({
+    name: "payment_attempts_payment_order_fk",
+    columns: [t.paymentId, t.orderId],
+    foreignColumns: [payments.id, payments.orderId],
+  }),
   uniqueIndex("pa_provider_reference_unique").on(t.provider, t.providerReference)
     .where(sql`provider_reference IS NOT NULL`),
   // B.3.2: the stable identifier is unique per provider — a duplicate would
@@ -807,6 +862,24 @@ export type PaymentAttemptMethod = (typeof PAYMENT_ATTEMPT_METHODS)[number];
 export const PROVIDER_RECOVERY_STATES = ["armed", "requested", "reconciliation_required"] as const;
 export type ProviderRecoveryState = (typeof PROVIDER_RECOVERY_STATES)[number];
 
+// ─── PAYMENT P0: EMAIL OUTBOX (item 20 / M5) ──────────────
+// The P0 settlement path writes the notification row INSIDE the financial
+// transaction (so it is atomic with the money movement) and dispatches it
+// strictly AFTER commit.
+//   queued            → committed, never handed to the transport
+//   dispatching       → a dispatcher claimed it (dispatch_started_at set)
+//   sent / failed     → definitive transport outcome
+//   delivery_unknown  → the transport may or may not have accepted it; NEVER
+//                       retried automatically (operator decides)
+export const EMAIL_OUTBOX_STATUSES = [
+  "queued",
+  "dispatching",
+  "sent",
+  "failed",
+  "delivery_unknown",
+] as const;
+export type EmailOutboxStatus = (typeof EMAIL_OUTBOX_STATUSES)[number];
+
 export const SHIPMENT_STATUSES = ["pending", "created", "label_ready", "in_transit", "delivered", "exception", "cancelled"] as const;
 export type ShipmentStatus = (typeof SHIPMENT_STATUSES)[number];
 
@@ -864,6 +937,13 @@ export const refundAttempts = pgTable("refund_attempts", {
   /** Sanitized operator-intervention code (e.g. IBAN/BIC required). */
   operatorActionCode: varchar("operator_action_code", { length: 60 }),
   providerRequestedAt: timestamp("provider_requested_at"),
+  /**
+   * PAYMENT P0 (item 16) — monotonic revision of provider-facing operations on
+   * this refund. Bumped when the provider call is claimed and when the outcome
+   * write-back is fenced, so a stale provider response can never move a refund
+   * that a newer operation (or a settlement webhook) already advanced.
+   */
+  operationRevision: integer("operation_revision").notNull().default(0),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
 }, (t) => [
@@ -871,6 +951,14 @@ export const refundAttempts = pgTable("refund_attempts", {
   index("refund_attempts_payment_idx").on(t.paymentId),
   index("refund_attempts_status_idx").on(t.status),
   uniqueIndex("refund_attempts_idempotency_key_unique").on(t.idempotencyKey),
+  // PAYMENT P0 (item 6) — composite linkage refund → payment → order. Both
+  // columns are NOT NULL, so this constraint is always enforced: a refund can
+  // never reference a payment that belongs to another order.
+  foreignKey({
+    name: "refund_attempts_payment_order_fk",
+    columns: [t.paymentId, t.orderId],
+    foreignColumns: [payments.id, payments.orderId],
+  }),
   // B.3.2: a provider refund movement (refund trid) settles at most one attempt.
   uniqueIndex("refund_attempts_provider_refund_unique").on(t.provider, t.providerRefundId)
     .where(sql`provider_refund_id IS NOT NULL AND provider <> 'manual'`),

@@ -232,6 +232,8 @@ describe("B.4.1 dashboard read model", () => {
     // Payment attempt requiring manual reconciliation.
     await db.insert(paymentAttempts).values({
       orderId: o.id,
+      // PAYMENT P0 — real provider attempts carry the canonical payment link.
+      paymentId: pay.id,
       provider: "eupago",
       method: "mbway",
       status: "pending",

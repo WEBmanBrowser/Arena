@@ -425,14 +425,14 @@ describe("B.3.2 — recovery lookup absence semantics", () => {
     expect(lookupCall.headers).toMatchObject({ Authorization: "Bearer dummy-token" });
   });
 
-  it("returns ABSENT only on a well-formed empty result or documented 404", async () => {
+  it("reports NOT_FOUND only on a well-formed empty result or documented 404", async () => {
     clearEupagoTokenCache();
     const empty = stubFetch((c) =>
       c.url.includes("/auth/token") ? tokenResponse() : { status: 200, body: { data: [] } }
     );
     await expect(
       lookupByIdentifier({ config: CONFIG, identifier: IDENTIFIER, fetchImpl: empty.fetchImpl })
-    ).resolves.toMatchObject({ kind: "absent" });
+    ).resolves.toMatchObject({ kind: "not_found" });
 
     clearEupagoTokenCache();
     const notFound = stubFetch((c) =>
@@ -440,7 +440,7 @@ describe("B.3.2 — recovery lookup absence semantics", () => {
     );
     await expect(
       lookupByIdentifier({ config: CONFIG, identifier: IDENTIFIER, fetchImpl: notFound.fetchImpl })
-    ).resolves.toMatchObject({ kind: "absent" });
+    ).resolves.toMatchObject({ kind: "not_found" });
   });
 
   it("NEVER interprets timeout / 5xx / OAuth failure / malformed body as absent", async () => {

@@ -95,10 +95,18 @@ async function loadPaidPayment(
   tx: Tx,
   orderId: number,
   paymentId?: number,
-  lock = false
+  lock = false,
+  /**
+   * PAYMENT P0 (items 6/23) — a PROVIDER refund must be bound to the payment the
+   * provider actually settled. `undefined` keeps the manual behaviour (the paid
+   * payment of the order); a provider id requires a paid payment with exactly
+   * that provider.
+   */
+  provider?: string
 ): Promise<PaymentSnapshot> {
   const conditions = [eq(payments.orderId, orderId), eq(payments.status, "paid")];
   if (paymentId != null) conditions.push(eq(payments.id, paymentId));
+  if (provider != null) conditions.push(eq(payments.provider, provider));
 
   const rows = lock
     ? await tx.select().from(payments).where(and(...conditions)).orderBy(payments.id).limit(1).for("update")
@@ -106,7 +114,12 @@ async function loadPaidPayment(
   const payment = rows[0];
 
   if (!payment) {
-    fail("PAYMENT_NOT_FOUND", "Pagamento confirmado não encontrado para esta encomenda");
+    fail(
+      "PAYMENT_NOT_FOUND",
+      provider == null
+        ? "Pagamento confirmado não encontrado para esta encomenda"
+        : `Pagamento confirmado do fornecedor ${provider} não encontrado para esta encomenda`
+    );
   }
   const paidCents = decimalToCents(payment.amount);
   if (paidCents == null) {
@@ -219,7 +232,12 @@ export async function requestRefund(input: RequestRefundInput): Promise<{
       }
 
       // Lock the payment row FIRST, then compute committed balance.
-      const payment = await loadPaidPayment(tx, input.orderId, undefined, true);
+      //
+      // A provider refund (provider !== 'manual') is attached to the CANONICAL
+      // PROVIDER payment: refunding a bank-transfer payment "through" a provider
+      // would produce a movement that could never be correlated with money the
+      // provider actually received.
+      const payment = await loadPaidPayment(tx, input.orderId, undefined, true, provider === "manual" ? undefined : provider);
       if (input.currency != null && input.currency !== payment.currency) {
         fail("CURRENCY_MISMATCH", `Moeda de reembolso difere do pagamento (${payment.currency})`);
       }
