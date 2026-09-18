@@ -1,32 +1,36 @@
 /**
- * B.3.2 — Eupago webhook settlement (trusted provider events).
+ * PAYMENT P0 — Eupago webhook settlement (trusted provider events).
  *
- * This is the ONLY path that may settle a Eupago payment or refund, and it
- * does so exclusively through the EXISTING centralized services:
+ * ATOMICITY (item 10)
+ *  ONE PostgreSQL transaction contains the ENTIRE settlement:
+ *    webhook claim → attempt → payment → order → stock → history → financial
+ *    audit → email outbox row → webhook `processed`.
+ *  Either the money movement and every one of its consequences commit, or
+ *  nothing does. A redelivery after a rollback therefore starts from a clean,
+ *  consistent state instead of a half-settled one.
  *
- *   payment settled  → confirmOrderPayment()   (Phase A lifecycle)
- *   refund settled   → the B.3.5 refund_attempts ledger
+ * NO EXTERNAL HTTP INSIDE THE TRANSACTION (item 11)
+ *  No Eupago call, no Resend call and no Wintouch call happens inside the
+ *  transaction. The notification is written as an outbox row INSIDE the
+ *  transaction and dispatched only AFTER the commit succeeded.
  *
- * It NEVER writes orders.status directly, NEVER mutates stock, NEVER rewrites
- * historical payments rows, NEVER touches RMA, and NEVER bypasses the B.3.5
- * over-refund trigger.
+ * AUTHORITY
+ *  The order transition is performed exclusively through the canonical
+ *  centralized confirmation (`confirmOrderPaymentInTx`). This module never
+ *  writes `orders.status`, never rewrites a settled `payments` row, never
+ *  touches RMA, and never bypasses the B.3.5 over-refund trigger.
  *
  * IDEMPOTENCY
- *  Dedupe key = `trid` (the fund movement id), recorded in the existing B.3.1
- *  provider_webhook_events ledger scoped by provider. A duplicate delivery is
- *  detected before any side effect and produces NO second transition, NO
- *  second email, NO second audit entry, NO second stock movement.
- *
- * CORRELATION
- *  Before confirming, the event must match the local attempt on provider,
- *  identifier/reference, method, currency and amount (integer cents).
+ *  Dedupe key = `trid` (the fund movement id) in the existing B.3.1 ledger.
+ *  A duplicate delivery produces NO second transition, NO second email, NO
+ *  second audit entry and NO second stock movement.
  */
 
 import { db } from "@/db";
 import { paymentAttempts, refundAttempts } from "@/db/schema";
-import { and, eq } from "drizzle-orm";
-import { confirmOrderPayment } from "@/lib/orders";
-import { createAuditLog } from "@/lib/audit";
+import { and, eq, sql } from "drizzle-orm";
+import { confirmOrderPaymentInTx } from "@/lib/orders";
+import { createAuditLogTx } from "@/lib/audit";
 import { ProviderError } from "@/lib/providers/errors";
 import { EUPAGO_PROVIDER_ID } from "@/lib/providers/eupago/config";
 import { resolveEupagoWebhookKey } from "@/lib/services/eupago-config-service";
@@ -34,11 +38,23 @@ import { verifyEupagoWebhook } from "@/lib/providers/eupago/webhook-crypto";
 import { normalizeEupagoEvent, type NormalizedEupagoEvent } from "@/lib/providers/eupago/events";
 import {
   claimWebhookEvent,
-  markWebhookEventFailed,
+  deferWebhookEvent,
+  isAnomalyWebhookEvent,
+  markWebhookEventAnomaly,
   markWebhookEventIgnored,
   markWebhookEventProcessed,
+  recordWebhookDeliveryFailure,
+  recoveryGrants,
   registerWebhookEvent,
 } from "@/lib/providers/webhook-events";
+import type { ConfirmPaymentIncoherenceCode } from "@/lib/orders";
+import {
+  recordSettlementAnomalyTx,
+  type SettlementAnomalyCode,
+} from "@/lib/services/financial-anomalies";
+import { dispatchEmailNotification } from "@/lib/email-outbox";
+import { assertEupagoLedgerReady } from "@/lib/services/eupago-ledger-service";
+import type { DbOrTx } from "@/lib/stock-locks";
 
 export type SettlementOutcome =
   | "payment_confirmed"
@@ -46,7 +62,41 @@ export type SettlementOutcome =
   | "refund_settled"
   | "duplicate"
   | "ignored"
-  | "mismatch";
+  | "mismatch"
+  /**
+   * The delivery was authenticated but could not be correlated YET. It is parked
+   * in the re-evaluable `pending` state (H2) instead of being terminally
+   * ignored, and the provider's redelivery of the SAME trid re-evaluates it.
+   */
+  | "deferred"
+  /**
+   * HIGH-1/HIGH-2 — the movement is REAL and was recorded (attempt paid + durable
+   * anomaly), but it could not be settled coherently: a second charge for an
+   * already settled order, money arriving after expiry/cancellation, or a
+   * canonical payment that is missing/cancelled/incoherent. The event is NOT
+   * `processed`, nothing is auto-fixed and an operator must reconcile or refund.
+   */
+  | "payment_anomaly";
+
+/**
+ * HIGH-1/HIGH-2 — how a refused (incoherent) settlement is classified for the
+ * operator. The classification is DERIVED from the authoritative gate in
+ * `confirmOrderPaymentInTx`; it never decides by itself.
+ */
+const INCOHERENCE_ANOMALY_CODE: Record<ConfirmPaymentIncoherenceCode, SettlementAnomalyCode> = {
+  /** Money exists for an order with no payment row able to receive it. */
+  PAYMENT_NOT_FOUND: "PAYMENT_NOT_COHERENT",
+  /** The canonical payment is already paid: a second movement → double charge. */
+  PAYMENT_ALREADY_SETTLED: "DOUBLE_CHARGE",
+  /** Payment cancelled internally: the movement must be refunded/reconciled. */
+  PAYMENT_CANCELLED: "LATE_PAID",
+  /** Any other non-settleable payment state (failed/refunded/unknown). */
+  PAYMENT_NOT_SETTLED: "PAYMENT_NOT_COHERENT",
+  /** The ORDER was settled by a different payment/movement → double charge. */
+  ORDER_ALREADY_SETTLED_BY_OTHER_MOVEMENT: "DOUBLE_CHARGE",
+  /** Order expired/cancelled/refunded when the money arrived → late payment. */
+  ORDER_NOT_SETTLEABLE: "LATE_PAID",
+};
 
 export interface ProcessWebhookResult {
   readonly outcome: SettlementOutcome;
@@ -62,35 +112,24 @@ export interface ProcessWebhookInput {
   readonly webhookKey?: string;
 }
 
+interface SettlementStepResult {
+  readonly outcome: SettlementOutcome;
+  readonly code?: string;
+  /** Outbox row to dispatch AFTER the transaction commits. */
+  readonly notificationId?: number | null;
+}
+
 /**
- * B.3.5.2 — Build the MINIMUM trusted metadata required for future refund
- * recovery. Every value comes from a field that has already passed signature
- * verification, structural normalization and amount decoding — it is the
- * provider's own statement, not anything reconstructed from the application.
+ * B.3.5.2 — MINIMUM trusted metadata required for future refund recovery.
+ * Every value comes from a field that already passed signature verification,
+ * structural normalization and amount decoding — the provider's own statement,
+ * never anything reconstructed from the application.
  *
- *   PERSISTED:
- *     - kind            (payment | refund)
- *     - status          (Paid | Refund | Error | Cancel | Expired)
- *     - originalTrid    (refund movement's link back to the payment movement)
- *     - amountCents     (canonical integer cents; positive for refund recovery)
- *     - currency        (ISO-4217 three-letter code, uppercase)
- *     - method          (normalized payment method)
- *
- *   NOT persisted (intentionally — the metadata is the MINIMUM that future
- *   recovery needs, and the local-correlation fields are NOT safe to expose
- *   in a provider-event row that may be surfaced in the B.4.2 anomaly view):
- *     - identifier      (local-correlation id)
- *     - reference       (Multibanco reference)
- *     - entity          (Multibanco entity code)
- *
- *   NEVER persisted here:
- *     - trid                  (already stored in provider_webhook_events.providerEventId)
- *     - raw body, headers, signature, secrets, credentials, PAN/CVV/OTP
- *     - the full provider payload
- *
- * The existing `sanitizeWebhookMetadata` enforces the final cap (10 keys,
- * 200-char string values, no secret-like keys) and is the single source of
- * truth for what may reach the database.
+ * PERSISTED:  kind, status, originalTrid, amountCents, currency, method.
+ * NOT persisted: identifier / reference / entity (local-correlation fields are
+ * not safe to expose in a provider-event row surfaced by the anomaly view) and
+ * never the trid (it lives in `provider_webhook_events.provider_event_id`),
+ * the raw body, headers, signature or any secret.
  */
 function buildTrustedMetadata(event: NormalizedEupagoEvent): Record<string, string | number | boolean> {
   const meta: Record<string, string | number | boolean> = {
@@ -107,10 +146,8 @@ function buildTrustedMetadata(event: NormalizedEupagoEvent): Record<string, stri
 }
 
 /**
- * Full inbound webhook pipeline: verify → normalize → dedupe → settle.
- *
- * Any verification failure throws ProviderError(WEBHOOK_INVALID) so the route
- * can answer 401/400 without leaking provider internals.
+ * Full inbound webhook pipeline: verify → normalize → (one tx) claim → settle →
+ * processed → (post-commit) notify.
  */
 export async function processEupagoWebhook(
   input: ProcessWebhookInput
@@ -130,17 +167,7 @@ export async function processEupagoWebhook(
   }
   const event = normalized.event;
 
-  // 3. Dedupe on trid via the existing B.3.1 ledger (never a second ledger).
-  //    The raw body is hashed, never stored.
-  //
-  //    B.3.5.2 — Persist the MINIMUM trusted settlement data the recovery
-  //    service needs to re-derive correlation from a verified refund webhook
-  //    when the local refund_attempt is created AFTER the delivery. Only
-  //    fields that were already trusted (verified, normalized, structurally
-  //    valid) are written, and only after the existing `sanitizeWebhookMetadata`
-  //    pass drops any secret-like keys. The provider refund trid itself
-  //    continues to live in `provider_webhook_events.providerEventId` — it is
-  //    NEVER duplicated into metadata.
+  // 3. Register the delivery (INSERT … ON CONFLICT → trid is the identity).
   const registration = await registerWebhookEvent({
     provider: EUPAGO_PROVIDER_ID,
     providerEventId: event.trid,
@@ -153,32 +180,111 @@ export async function processEupagoWebhook(
     return { outcome: "duplicate", trid: event.trid };
   }
 
-  const claimed = await claimWebhookEvent(registration.event.id);
-  if (!claimed) {
-    // Already processing/processed elsewhere — a retry must not duplicate.
-    return { outcome: "duplicate", trid: event.trid };
+  // A movement already recorded as a FINANCIAL ANOMALY is idempotent: the same
+  // trid redelivered returns the same anomaly (never `processed`, never a second
+  // anomaly row, never a second settlement attempt).
+  if (registration.duplicate && isAnomalyWebhookEvent(registration.event)) {
+    return {
+      outcome: "payment_anomaly",
+      code: typeof registration.event.metadata?.anomalyCode === "string" ? registration.event.metadata.anomalyCode : "PAYMENT_ANOMALY",
+      trid: event.trid,
+    };
   }
 
   try {
-    const result =
-      event.kind === "refund" ? await settleRefundEvent(event) : await settlePaymentEvent(event);
+    // ── ONE transaction for claim + settlement + processed ──
+    const committed = await db.transaction(async (tx) => {
+      // L5 — the ledger rules of 0017 are enforced HERE too, not only on the
+      // payment-creation path: without this gate a deployment whose migration is
+      // missing would fail with a raw SQL error (unknown column/trigger) instead
+      // of the explicit operational fail-closed error. Cached per isolate.
+      await assertEupagoLedgerReady(tx);
 
-    if (result.outcome === "ignored" || result.outcome === "mismatch") {
-      await markWebhookEventIgnored(claimed.id, result.code);
-    } else {
-      await markWebhookEventProcessed(claimed.id);
+      const claimed = await claimWebhookEvent(registration.event.id, {
+        executor: tx,
+        extraGrantedAttempts: recoveryGrants(registration.event),
+      });
+      if (!claimed) {
+        if (registration.event.status === "processed") {
+          return { outcome: "duplicate", code: "CLAIM_BUDGET_EXHAUSTED", notificationId: null } satisfies SettlementStepResult;
+        }
+        if (isAnomalyWebhookEvent(registration.event)) {
+          // Terminal for the retry machinery: the money evidence is already
+          // recorded and only a human can resolve it.
+          return {
+            outcome: "payment_anomaly",
+            code: typeof registration.event.metadata?.anomalyCode === "string" ? registration.event.metadata.anomalyCode : "PAYMENT_ANOMALY",
+            notificationId: null,
+          } satisfies SettlementStepResult;
+        }
+        return { outcome: "deferred", code: "CLAIM_BUDGET_EXHAUSTED", notificationId: null } satisfies SettlementStepResult;
+      }
+
+      const settled =
+        event.kind === "refund"
+          ? await settleRefundEvent(tx, event)
+          : await settlePaymentEvent(tx, event);
+
+      if (settled.outcome === "ignored" || settled.outcome === "mismatch") {
+        await markWebhookEventIgnored(claimed.id, settled.code, tx);
+      } else if (settled.outcome === "deferred") {
+        await deferWebhookEvent(claimed.id, settled.code ?? "DEFERRED", tx);
+      } else if (settled.outcome === "payment_anomaly") {
+        // HIGH-1/HIGH-2 — NEVER `processed` when money could not be settled
+        // coherently: the event carries the anomaly code and stays outstanding
+        // for the operator (the anomaly row itself is written in-tx above).
+        await markWebhookEventAnomaly(claimed.id, settled.code ?? "PAYMENT_ANOMALY", tx);
+      } else {
+        await markWebhookEventProcessed(claimed.id, tx);
+      }
+      return settled;
+    });
+
+    // ── POST-COMMIT ONLY (no HTTP inside the transaction) ──
+    if (committed.notificationId != null) {
+      await dispatchEmailNotification(committed.notificationId);
     }
-    return { ...result, trid: event.trid };
+
+    return { outcome: committed.outcome, code: committed.code, trid: event.trid };
   } catch (e) {
-    await markWebhookEventFailed(claimed.id, e);
+    // The transaction rolled back — including its claim. The delivery is
+    // accounted for OUTSIDE the transaction so the capped retry budget reflects
+    // reality (H3: an event whose budget ran out needs an explicit grant).
+    await recordWebhookDeliveryFailure(registration.event.id, e).catch(() => undefined);
     throw e;
   }
 }
 
 // ─── Payment movements ────────────────────────────────────
 
-async function settlePaymentEvent(event: NormalizedEupagoEvent): Promise<ProcessWebhookResult> {
-  const attempt = await correlateAttempt(event);
+async function settlePaymentEvent(tx: DbOrTx, event: NormalizedEupagoEvent): Promise<SettlementStepResult> {
+  const correlated = await correlateAttempt(tx, event);
+  if (!correlated) {
+    // H2 — DECIDE BETWEEN "TERMINALLY IGNORED" AND "RE-EVALUABLE".
+    //
+    // An identifier is generated locally and COMMITTED before the create call is
+    // issued, so an authenticated delivery carrying an identifier that matches
+    // no local attempt is a definitive divergence (not ours) → ignored.
+    //
+    // A delivery that carries ONLY a Multibanco reference can legitimately
+    // arrive BEFORE the create response has persisted that reference (the
+    // attempt exists, its `provider_reference` is still NULL). That absence of
+    // correlation is TRANSIENT, so the event is deferred rather than ignored;
+    // the provider's redelivery of the same trid re-evaluates it against the
+    // local state as it exists then. Nothing is created, nothing is called.
+    if (event.identifier) return { outcome: "mismatch", code: "ATTEMPT_NOT_FOUND" };
+    if (event.reference) return { outcome: "deferred", code: "DEFERRED_REFERENCE_NOT_YET_PERSISTED" };
+    return { outcome: "mismatch", code: "ATTEMPT_NOT_FOUND" };
+  }
+
+  // Lock the correlated attempt: settlement serializes on it, and the revision
+  // read below is the fencing value for the write.
+  const [attempt] = await tx
+    .select()
+    .from(paymentAttempts)
+    .where(eq(paymentAttempts.id, correlated.id))
+    .limit(1)
+    .for("update");
   if (!attempt) return { outcome: "mismatch", code: "ATTEMPT_NOT_FOUND" };
 
   // Strict correlation before ANY financial effect. When the provider supplies
@@ -191,18 +297,17 @@ async function settlePaymentEvent(event: NormalizedEupagoEvent): Promise<Process
     return { outcome: "mismatch", code: "REFERENCE_MISMATCH" };
   }
   if (!event.method) return { outcome: "mismatch", code: "METHOD_MISSING" };
-  if (attempt.method !== event.method) {
-    return { outcome: "mismatch", code: "METHOD_MISMATCH" };
-  }
+  if (attempt.method !== event.method) return { outcome: "mismatch", code: "METHOD_MISMATCH" };
   if (!event.currency || event.currency !== attempt.currency) {
     return { outcome: "mismatch", code: "CURRENCY_MISMATCH" };
   }
 
   if (event.status !== "Paid") {
-    // Error / Cancel / Expired: record PROVIDER state only. No order
-    // transition is invented — the order state machine stays authoritative.
-    const providerStatus = event.status === "Expired" ? "expired" : event.status === "Cancel" ? "cancelled" : "failed";
-    await db
+    // Error / Cancel / Expired: record PROVIDER state only. No order transition
+    // is invented — the order state machine stays authoritative.
+    const providerStatus =
+      event.status === "Expired" ? "expired" : event.status === "Cancel" ? "cancelled" : "failed";
+    const [updated] = await tx
       .update(paymentAttempts)
       .set({
         status: providerStatus,
@@ -210,10 +315,36 @@ async function settlePaymentEvent(event: NormalizedEupagoEvent): Promise<Process
         failureReason: `PROVIDER_${event.status.toUpperCase()}`,
         completedAt: new Date(),
         recoveryState: null,
+        operationRevision: sql`${paymentAttempts.operationRevision} + 1`,
         updatedAt: new Date(),
       })
-      .where(and(eq(paymentAttempts.id, attempt.id), eq(paymentAttempts.status, "pending")))
+      .where(
+        and(
+          eq(paymentAttempts.id, attempt.id),
+          eq(paymentAttempts.status, "pending"),
+          eq(paymentAttempts.operationRevision, attempt.operationRevision)
+        )
+      )
       .returning();
+
+    if (!updated) {
+      // Already settled by an earlier delivery / provider state already known.
+      return { outcome: "duplicate" };
+    }
+
+    await createAuditLogTx(tx, {
+      userId: null,
+      action: "payment.provider_state_recorded",
+      entity: "payment_attempt",
+      entityId: updated.id,
+      details: {
+        orderId: updated.orderId,
+        paymentId: updated.paymentId,
+        provider: EUPAGO_PROVIDER_ID,
+        providerStatus,
+        trid: event.trid,
+      },
+    });
     return { outcome: "payment_attempt_updated", code: providerStatus };
   }
 
@@ -222,10 +353,52 @@ async function settlePaymentEvent(event: NormalizedEupagoEvent): Promise<Process
     return { outcome: "mismatch", code: "AMOUNT_MISMATCH" };
   }
 
-  // Bind the settling fund movement to this attempt. The unique index on
-  // (provider, provider_transaction_id) makes a cross-attempt reuse of the
-  // same trid impossible.
-  const [claimedAttempt] = await db
+  if (attempt.status === "paid") {
+    // Same fund movement re-delivered after settlement → idempotent no-op.
+    if (attempt.providerTransactionId === event.trid) return { outcome: "duplicate" };
+
+    // HIGH-1(c) — a DIFFERENT, authenticated movement correlated to an attempt
+    // that is already settled is EVIDENCE OF A SECOND CHARGE. It is never
+    // dismissed as a technical divergence: the movement is recorded durably (its
+    // own trid is kept, outside the unique (provider, transaction) constraint of
+    // the attempt row) and the operator must reconcile/refund it.
+    const anomalyCode: SettlementAnomalyCode = "PAYMENT_NOT_COHERENT";
+    const anomaly = await recordSettlementAnomalyTx(tx, {
+      orderId: attempt.orderId,
+      paymentId: attempt.paymentId ?? null,
+      code: anomalyCode,
+      amountCents: event.amountCents,
+      currency: event.currency,
+      movementId: event.trid,
+    });
+    await createAuditLogTx(tx, {
+      userId: null,
+      action: "payment.provider_anomaly_recorded",
+      entity: "payment_attempt",
+      entityId: attempt.id,
+      details: {
+        orderId: attempt.orderId,
+        paymentId: attempt.paymentId ?? null,
+        provider: EUPAGO_PROVIDER_ID,
+        amountCents: event.amountCents,
+        currency: event.currency,
+        trid: event.trid,
+        code: "PROVIDER_TRANSACTION_CONFLICT",
+        anomalyCode,
+        anomalyId: anomaly?.id ?? null,
+        settledTrid: attempt.providerTransactionId,
+      },
+    });
+    return {
+      outcome: "payment_anomaly",
+      code: `${anomalyCode}:PROVIDER_TRANSACTION_CONFLICT`,
+      notificationId: null,
+    };
+  }
+
+  // Fenced compare-and-swap: the attempt must still be `pending` AND still be at
+  // the revision this delivery correlated against (item 16).
+  const [claimedAttempt] = await tx
     .update(paymentAttempts)
     .set({
       status: "paid",
@@ -234,9 +407,16 @@ async function settlePaymentEvent(event: NormalizedEupagoEvent): Promise<Process
       completedAt: new Date(),
       recoveryState: null,
       operatorActionCode: null,
+      operationRevision: sql`${paymentAttempts.operationRevision} + 1`,
       updatedAt: new Date(),
     })
-    .where(and(eq(paymentAttempts.id, attempt.id), eq(paymentAttempts.status, "pending")))
+    .where(
+      and(
+        eq(paymentAttempts.id, attempt.id),
+        eq(paymentAttempts.status, "pending"),
+        eq(paymentAttempts.operationRevision, attempt.operationRevision)
+      )
+    )
     .returning();
 
   if (!claimedAttempt) {
@@ -244,17 +424,78 @@ async function settlePaymentEvent(event: NormalizedEupagoEvent): Promise<Process
     return { outcome: "duplicate" };
   }
 
-  // Centralized lifecycle — the ONLY way an order becomes paid. It handles
-  // the transition, stock conversion, audit and deduplicated email itself.
-  const confirmation = await confirmOrderPayment(attempt.orderId, null);
-  if (!confirmation.success) {
-    throw new ProviderError("PROVIDER_UNAVAILABLE", {
-      provider: EUPAGO_PROVIDER_ID,
-      internalDetail: `order confirmation failed: ${confirmation.error ?? "unknown"}`,
+  // Canonical, centralized confirmation — same transaction. It settles EXACTLY
+  // the canonical payment of this attempt (never every pending payment row) and
+  // writes its audit + outbox row here as well.
+  //
+  // HIGH-1/HIGH-2 — FAIL-CLOSED: the confirmation refuses to write a partial
+  // settlement. When it does, the movement is NOT discarded and this delivery is
+  // NOT reported as processed: the attempt stays `paid` (evidence) and a durable
+  // anomaly is opened for the operator, in the SAME transaction.
+  const confirmation = await confirmOrderPaymentInTx(tx, {
+    orderId: attempt.orderId,
+    actorId: null,
+    paymentId: attempt.paymentId,
+    source: "provider_webhook",
+    settlementMustBeCoherent: true,
+  });
+
+  if (confirmation.incoherence) {
+    const anomalyCode = INCOHERENCE_ANOMALY_CODE[confirmation.incoherence.code];
+    const anomaly = await recordSettlementAnomalyTx(tx, {
+      orderId: claimedAttempt.orderId,
+      paymentId: confirmation.incoherence.paymentId ?? attempt.paymentId ?? null,
+      code: anomalyCode,
+      amountCents: claimedAttempt.amountCents,
+      currency: claimedAttempt.currency,
+      movementId: event.trid,
     });
+
+    // Auditable, in-tx: the money exists and needs reconciliation/refund.
+    await createAuditLogTx(tx, {
+      userId: null,
+      action: "payment.provider_anomaly_recorded",
+      entity: "payment_attempt",
+      entityId: claimedAttempt.id,
+      details: {
+        orderId: claimedAttempt.orderId,
+        paymentId: confirmation.incoherence.paymentId ?? attempt.paymentId ?? null,
+        provider: EUPAGO_PROVIDER_ID,
+        amountCents: claimedAttempt.amountCents,
+        currency: claimedAttempt.currency,
+        trid: event.trid,
+        code: confirmation.incoherence.code,
+        anomalyCode,
+        anomalyId: anomaly?.id ?? null,
+        detail: confirmation.incoherence.detail,
+      },
+    });
+
+    return {
+      outcome: "payment_anomaly",
+      code: `${anomalyCode}:${confirmation.incoherence.code}`,
+      notificationId: null,
+    };
   }
 
-  return { outcome: "payment_confirmed" };
+  // Financial audit INSIDE the transaction (item 21).
+  await createAuditLogTx(tx, {
+    userId: null,
+    action: "payment.provider_settled",
+    entity: "payment_attempt",
+    entityId: claimedAttempt.id,
+    details: {
+      orderId: claimedAttempt.orderId,
+      paymentId: attempt.paymentId,
+      provider: EUPAGO_PROVIDER_ID,
+      amountCents: claimedAttempt.amountCents,
+      currency: claimedAttempt.currency,
+      trid: event.trid,
+      changed: confirmation.changed,
+    },
+  });
+
+  return { outcome: "payment_confirmed", notificationId: confirmation.notificationId };
 }
 
 /**
@@ -263,9 +504,9 @@ async function settlePaymentEvent(event: NormalizedEupagoEvent): Promise<Process
  * An identifier supplied by the provider is only trusted because it is matched
  * against a locally generated value; a reference is matched the same way.
  */
-async function correlateAttempt(event: NormalizedEupagoEvent) {
+async function correlateAttempt(tx: DbOrTx, event: NormalizedEupagoEvent) {
   if (event.identifier) {
-    const [row] = await db
+    const [row] = await tx
       .select()
       .from(paymentAttempts)
       .where(
@@ -278,7 +519,7 @@ async function correlateAttempt(event: NormalizedEupagoEvent) {
     if (row) return row;
   }
   if (event.reference) {
-    const [row] = await db
+    const [row] = await tx
       .select()
       .from(paymentAttempts)
       .where(
@@ -298,18 +539,15 @@ async function correlateAttempt(event: NormalizedEupagoEvent) {
 /**
  * Settle a refund movement against the EXISTING B.3.5 refund_attempts ledger.
  *
- * The refund event carries its OWN trid (dedupe key) plus originalTrid (the
- * payment movement). Correlation therefore goes:
- *   originalTrid → payment_attempt → order → pending refund_attempt.
- *
- * No payments row is rewritten, no order transition is performed, no stock or
- * RMA record is touched. Over-refund protection remains with the B.3.5
- * database trigger.
+ * Correlation goes: originalTrid → payment_attempt → canonical payment →
+ * matching refund_attempt of THAT payment. No payments row is rewritten, no
+ * order transition is performed, no stock or RMA record is touched, and the
+ * over-refund protection remains with the B.3.5 database trigger.
  */
-async function settleRefundEvent(event: NormalizedEupagoEvent): Promise<ProcessWebhookResult> {
+async function settleRefundEvent(tx: DbOrTx, event: NormalizedEupagoEvent): Promise<SettlementStepResult> {
   const originalTrid = event.originalTrid!;
 
-  const [paymentAttempt] = await db
+  const [paymentAttempt] = await tx
     .select()
     .from(paymentAttempts)
     .where(
@@ -326,7 +564,7 @@ async function settleRefundEvent(event: NormalizedEupagoEvent): Promise<ProcessW
   }
 
   // Already settled by an earlier delivery of the SAME refund trid.
-  const [alreadySettled] = await db
+  const [alreadySettled] = await tx
     .select({ id: refundAttempts.id })
     .from(refundAttempts)
     .where(
@@ -335,71 +573,73 @@ async function settleRefundEvent(event: NormalizedEupagoEvent): Promise<ProcessW
     .limit(1);
   if (alreadySettled) return { outcome: "duplicate" };
 
-  const settled = await db.transaction(async (tx) => {
-    // Serialize refund movement correlation per original payment. Without this
-    // lock, two distinct equal movements can both choose the same oldest
-    // candidate; the conditional-update loser would then be misclassified as
-    // a duplicate instead of advancing to the next legitimate attempt.
-    await tx
-      .select({ id: paymentAttempts.id })
-      .from(paymentAttempts)
-      .where(eq(paymentAttempts.id, paymentAttempt.id))
-      .for("update");
+  // Serialize refund movement correlation per original payment. Without this
+  // lock, two distinct equal movements can both choose the same oldest
+  // candidate; the conditional-update loser would then be misclassified as a
+  // duplicate instead of advancing to the next legitimate attempt.
+  await tx
+    .select({ id: paymentAttempts.id })
+    .from(paymentAttempts)
+    .where(eq(paymentAttempts.id, paymentAttempt.id))
+    .for("update");
 
-    // Re-read candidates only after acquiring the payment lock, so every
-    // distinct movement observes settlements committed by its predecessor.
-    const candidates = await tx
-      .select()
-      .from(refundAttempts)
-      .where(
-        and(
-          eq(refundAttempts.orderId, paymentAttempt.orderId),
-          eq(refundAttempts.provider, EUPAGO_PROVIDER_ID),
-          eq(refundAttempts.providerOriginalTransactionId, originalTrid)
-        )
+  // Re-read candidates AFTER acquiring the payment lock, restricted to the
+  // CANONICAL payment of the settled attempt (item 23).
+  const candidates = await tx
+    .select()
+    .from(refundAttempts)
+    .where(
+      and(
+        eq(refundAttempts.orderId, paymentAttempt.orderId),
+        eq(refundAttempts.provider, EUPAGO_PROVIDER_ID),
+        eq(refundAttempts.providerOriginalTransactionId, originalTrid),
+        paymentAttempt.paymentId != null
+          ? eq(refundAttempts.paymentId, paymentAttempt.paymentId)
+          : eq(refundAttempts.orderId, paymentAttempt.orderId)
       )
-      .orderBy(refundAttempts.id);
+    )
+    .orderBy(refundAttempts.id);
 
-    const target = candidates.find(
-      (r) =>
-        (r.status === "pending" || r.status === "processing") &&
-        r.amountCents === event.amountCents &&
-        r.currency === event.currency
-    );
-    if (!target) return null;
+  const target = candidates.find(
+    (r) =>
+      (r.status === "pending" || r.status === "processing") &&
+      r.amountCents === event.amountCents &&
+      r.currency === event.currency
+  );
+  if (!target) return { outcome: "ignored", code: "REFUND_ATTEMPT_NOT_FOUND" };
 
-    // The B.3.5 balance trigger re-verifies the over-refund invariant on this
-    // UPDATE. The condition also protects against unrelated state transitions.
-    const [updated] = await tx
-      .update(refundAttempts)
-      .set({
-        status: "succeeded",
-        providerRefundId: event.trid,
-        completedAt: new Date(),
-        recoveryState: null,
-        operatorActionCode: null,
-        errorCode: null,
-        errorMessage: null,
-        updatedAt: new Date(),
-      })
-      .where(and(eq(refundAttempts.id, target.id), eq(refundAttempts.status, target.status)))
-      .returning();
+  // The B.3.5 balance trigger re-verifies the over-refund invariant on this
+  // UPDATE. The predicate also fences against unrelated state transitions.
+  const [updated] = await tx
+    .update(refundAttempts)
+    .set({
+      status: "succeeded",
+      providerRefundId: event.trid,
+      completedAt: new Date(),
+      recoveryState: null,
+      operatorActionCode: null,
+      errorCode: null,
+      errorMessage: null,
+      updatedAt: new Date(),
+    })
+    .where(and(eq(refundAttempts.id, target.id), eq(refundAttempts.status, target.status)))
+    .returning();
 
-    return updated ?? null;
-  });
+  if (!updated) return { outcome: "duplicate" };
 
-  if (!settled) return { outcome: "mismatch", code: "REFUND_ATTEMPT_NOT_FOUND" };
-
-  await createAuditLog({
+  await createAuditLogTx(tx, {
     userId: null,
     action: "refund.provider_settled",
     entity: "refund",
-    entityId: settled.id,
+    entityId: updated.id,
     details: {
-      orderId: settled.orderId,
+      orderId: updated.orderId,
+      paymentId: updated.paymentId,
       provider: EUPAGO_PROVIDER_ID,
-      amountCents: settled.amountCents,
-      currency: settled.currency,
+      amountCents: updated.amountCents,
+      currency: updated.currency,
+      trid: event.trid,
+      originalTrid,
     },
   });
 

@@ -8,13 +8,18 @@
  *  keyed by our stable identifier.
  *
  * ABSENCE SEMANTICS ARE STRICT
- *  `absent` is returned ONLY when the provider gives a well-formed response
- *  that positively proves nothing was created (HTTP 200 with an empty result
- *  set, or an explicit documented 404 "not found").
+ *  `not_found` is returned ONLY when the provider gives a well-formed response
+ *  reporting that nothing exists for our identifier (HTTP 200 with an empty
+ *  result set, or an explicit documented 404 "not found").
+ *
+ *  PAYMENT P0 (item 15): even `not_found` is NOT treated as authorization to
+ *  create again. The single production caller (`recoverPaymentAttempt`) maps it
+ *  to UNKNOWN, and PROVEN_ABSENT requires a positive absence proof that no
+ *  production code path supplies — so a real HTTP response can never re-arm an
+ *  attempt and risk charging the customer twice.
  *
  *  Timeout, 5xx, OAuth failure and malformed responses are AMBIGUOUS. They are
- *  never downgraded to "absent", because doing so would authorize a second
- *  create request and risk charging the customer twice.
+ *  never downgraded to "not_found".
  */
 
 import {
@@ -33,8 +38,16 @@ export type RecoveryLookupResult =
       readonly status?: string | null;
       readonly amountCents?: number | null;
     }
-  /** Provider PROVED nothing exists for this identifier. */
-  | { readonly kind: "absent" }
+  /**
+   * The provider REPORTS nothing exists for this identifier (well-formed empty
+   * result set, or a documented 404).
+   *
+   * PAYMENT P0 (item 15): this is an OBSERVATION, not a proof. The runtime never
+   * converts it into a re-create authorization on its own — see
+   * `recoverPaymentAttempt()`, which maps it to UNKNOWN unless a positive
+   * absence proof is injected.
+   */
+  | { readonly kind: "not_found" }
   /** Unknown provider state — operator/reconciliation required. */
   | { readonly kind: "ambiguous"; readonly reason: AmbiguityReason };
 
@@ -85,9 +98,9 @@ export async function lookupByIdentifier(
     return { kind: "ambiguous", reason: response.reason };
   }
 
-  // A documented 404 is positive proof of absence. Any other 4xx (401/403
-  // authorization problems, 400 malformed query) is NOT.
-  if (response.status === 404) return { kind: "absent" };
+  // A documented 404 means the provider reports no such reference. Any other
+  // 4xx (401/403 authorization problems, 400 malformed query) is NOT even that.
+  if (response.status === 404) return { kind: "not_found" };
   if (response.status >= 400) return { kind: "ambiguous", reason: "malformed_response" };
 
   const records = extractRecords(response.body);
@@ -95,7 +108,7 @@ export async function lookupByIdentifier(
     // We cannot tell an empty result from an unexpected shape → ambiguous.
     return { kind: "ambiguous", reason: "malformed_response" };
   }
-  if (records.length === 0) return { kind: "absent" };
+  if (records.length === 0) return { kind: "not_found" };
 
   const record = records[0];
   return {

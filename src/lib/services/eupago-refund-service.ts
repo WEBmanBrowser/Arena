@@ -17,13 +17,14 @@
  */
 
 import { db } from "@/db";
-import { paymentAttempts, refundAttempts } from "@/db/schema";
-import { and, eq } from "drizzle-orm";
+import { paymentAttempts, payments, refundAttempts } from "@/db/schema";
+import { and, asc, eq, sql } from "drizzle-orm";
 import { createAuditLog } from "@/lib/audit";
 import { ProviderError } from "@/lib/providers/errors";
 import { EUPAGO_PROVIDER_ID, type EupagoConfig } from "@/lib/providers/eupago/config";
 import { resolveEupagoConfig } from "@/lib/services/eupago-config-service";
 import { submitEupagoRefund } from "@/lib/providers/eupago/refunds";
+import { assertEupagoLedgerReady } from "@/lib/services/eupago-ledger-service";
 
 export type RefundAttemptRow = typeof refundAttempts.$inferSelect;
 
@@ -74,24 +75,78 @@ export async function armEupagoRefund(refundId: number): Promise<RefundAttemptRo
   }
   if (refund.providerOriginalTransactionId) return refund;
 
-  const [paid] = await db
+  // PAYMENT P0 (item 23) — the ORIGINAL movement is resolved through the
+  // CANONICAL payment this refund was created against (refund.paymentId), never
+  // by "any paid Eupago attempt of this order": with more than one attempt the
+  // latter could correlate the refund with a movement that was never refunded.
+  const [payment] = await db
+    .select()
+    .from(payments)
+    .where(and(eq(payments.id, refund.paymentId), eq(payments.orderId, refund.orderId)))
+    .limit(1);
+
+  if (!payment) {
+    throw new ProviderError("PAYMENT_NOT_FOUND", {
+      provider: EUPAGO_PROVIDER_ID,
+      internalDetail: "refund does not reference a canonical payment of this order",
+    });
+  }
+  if (payment.provider !== EUPAGO_PROVIDER_ID) {
+    throw new ProviderError("OPERATION_NOT_SUPPORTED", {
+      provider: EUPAGO_PROVIDER_ID,
+      internalDetail: "canonical payment is not an eupago payment",
+    });
+  }
+  if (payment.status !== "paid") {
+    throw new ProviderError("OPERATION_NOT_SUPPORTED", {
+      provider: EUPAGO_PROVIDER_ID,
+      internalDetail: "canonical payment is not settled",
+    });
+  }
+
+  // L2 — DETERMINISTIC, UNAMBIGUOUS selection of the movement to refund.
+  //
+  // Two attempts sharing the canonical payment are exactly what a double charge
+  // looks like (HIGH-1). Choosing one of them silently — the previous `.limit(1)`
+  // carried no ordering, so PostgreSQL was free to return EITHER row — would bind
+  // the refund to one movement while another, equally real movement stayed
+  // unreconciled, and the provider refund would be issued against an arbitrary
+  // trid. The binding is therefore only made when a SINGLE settled movement
+  // exists; otherwise the operator must intervene explicitly (never guess).
+  const paidAttempts = await db
     .select()
     .from(paymentAttempts)
     .where(
       and(
-        eq(paymentAttempts.orderId, refund.orderId),
+        eq(paymentAttempts.paymentId, payment.id),
         eq(paymentAttempts.provider, EUPAGO_PROVIDER_ID),
         eq(paymentAttempts.status, "paid")
       )
     )
-    .limit(1);
+    .orderBy(asc(paymentAttempts.id));
 
-  if (!paid?.providerTransactionId) {
+  const settled = paidAttempts.filter(
+    (attempt) => typeof attempt.providerTransactionId === "string" && attempt.providerTransactionId.length > 0
+  );
+
+  if (settled.length === 0) {
     throw new ProviderError("PAYMENT_NOT_FOUND", {
       provider: EUPAGO_PROVIDER_ID,
-      internalDetail: "no settled eupago payment movement for this order",
+      internalDetail: "no settled eupago payment movement for the canonical payment",
     });
   }
+  if (settled.length > 1) {
+    // Ambiguity is a FINANCIAL fact, not a technical one: refuse to arm and let
+    // the reconciliation console show the movements (each keeps its own trid).
+    throw new ProviderError("AMBIGUOUS_PROVIDER_MOVEMENT", {
+      provider: EUPAGO_PROVIDER_ID,
+      internalDetail: `canonical payment has ${settled.length} settled movements (attempts ${settled
+        .map((attempt) => attempt.id)
+        .join(",")}) — manual reconciliation required`,
+    });
+  }
+
+  const paid = settled[0];
 
   const [armed] = await db
     .update(refundAttempts)
@@ -100,9 +155,9 @@ export async function armEupagoRefund(refundId: number): Promise<RefundAttemptRo
       recoveryState: "armed",
       updatedAt: new Date(),
     })
-    .where(eq(refundAttempts.id, refund.id))
+    .where(and(eq(refundAttempts.id, refund.id), sql`${refundAttempts.providerOriginalTransactionId} IS NULL`))
     .returning();
-  return armed;
+  return armed ?? refund;
 }
 
 /**
@@ -112,6 +167,10 @@ export async function armEupagoRefund(refundId: number): Promise<RefundAttemptRo
  * call per attempt even under concurrent operators.
  */
 export async function executeEupagoRefund(input: ExecuteRefundInput): Promise<ExecuteRefundResult> {
+  // L5 — provider refunds write `provider_original_transaction_id` and the
+  // operation revision, both introduced by 0017: the deployment gate is enforced
+  // here as well, with an explicit operational error instead of raw SQL errors.
+  await assertEupagoLedgerReady();
   const config = input.config ?? await resolveEupagoConfig();
   const armed = await armEupagoRefund(input.refundId);
 
@@ -122,11 +181,29 @@ export async function executeEupagoRefund(input: ExecuteRefundInput): Promise<Ex
     });
   }
 
-  const [claimed] = await db
-    .update(refundAttempts)
-    .set({ recoveryState: "requested", providerRequestedAt: new Date(), updatedAt: new Date() })
-    .where(and(eq(refundAttempts.id, armed.id), eq(refundAttempts.recoveryState, "armed")))
-    .returning();
+  // PAYMENT P0 (item 12) — ATOMIC CLAIM COMMITTED BEFORE THE EXTERNAL HTTP CALL.
+  //
+  // The claim is its own committed transaction, so a crash between the claim and
+  // the network call leaves a durable `requested` row (operator-visible
+  // reconciliation) rather than an attempt that could be transmitted twice. The
+  // claim transition is also the SQL guard's trigger point: the payment
+  // correlation (`provider_original_transaction_id`) must already be persisted.
+  const claimed = await db.transaction(async (tx) => {
+    const [row] = await tx
+      .update(refundAttempts)
+      .set({
+        recoveryState: "requested",
+        providerRequestedAt: new Date(),
+        updatedAt: new Date(),
+        // PAYMENT P0 (item 16) — claiming an operation bumps the revision. The
+        // value returned here is the fence every later write-back must match:
+        // a stale response can never overwrite a newer operation's outcome.
+        operationRevision: sql`${refundAttempts.operationRevision} + 1`,
+      })
+      .where(and(eq(refundAttempts.id, armed.id), eq(refundAttempts.recoveryState, "armed")))
+      .returning();
+    return row ?? null;
+  });
 
   if (!claimed) {
     return { outcome: "reconciliation_required", refund: armed, code: "REFUND_ALREADY_REQUESTED" };
@@ -147,7 +224,8 @@ export async function executeEupagoRefund(input: ExecuteRefundInput): Promise<Ex
     const row = await setRefundOperatorState(
       claimed.id,
       "reconciliation_required",
-      `AMBIGUOUS_${result.reason.toUpperCase()}`
+      `AMBIGUOUS_${result.reason.toUpperCase()}`,
+      claimed.operationRevision
     );
     await createAuditLog({
       userId: input.actorId,
@@ -160,7 +238,15 @@ export async function executeEupagoRefund(input: ExecuteRefundInput): Promise<Ex
   }
 
   if (result.kind === "operator_required") {
-    const row = await setRefundOperatorState(claimed.id, "reconciliation_required", result.code);
+    const row = await setRefundOperatorState(
+      claimed.id,
+      "reconciliation_required",
+      result.code,
+      claimed.operationRevision
+    );
+    if (row.operationRevision !== claimed.operationRevision) {
+      return { outcome: "reconciliation_required", refund: row, code: "STALE_PROVIDER_RESPONSE" };
+    }
     await createAuditLog({
       userId: input.actorId,
       action: "refund.operator_intervention_required",
@@ -174,11 +260,26 @@ export async function executeEupagoRefund(input: ExecuteRefundInput): Promise<Ex
   if (result.kind === "rejected") {
     // The attempt stays committed (balance reserved) and is NOT auto-retried;
     // an operator decides through the existing B.3.5 transitions.
-    const row = await setRefundOperatorState(claimed.id, "reconciliation_required", result.code);
+    const row = await setRefundOperatorState(
+      claimed.id,
+      "reconciliation_required",
+      result.code,
+      claimed.operationRevision
+    );
+    // A newer operation advanced the refund meanwhile: report the current state
+    // instead of pretending this (stale) rejection is authoritative.
+    if (row.operationRevision !== claimed.operationRevision) {
+      return { outcome: "reconciliation_required", refund: row, code: "STALE_PROVIDER_RESPONSE" };
+    }
     return { outcome: "rejected", refund: row, code: result.code };
   }
 
   // Submitted — acknowledged only. Status intentionally REMAINS pending.
+  //
+  // FENCED write-back (item 16): the update only applies while the attempt is
+  // still at the state/recovery-state this call observed. If a refund webhook
+  // already settled the row (`recoveryState` cleared, status `succeeded`), the
+  // late acknowledgement can never move it backwards.
   const [row] = await db
     .update(refundAttempts)
     .set({
@@ -188,7 +289,16 @@ export async function executeEupagoRefund(input: ExecuteRefundInput): Promise<Ex
       operatorActionCode: null,
       updatedAt: new Date(),
     })
-    .where(and(eq(refundAttempts.id, claimed.id), eq(refundAttempts.status, claimed.status)))
+    .where(
+      and(
+        eq(refundAttempts.id, claimed.id),
+        eq(refundAttempts.status, claimed.status),
+        eq(refundAttempts.recoveryState, "requested"),
+        // Item 16 — revision fence: only the operation that still owns the row
+        // may record its outcome.
+        eq(refundAttempts.operationRevision, claimed.operationRevision)
+      )
+    )
     .returning();
 
   await createAuditLog({
@@ -204,20 +314,57 @@ export async function executeEupagoRefund(input: ExecuteRefundInput): Promise<Ex
     },
   });
 
-  return { outcome: "submitted", refund: row ?? claimed };
+  if (!row) {
+    // The refund moved on (a newer operation or a settlement webhook). The
+    // acknowledgement is recorded in the audit trail but NEVER written back.
+    const [latest] = await db.select().from(refundAttempts).where(eq(refundAttempts.id, claimed.id)).limit(1);
+    await createAuditLog({
+      userId: input.actorId,
+      action: "refund.provider_response_stale",
+      entity: "refund",
+      entityId: claimed.id,
+      details: {
+        orderId: claimed.orderId,
+        provider: EUPAGO_PROVIDER_ID,
+        observedRevision: claimed.operationRevision,
+        currentRevision: latest?.operationRevision ?? null,
+      },
+    });
+    return { outcome: "submitted", refund: latest ?? claimed };
+  }
+
+  return { outcome: "submitted", refund: row };
 }
 
 async function setRefundOperatorState(
   refundId: number,
   recoveryState: string,
-  code: string
+  code: string,
+  /**
+   * Item 16 — when given, the write only applies while the row is still on the
+   * operation revision that produced this response. Omitting it is reserved for
+   * operator-initiated transitions (which are fenced by status instead).
+   */
+  observedRevision?: number
 ): Promise<RefundAttemptRow> {
+  // Never downgrade a refund that a webhook already settled: the operator state
+  // is only written while the row is still in a non-terminal state.
   const [row] = await db
     .update(refundAttempts)
     .set({ recoveryState, operatorActionCode: code.slice(0, 60), updatedAt: new Date() })
-    .where(eq(refundAttempts.id, refundId))
+    .where(
+      and(
+        eq(refundAttempts.id, refundId),
+        sql`${refundAttempts.status} IN ('pending','processing')`,
+        observedRevision === undefined
+          ? undefined
+          : eq(refundAttempts.operationRevision, observedRevision)
+      )
+    )
     .returning();
-  return row;
+  if (row) return row;
+  const [existing] = await db.select().from(refundAttempts).where(eq(refundAttempts.id, refundId)).limit(1);
+  return existing;
 }
 
 /** Refunds awaiting operator/reconciliation attention (report only). */

@@ -25,6 +25,8 @@ import {
 import { and, desc, eq, notInArray, sql } from "drizzle-orm";
 import { ProviderError, sanitizeErrorMessage } from "./errors";
 import { getPaymentProvider, type PaymentProviderId } from "./registry";
+import { EUPAGO_PROVIDER_ID } from "./eupago/config";
+import { prepareEupagoLedgerContext } from "@/lib/services/eupago-ledger-service";
 import { MAX_PROVIDER_AMOUNT_CENTS, PROVIDER_CURRENCY, assertSupportedCurrency } from "./money-boundary";
 
 export type PaymentAttemptRecord = typeof paymentAttempts.$inferSelect;
@@ -112,6 +114,15 @@ export interface CreatePaymentAttemptInput {
   providerReference?: string | null;
   status?: PaymentAttemptStatus;
   expiresAt?: Date | null;
+  /**
+   * PAYMENT P0 — canonical `payments` row this attempt settles.
+   *
+   * Required by the 0017 identity guard for real provider attempts. When it is
+   * not supplied for a Eupago attempt, the ledger context (readiness + ledger
+   * environment + canonical payment) is provisioned here so every writer of a
+   * Eupago attempt produces a correlated row.
+   */
+  paymentId?: number | null;
 }
 
 function validateAmount(amountCents: number, provider: string): number {
@@ -144,19 +155,42 @@ export async function createPaymentAttempt(input: CreatePaymentAttemptInput): Pr
     });
   }
 
-  const [row] = await db
-    .insert(paymentAttempts)
-    .values({
-      orderId: input.orderId,
-      provider: descriptor.id,
-      method: input.method,
-      status,
-      providerReference: input.providerReference ?? null,
-      amountCents: validateAmount(input.amountCents, descriptor.id),
-      currency: assertSupportedCurrency(input.currency ?? PROVIDER_CURRENCY),
-      expiresAt: input.expiresAt ?? null,
-    })
-    .returning();
+  const amountCents = validateAmount(input.amountCents, descriptor.id);
+  const currency = assertSupportedCurrency(input.currency ?? PROVIDER_CURRENCY);
+
+  const paymentId = input.paymentId ?? null;
+
+  // PAYMENT P0 (items 1/4/10) — provisioning the canonical payment and writing
+  // the attempt are ONE unit: an attempt can never exist without the payment row
+  // that the ledger identity guard requires (and a payment row is never created
+  // for an attempt that fails validation afterwards).
+  const [row] = await db.transaction(async (tx) => {
+    let linkedPaymentId = paymentId;
+    if (linkedPaymentId === null && descriptor.id === EUPAGO_PROVIDER_ID) {
+      const { payment } = await prepareEupagoLedgerContext(tx, {
+        orderId: input.orderId,
+        method: input.method,
+        amountCents,
+        currency,
+      });
+      linkedPaymentId = payment.id;
+    }
+
+    return tx
+      .insert(paymentAttempts)
+      .values({
+        orderId: input.orderId,
+        paymentId: linkedPaymentId,
+        provider: descriptor.id,
+        method: input.method,
+        status,
+        providerReference: input.providerReference ?? null,
+        amountCents,
+        currency,
+        expiresAt: input.expiresAt ?? null,
+      })
+      .returning();
+  });
   return row;
 }
 

@@ -8,6 +8,7 @@ import { toCents, toEuros, calcVatFromGross, lineTotal as calcLineTotal, allocat
 import { sendEmail, orderCreatedEmail } from "@/lib/email";
 import { calculateShippingForCart, ShippingRateError } from "@/lib/shipping-rates";
 import { checkRateLimit, clientIp, rateLimitResponse } from "@/lib/rate-limit";
+import { lockProductsAscending } from "@/lib/stock-locks";
 
 /**
  * B.5.4 — POST /api/orders abuse protection (existing Postgres rate-limit
@@ -180,6 +181,14 @@ export async function POST(req: NextRequest) {
       }).returning();
 
       // ── 6. Create order items with full financial snapshot ──
+      //
+      // M1 — deterministic lock order: every product row this order touches is
+      // locked in ascending id order BEFORE the reservation loop, so concurrent
+      // checkouts touching the same products can never deadlock each other (nor
+      // deadlock against the payment-confirmation / release paths, which use the
+      // same helper). Behaviour is otherwise unchanged.
+      const lockedProducts = await lockProductsAscending(tx, orderLines.map((line) => line.product.id));
+
       for (let i = 0; i < orderLines.length; i++) {
         const line = orderLines[i];
         const lineDisc = lineDiscounts[i];
@@ -211,10 +220,13 @@ export async function POST(req: NextRequest) {
           )).returning();
           if (!updated) throw new Error(`VALIDATION:Stock insuficiente para ${line.product.name} (concorrência)`);
 
+          // M1 — before/after values come from the LOCKED row, so the audit
+          // trail matches the state the availability invariant was evaluated on.
+          const lockedProduct = lockedProducts.get(line.product.id) ?? line.product;
           await tx.insert(stockMovements).values({
             productId: line.product.id, type: "reservation_created", quantity: line.quantity,
-            stockBefore: line.product.stock, stockAfter: line.product.stock,
-            reservedBefore: line.product.reservedStock, reservedAfter: line.product.reservedStock + line.quantity,
+            stockBefore: lockedProduct.stock, stockAfter: lockedProduct.stock,
+            reservedBefore: lockedProduct.reservedStock, reservedAfter: lockedProduct.reservedStock + line.quantity,
             reason: `Reserva #${orderNumber}`, referenceType: "order", referenceId: order.id, userId: user?.id ?? null,
           });
         }

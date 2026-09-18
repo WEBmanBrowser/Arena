@@ -225,14 +225,15 @@ describe("B.3.5 refund request validation", () => {
     );
   });
 
-  it("records a registry provider refund as pending intent with fail-closed execution", async () => {
+  it("refuses a provider refund when the order was NOT settled by that provider (P0 item 23)", async () => {
+    // The order below is paid by the MANUAL wrapper (bank transfer). A provider
+    // refund would reference a payment the provider never received, so it is
+    // refused instead of being recorded as an uncorrelatable intent.
     const user = await createB35User();
     const { order } = await createPaidOrder({});
-    const result = await requestRefund({ orderId: order.id, amountCents: 1000, idempotencyKey: key(), requestedBy: user.id, provider: "eupago" });
-    expect(result.created).toBe(true);
-    expect(result.executionSupported).toBe(false);
-    expect(result.refund.status).toBe("pending");
-    expect(result.refund.provider).toBe("eupago");
+    await expect(
+      requestRefund({ orderId: order.id, amountCents: 1000, idempotencyKey: key(), requestedBy: user.id, provider: "eupago" })
+    ).rejects.toThrow(/fornecedor eupago|PAYMENT_NOT_FOUND|Pagamento confirmado/i);
   });
 });
 

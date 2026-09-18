@@ -118,6 +118,9 @@ async function createFixtureWithOriginalTrid(totalCents: number, originalTrid: s
     .insert(paymentAttempts)
     .values({
       orderId: order.id,
+      // PAYMENT P0 — the settled attempt is linked to the canonical payment it
+      // settled (the refund correlation walks payment → attempt).
+      paymentId: payment.id,
       provider: "eupago",
       method: "mbway",
       amountCents: totalCents,

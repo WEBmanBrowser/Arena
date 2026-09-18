@@ -3,6 +3,16 @@
  *
  * Machine-to-machine endpoint for Eupago Realtime Webhooks 2.0.
  *
+ * RETRYABLE ACKNOWLEDGEMENT (H2/HIGH-3)
+ *  A signature-verified delivery whose correlation cannot be established YET is
+ *  answered with a RETRYABLE status (503 + Retry-After) instead of a blanket 200.
+ *  A 200 would be a final acknowledgement of a movement we have not been able to
+ *  correlate, leaving the money invisible forever. The provider retry is the
+ *  bounded re-drive: nothing is scheduled internally, no cron and no loop exists,
+ *  and the delivery is parked in the re-evaluable `pending` state rather than
+ *  terminally `ignored`. Once the local reference exists, the SAME trid settles
+ *  exactly once.
+ *
  * SECURITY MODEL (deliberately NOT browser CSRF)
  *  Eupago is a server, not a browser: it has no Origin header and no session
  *  cookie, so same-origin CSRF validation is meaningless here and is NOT
@@ -25,6 +35,14 @@ import { isProviderError } from "@/lib/providers/errors";
 
 export const dynamic = "force-dynamic";
 
+/**
+ * Backoff hint attached to the retryable answer. Deliberately short and constant
+ * (no escalation, no internal scheduling): the provider's own retry policy decides
+ * how often the movement is offered again, and its budget for the delivery is what
+ * bounds the attempts.
+ */
+const DEFERRED_RETRY_AFTER_SECONDS = 60;
+
 export async function POST(req: NextRequest) {
   // Read the body EXACTLY as received. Any parse/re-stringify round trip here
   // would break signature verification for encrypt=false deliveries.
@@ -42,8 +60,21 @@ export async function POST(req: NextRequest) {
 
   try {
     const result = await processEupagoWebhook({ rawBody, headers });
-    // 200 for every handled outcome (including duplicates and ignored events)
-    // so the provider stops retrying a delivery we have already reasoned about.
+
+    // H2/HIGH-3 — a deferred delivery is NOT acknowledged as final. The response
+    // must be retryable so the provider redelivers the same trid until the local
+    // reference exists and the movement settles exactly once. The body stays
+    // terse: no local identifiers, no payloads, no provider internals.
+    if (result.outcome === "deferred") {
+      return NextResponse.json(
+        { received: false, retry: true, outcome: result.outcome },
+        { status: 503, headers: { "Retry-After": String(DEFERRED_RETRY_AFTER_SECONDS) } }
+      );
+    }
+
+    // 200 for every other handled outcome (including duplicates, ignored events
+    // and recorded financial anomalies) so the provider stops retrying a delivery
+    // we have already reasoned about and persisted.
     return NextResponse.json({ received: true, outcome: result.outcome }, { status: 200 });
   } catch (e) {
     if (isProviderError(e) && e.code === "WEBHOOK_INVALID") {
