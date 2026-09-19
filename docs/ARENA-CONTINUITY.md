@@ -218,19 +218,26 @@ documental. Mantêm-se **ABERTAS** até evidência contratual ou empírica da Eu
 4. **Correção legítima de montante** — se o provider pode reentregar o mesmo `trid` com montante corrigido; o modelo atual
    grava anomalia em vez de aplicar a correção (interage diretamente com o residual 1 de 2.5).
 
-### 2.7 Estado de rollout — **0017 aplicada em STAGING; código ainda não promovido para o runtime ativo**
+### 2.7 Estado de rollout — **0017 aplicada em STAGING; código do Step 2 merged em main**
 
-- **PR #45 aberto**: `Harden Eupago payment integrity and reconciliation`, base `main` em `14fa0f8f5ad4293eac5e4a1917608aa23e218537` e head `64935a2cfda6ad6c62cee11dae2db22b4b03c312`. Continua **sem merge para `main`**.
-- Os builds automáticos da branch criaram **Preview Versions/Alias** do `mdtech-staging`; **não há evidência de promoção deste checkpoint para o runtime ativo de `mdtech-staging` nem para produção**. O build do head `64935a2` terminou com sucesso e criou a Version ID `604d3f16-e5e5-48b3-b1b0-0ae99f8135e6` como preview.
-- Em **2026-09-19**, o diagnóstico **READ-ONLY / virgin-ledger** foi executado contra **Neon STAGING** e devolveu `VIRGIN`: zero registos Eupago nas tabelas relevantes e migration 0017 ainda ausente nesse momento.
-- A migration **`0017_eupago_p0_ledger_integrity.sql` foi depois aplicada exclusivamente em Neon STAGING**, através de ligação **DIRECT / Pooling OFF**, database `neondb`, role proprietária `mdtech_staging`.
+- **PR #46 merged**: o branch `eupago-step2-fix` foi integrado em `main` através do merge commit `112c682`.
+- O commit da correção do Step 2 é `b7f8490` — `Fix stranded email outbox claim threshold`.
+- `main` e `origin/main` estão atualmente alinhados em `112c682`; não existe divergência entre a branch local e `origin/main`.
+- A correção do stranded email outbox claim threshold substituiu a comparação SQL textual do timestamp por predicados Drizzle tipados (`isNull`, `lt`, `or`), mantendo o threshold de `STRANDED_CLAIM_MS = 15 minutos`.
+- A suite pós-correção terminou com **57/57 testes PASS**:
+  - `payments-p0-outbox.test.ts`: 17/17
+  - `payments-p0-cycle3-admin.test.ts`: 9/9
+  - `c342-source-run.test.ts`: 20/20
+  - `c344-sftp-source-run.test.ts`: 11/11
+- `git diff --check` passou sem erros antes do commit.
+- A migration **`0017_eupago_p0_ledger_integrity.sql` foi aplicada exclusivamente em Neon STAGING**, através de ligação **DIRECT / Pooling OFF**, database `neondb`, role proprietária `mdtech_staging`.
 - O artefacto aplicado foi validado imediatamente antes da execução: **10393 bytes**, SHA-256 canónico **`cdd77fdb243dd8d14ae368dd58bbb703f3fc7d7fc8fa779e1676d3ac6c1f3dbb`**.
 - `drizzle-kit migrate` terminou com **exit 0**. O bookkeeping ficou com **18 migrations**, 0017 em `id=18`, `created_at=1789692309756`, hash igual ao SHA-256 canónico e **zero migrations posteriores**.
 - O POST-CHECK READ-ONLY devolveu **`STEP2_OK_0017_APPLIED_COMPLETE`**: 6 colunas esperadas, 3 índices, 3 FKs, 2 funções e 2 triggers novos presentes; `recorded_by` passou a nullable e os defaults de `operation_revision` são `0`.
 - A comparação estrutural PRE → POST confirmou **exclusivamente o delta esperado da 0017**: 1237 → 1254 objetos; COL +6, CON +4, IDX +3, FN +2, TRG +2 e TBL 0. Não foram detetadas alterações estruturais alheias à migration.
 - **A 0017 não deve ser executada novamente em STAGING**: é não-idempotente e o Step 2 está concluído.
 - **Produção não foi migrada nem recebeu este código.**
-- Fazer merge do PR em `main` não deve ser tratado como mecanismo de migration. A ordem de rollout continua controlada: migration validada em STAGING → deploy do código correspondente → E2E/sandbox → validação contratual restante.
+- Fazer merge do código em `main` não deve ser tratado como mecanismo de migration. Migration e deploy continuam a ser etapas distintas.
 - **Nunca `db:push`** para instalar/reaplicar a 0017 (regra mantida, ver 2.1).
 - Nenhum pagamento/referência real foi criado contra a Eupago durante este Step 2 e nenhum segredo é registado neste documento.
 
@@ -268,7 +275,7 @@ Implementação da gestão de credenciais/webhooks Eupago no Backoffice, integra
 - **Sem secrets reais configurados** — nem no repositório nem neste documento. Antes de guardar o primeiro segredo no Backoffice: `wrangler secret put SETTINGS_ENCRYPTION_KEY` (ver doc de operação).
 - **Sem pagamento real de teste** — nenhum pagamento/referência real foi criado contra a Eupago neste ciclo.
 - **Sem deploy deste checkpoint** — o commit `5c1e6c4` está pushed mas ainda não foi deployado para staging/produção.
-- **Checkpoint PAYMENT/Eupago P0 ainda sem promoção para o runtime ativo** — PR #45 aberto, head `64935a2cfda6ad6c62cee11dae2db22b4b03c312`, **sem merge para `main`**. A migration 0017 foi aplicada **apenas em Neon STAGING** em 2026-09-19, após virgin-check `VIRGIN`, e o Step 2 foi validado integralmente (ver 2.7).
+- **Checkpoint PAYMENT/Eupago P0 — Step 2 merged em `main`** — PR #46 foi merged através do commit `112c682`, incorporando o commit `b7f8490`. A migration 0017 foi aplicada **apenas em Neon STAGING** em 2026-09-19, após virgin-check `VIRGIN`, e o Step 2 foi validado integralmente (ver 2.7). **Produção não foi migrada nem recebeu este código.**
 
 ---
 
