@@ -28,7 +28,7 @@
 
 import { db } from "@/db";
 import { emailNotifications, orders } from "@/db/schema";
-import { and, asc, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import { createAuditLog } from "@/lib/audit";
 import { orderPaidEmail } from "@/lib/email";
 import type { EmailOutboxStatus } from "@/db/schema";
@@ -231,9 +231,14 @@ export async function requeueEmailNotification(input: {
         eq(emailNotifications.id, input.id),
         inArray(emailNotifications.status, [...claimableStatuses]),
         input.allowStrandedClaim
-          ? sql`(${emailNotifications.status} <> 'dispatching'
-                 OR ${emailNotifications.dispatchStartedAt} IS NULL
-                 OR ${emailNotifications.dispatchStartedAt} < now() - ${`${STRANDED_CLAIM_MS} milliseconds`}::interval)`
+          ? or(
+              sql`${emailNotifications.status} <> 'dispatching'`,
+              isNull(emailNotifications.dispatchStartedAt),
+              lt(
+                emailNotifications.dispatchStartedAt,
+                new Date(now - STRANDED_CLAIM_MS)
+              )
+            )
           : undefined
       )
     )
