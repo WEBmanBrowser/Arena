@@ -37,8 +37,7 @@ sem divergência. Continua **sem PR aberto, sem merge para `main` e sem deploy**
 ## 2. PAYMENT P0 — integridade financeira Eupago (Cycles 1–4, COMMITADO em `478e1e0e`)
 
 Trabalho **commitado e pushed** no commit `478e1e0efef5a15dbc6a48ed02b31782a8411d5e`, branch remota
-`arena/01a0b60b-arena`. **Sem PR aberto, sem merge para `main` e sem deploy**; a migração 0017 **não foi aplicada** em
-nenhuma base de dados real (ver 2.7).
+`arena/01a0b60b-arena`. **PR #45 aberto, sem merge para `main` e sem deploy do código**; a migration 0017 foi **aplicada exclusivamente em Neon STAGING em 2026-09-19** e validada pelo POST-CHECK e pelo delta PRE → POST (ver 2.7).
 Plano detalhado de rollout: `docs/integrations/eupago-p0-rollout.md`.
 
 Índice desta secção: **2.1** base P0 (Cycle 1) + Cycle 2 · **2.2** Cycle 3 · **2.3** Cycle 4 · **2.4** revisão
@@ -55,7 +54,7 @@ independente · **2.5** residuais P1 · **2.6** questões contratuais abertas ·
 - **Nunca `db:push`** para instalar 0017: diagnóstico READ-ONLY obrigatório antes
   (`scripts/eupago-ledger-virgin-check.cjs`; só SELECT, recusa alvos não-loopback). Ledger virgem → 0017 → deploy de código
   com Eupago sem tráfego. Não virgem → **STOP** e plano de compatibilidade/backfill/cutover separado.
-  **Esse diagnóstico NÃO foi executado contra nenhuma base real neste checkpoint.**
+  **Estado posterior (2026-09-19):** o diagnóstico foi executado em **Neon STAGING** e devolveu `VIRGIN`; a 0017 foi depois aplicada e validada nesse ambiente (ver 2.7).
 - **Cadeia canónica** `orders → payments → payment_attempts`: cada tentativa Eupago fica ligada ao `payment` canónico do
   mesmo pedido, com contexto não secreto `payments.metadata.eupagoEnvironment`. A confirmação marca **um único** payment
   canónico (nunca "todos os payments do pedido") e o movimento de reserva é feito com `FOR UPDATE` por ordem crescente de id.
@@ -219,19 +218,21 @@ documental. Mantêm-se **ABERTAS** até evidência contratual ou empírica da Eu
 4. **Correção legítima de montante** — se o provider pode reentregar o mesmo `trid` com montante corrigido; o modelo atual
    grava anomalia em vez de aplicar a correção (interage diretamente com o residual 1 de 2.5).
 
-### 2.7 Estado de rollout — **nada foi deployado, nenhuma migração aplicada**
+### 2.7 Estado de rollout — **0017 aplicada em STAGING; código ainda não deployado**
 
-- **Não houve deploy** deste checkpoint para staging nem para produção.
-- **A migração 0017 NÃO foi aplicada em nenhuma base de dados real** — nem Neon, nem staging, nem produção. As únicas bases
-  usadas foram **PostgreSQL embutido descartável** em `os.tmpdir()`, criado e destruído pelo `scripts/test-runner.cjs` em
-  cada run.
-- Fazer merge do PR em `main` **não aplica** migrações: o conteúdo do PR **não** deve ser lido como estado deployable.
-- **Antes do rollout continua obrigatório** o diagnóstico **READ-ONLY / virgin-ledger**
-  (`scripts/eupago-ledger-virgin-check.cjs`; só SELECT, recusa alvos não-loopback). Ledger virgem → 0017 → deploy de código
-  com Eupago sem tráfego. **Não virgem → STOP** e plano de compatibilidade/backfill/cutover separado.
-- **Nunca `db:push`** para instalar a 0017 (regra mantida, ver 2.1).
-- Nenhum pagamento/referência real foi criado contra a Eupago e nenhum HTTP externo real foi efetuado em qualquer ciclo deste
-  programa (garantido em teste pelo guard de `src/test-support/setup.ts`).
+- **PR #45 aberto**: `Harden Eupago payment integrity and reconciliation`, base `main` em `14fa0f8f5ad4293eac5e4a1917608aa23e218537` e head `e55a329ea4cd2601745af16cc55ed85ced087510`. Continua **sem merge para `main`**.
+- **Não houve deploy do código deste checkpoint** para staging nem para produção.
+- Em **2026-09-19**, o diagnóstico **READ-ONLY / virgin-ledger** foi executado contra **Neon STAGING** e devolveu `VIRGIN`: zero registos Eupago nas tabelas relevantes e migration 0017 ainda ausente nesse momento.
+- A migration **`0017_eupago_p0_ledger_integrity.sql` foi depois aplicada exclusivamente em Neon STAGING**, através de ligação **DIRECT / Pooling OFF**, database `neondb`, role proprietária `mdtech_staging`.
+- O artefacto aplicado foi validado imediatamente antes da execução: **10393 bytes**, SHA-256 canónico **`cdd77fdb243dd8d14ae368dd58bbb703f3fc7d7fc8fa779e1676d3ac6c1f3dbb`**.
+- `drizzle-kit migrate` terminou com **exit 0**. O bookkeeping ficou com **18 migrations**, 0017 em `id=18`, `created_at=1789692309756`, hash igual ao SHA-256 canónico e **zero migrations posteriores**.
+- O POST-CHECK READ-ONLY devolveu **`STEP2_OK_0017_APPLIED_COMPLETE`**: 6 colunas esperadas, 3 índices, 3 FKs, 2 funções e 2 triggers novos presentes; `recorded_by` passou a nullable e os defaults de `operation_revision` são `0`.
+- A comparação estrutural PRE → POST confirmou **exclusivamente o delta esperado da 0017**: 1237 → 1254 objetos; COL +6, CON +4, IDX +3, FN +2, TRG +2 e TBL 0. Não foram detetadas alterações estruturais alheias à migration.
+- **A 0017 não deve ser executada novamente em STAGING**: é não-idempotente e o Step 2 está concluído.
+- **Produção não foi migrada nem recebeu este código.**
+- Fazer merge do PR em `main` não deve ser tratado como mecanismo de migration. A ordem de rollout continua controlada: migration validada em STAGING → deploy do código correspondente → E2E/sandbox → validação contratual restante.
+- **Nunca `db:push`** para instalar/reaplicar a 0017 (regra mantida, ver 2.1).
+- Nenhum pagamento/referência real foi criado contra a Eupago durante este Step 2 e nenhum segredo é registado neste documento.
 
 ---
 
@@ -267,9 +268,7 @@ Implementação da gestão de credenciais/webhooks Eupago no Backoffice, integra
 - **Sem secrets reais configurados** — nem no repositório nem neste documento. Antes de guardar o primeiro segredo no Backoffice: `wrangler secret put SETTINGS_ENCRYPTION_KEY` (ver doc de operação).
 - **Sem pagamento real de teste** — nenhum pagamento/referência real foi criado contra a Eupago neste ciclo.
 - **Sem deploy deste checkpoint** — o commit `5c1e6c4` está pushed mas ainda não foi deployado para staging/produção.
-- **Sem deploy do checkpoint PAYMENT/Eupago P0** — `478e1e0e` está pushed em `arena/01a0b60b-arena`, **sem PR aberto, sem
-  merge e sem deploy**; a migração 0017 **não foi aplicada** em nenhuma BD real e o diagnóstico virgin-ledger continua
-  obrigatório antes do rollout (ver 2.7).
+- **Checkpoint PAYMENT/Eupago P0 ainda sem deploy de código** — PR #45 aberto, head `e55a329ea4cd2601745af16cc55ed85ced087510`, **sem merge para `main`**. A migration 0017 foi aplicada **apenas em Neon STAGING** em 2026-09-19, após virgin-check `VIRGIN`, e o Step 2 foi validado integralmente (ver 2.7).
 
 ---
 
