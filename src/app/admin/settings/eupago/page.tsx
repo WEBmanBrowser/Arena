@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import { buildSavePayload, isFormDirty } from "./save-payload";
 
 /**
  * Backoffice — configuração Eupago.
@@ -133,36 +134,39 @@ export default function EupagoSettingsPage() {
   const encryptionValue = encryption ?? status.webhook.encryption ?? false;
   const typesValue = types ?? status.webhook.types;
 
-  const dirtySecretIds = Object.entries(secrets)
-    .filter(([, v]) => v.length > 0)
-    .map(([k]) => k);
-  const isDirty =
-    dirtySecretIds.length > 0 ||
-    (env !== null && env !== (status.storedEnvironment ?? "sandbox")) ||
-    (endpoint !== null && endpoint !== (status.webhook.endpoint ?? "")) ||
-    (encryption !== null && encryption !== (status.webhook.encryption ?? false)) ||
-    (types !== null && JSON.stringify([...types].sort()) !== JSON.stringify([...status.webhook.types].sort()));
+  const isDirty = isFormDirty({
+    secrets,
+    env,
+    endpoint,
+    encryption,
+    types,
+    storedEnvironment: status.storedEnvironment,
+    storedEndpoint: status.webhook.endpoint,
+    storedEncryption: status.webhook.encryption,
+    storedTypes: status.webhook.types,
+  });
 
   const save = async () => {
     setSaving(true);
     setNotice(null);
-    const payload: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(secrets)) if (v.length > 0) payload[k] = v;
-    if (env !== null && env !== (status.storedEnvironment ?? "sandbox")) payload.environment = env;
     if (endpoint !== null && endpoint !== (status.webhook.endpoint ?? "")) {
       if (endpoint.trim().length === 0) {
         setNotice({ kind: "err", text: "O endpoint vazio não é válido — use «Limpar» para remover." });
         setSaving(false);
         return;
       }
-      payload.webhookEndpoint = endpoint;
     }
-    if (encryption !== null && encryption !== (status.webhook.encryption ?? false)) {
-      payload.webhookEncryption = encryption;
-    }
-    if (types !== null && JSON.stringify([...types].sort()) !== JSON.stringify([...status.webhook.types].sort())) {
-      payload.webhookTypes = types;
-    }
+    const payload = buildSavePayload({
+      secrets,
+      env,
+      endpoint,
+      encryption,
+      types,
+      storedEnvironment: status.storedEnvironment,
+      storedEndpoint: status.webhook.endpoint,
+      storedEncryption: status.webhook.encryption,
+      storedTypes: status.webhook.types,
+    });
     try {
       const r = await fetch("/api/admin/settings/eupago", {
         method: "PUT",
