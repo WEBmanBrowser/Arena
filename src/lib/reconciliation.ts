@@ -27,8 +27,10 @@ import {
   reconciliationObservations,
   refundAttempts,
   RECONCILIATION_ANOMALY_CODES,
+  RECONCILIATION_RESOLUTION_CODES,
+  type ReconciliationResolutionCode,
 } from "@/db/schema";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import { createAuditLog } from "@/lib/audit";
 import { decimalToCents } from "@/lib/money";
 import { PAYMENT_PROVIDERS, SHIPPING_PROVIDERS, INVOICE_PROVIDERS } from "@/lib/providers/registry";
@@ -214,13 +216,49 @@ export async function listOpenAnomalies(): Promise<Array<typeof reconciliationOb
     .limit(200);
 }
 
+/**
+ * C6 — resolve ONE anomaly with an EXPLICIT classification.
+ *
+ * A free-text note alone does not say WHY the anomaly was closed, and an
+ * operator must never be able to close a money divergence as if the money had
+ * been returned. The resolution therefore requires:
+ *   • `code`  — one of `RECONCILIATION_RESOLUTION_CODES` (closed set);
+ *   • `note`  — 3–500 characters of accountable explanation;
+ * and the actor + timestamp are stored on the row (plus the audit entry).
+ *
+ * `REFUNDED` additionally requires EVIDENCE inside the system (F-3): `succeeded`
+ * refund attempts bound to the SAME `paymentId` as the observation whose summed
+ * amount COVERS the money the anomaly is about (`observedPaidCents`). Existence
+ * alone is not evidence — a 1.00 refund never proves that a 50.00 divergence was
+ * returned. Only `succeeded` counts (`pending` / `processing` / `failed` /
+ * `cancelled` do not), and summing several partial refunds is safe:
+ * `enforce_refund_balance()` (drizzle/0007) bounds the committed refunds by the
+ * payment's paid amount and `idempotencyKey` is unique, so no ledger row can ever
+ * be counted twice.
+ *
+ * An observation that cannot be attributed to ONE payment (`paymentId IS NULL`,
+ * i.e. ingested/legacy rows) or whose relevant amount is not determinable
+ * (`observedPaidCents <= 0`) FAILS CLOSED with `REFUND_EVIDENCE_REQUIRED`. An
+ * `orderId` fallback is deliberately never used: it would accept the refund of a
+ * DIFFERENT payment of the same order. A refund executed out of band must be
+ * recorded through the refund ledger first, or classified as
+ * `MANUALLY_RECONCILED` (the operator's statement, with the note as evidence
+ * trail) — the system never claims money was returned without a record.
+ */
 export async function resolveReconciliationAnomaly(
   observationId: number,
   actorId: number,
-  note: string
+  note: string,
+  code: ReconciliationResolutionCode
 ): Promise<typeof reconciliationObservations.$inferSelect> {
   if (typeof note !== "string" || note.trim().length < 3 || note.trim().length > 500) {
     fail("INVALID_NOTE", "Nota de resolução obrigatória (3–500 caracteres)");
+  }
+  if (typeof code !== "string" || code.trim().length === 0) {
+    fail("RESOLUTION_CODE_REQUIRED", "Classificação da resolução obrigatória");
+  }
+  if (!(RECONCILIATION_RESOLUTION_CODES as readonly string[]).includes(code)) {
+    fail("INVALID_RESOLUTION_CODE", "Classificação de resolução inválida");
   }
 
   const observation = await db.transaction(async (tx) => {
@@ -233,6 +271,68 @@ export async function resolveReconciliationAnomaly(
     if (!current) fail("OBSERVATION_NOT_FOUND", "Observação não encontrada");
     if (current.status !== "open") fail("OBSERVATION_NOT_OPEN", "Observação não está aberta");
 
+    if (code === "REFUNDED") {
+      // ── F-3 — EVIDENCE GATE: sufficient money, on the RIGHT payment. ──────
+      //
+      // Existence of "some" succeeded refund is not evidence. A 1.00 refund used
+      // to prove a 50.00 divergence was returned, and an observation that could
+      // not be attributed to one payment fell back to `orderId` — accepting the
+      // refund of a DIFFERENT payment of the same order. Both are closed here.
+
+      // Fail closed on an UNATTRIBUTABLE observation: with no `paymentId` the
+      // relevant money cannot be bound to a payment, and no `orderId` fallback
+      // is ever used. The operator keeps `MANUALLY_RECONCILED` (with a note) as
+      // the truthful classification when automatic evidence is not determinable.
+      const paymentId = current.paymentId;
+      if (paymentId == null) {
+        fail(
+          "REFUND_EVIDENCE_REQUIRED",
+          "Observação não atribuível a um pagamento (paymentId ausente): não é possível provar o reembolso — registe-o no ledger ou classifique como MANUALLY_RECONCILED"
+        );
+      }
+
+      // The amount that must be covered is the persisted amount of the money
+      // movement that raised the anomaly (`recordSettlementAnomalyTx` writes it
+      // into `observedPaidCents`). `<= 0` means "not determinable": it can never
+      // prove coverage, and would otherwise make the check vacuously true.
+      const requiredCents = current.observedPaidCents;
+      if (!Number.isInteger(requiredCents) || requiredCents <= 0) {
+        fail(
+          "REFUND_EVIDENCE_REQUIRED",
+          "Montante relevante da anomalia não determinável (observedPaidCents <= 0): não é possível provar a cobertura do reembolso — classifique como MANUALLY_RECONCILED"
+        );
+      }
+
+      // SUCCEEDED refunds of the SAME payment only, summed. The status is an
+      // ALLOWLIST: `pending`, `processing`, `failed` and `cancelled` never count,
+      // nor would any future non-conclusive state. Summing partial refunds cannot
+      // double count — `enforce_refund_balance()` bounds committed refunds by the
+      // payment's paid amount and `idempotencyKey` is unique per ledger row.
+      // Currency is matched so amounts in different currencies are never added.
+      const [evidence] = await tx
+        .select({
+          refundedCents: sql<number>`coalesce(sum(${refundAttempts.amountCents}), 0)::int`,
+        })
+        .from(refundAttempts)
+        .where(
+          and(
+            eq(refundAttempts.orderId, current.orderId),
+            eq(refundAttempts.paymentId, paymentId),
+            eq(refundAttempts.status, "succeeded"),
+            eq(refundAttempts.currency, current.currency)
+          )
+        );
+      const refundedCents = evidence?.refundedCents ?? 0;
+      // `requiredCents > 0` is guaranteed above, so a sum of 0 (no succeeded
+      // refund at all) is rejected by the same comparison.
+      if (refundedCents < requiredCents) {
+        fail(
+          "REFUND_EVIDENCE_REQUIRED",
+          `Reembolso concluído insuficiente para o montante da anomalia (${refundedCents} de ${requiredCents} cents no mesmo pagamento): conclua o reembolso no ledger ou classifique como MANUALLY_RECONCILED`
+        );
+      }
+    }
+
     const [updated] = await tx
       .update(reconciliationObservations)
       .set({
@@ -240,6 +340,7 @@ export async function resolveReconciliationAnomaly(
         resolvedBy: actorId,
         resolvedAt: new Date(),
         resolutionNote: note.trim(),
+        resolutionCode: code,
       })
       .where(and(eq(reconciliationObservations.id, observationId), eq(reconciliationObservations.status, "open")))
       .returning();
@@ -252,9 +353,14 @@ export async function resolveReconciliationAnomaly(
     action: "reconciliation.anomaly_resolved",
     entity: "reconciliation_observation",
     entityId: observation.id,
-    details: { orderId: observation.orderId, anomalyCode: observation.anomalyCode },
+    details: {
+      orderId: observation.orderId,
+      anomalyCode: observation.anomalyCode,
+      resolutionCode: observation.resolutionCode,
+    },
   });
   return observation;
 }
 
-export { RECONCILIATION_ANOMALY_CODES };
+export { RECONCILIATION_ANOMALY_CODES, RECONCILIATION_RESOLUTION_CODES };
+export type { ReconciliationResolutionCode };

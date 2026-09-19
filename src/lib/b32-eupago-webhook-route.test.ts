@@ -98,20 +98,26 @@ async function seedPendingAttempt(amountCents = 5000) {
     discountAmount: "0.00",
     lineTotalGross: total,
   });
-  await db.insert(payments).values({
-    orderId: order.id,
-    provider: "eupago",
-    method: "multibanco",
-    amount: total,
-    currency: "EUR",
-    status: "pending",
-  });
+  const [payment] = await db
+    .insert(payments)
+    .values({
+      orderId: order.id,
+      provider: "eupago",
+      method: "multibanco",
+      amount: total,
+      currency: "EUR",
+      status: "pending",
+      metadata: { eupagoEnvironment: "sandbox" },
+    })
+    .returning();
 
   const identifier = `MDT-${order.id}-${unique().slice(0, 18).padEnd(18, "0")}`;
   const [attempt] = await db
     .insert(paymentAttempts)
     .values({
       orderId: order.id,
+      // PAYMENT P0 — every new Eupago attempt settles the canonical payment row.
+      paymentId: payment.id,
       provider: "eupago",
       method: "multibanco",
       status: "pending",
@@ -123,7 +129,7 @@ async function seedPendingAttempt(amountCents = 5000) {
     })
     .returning();
 
-  return { order, attempt, product };
+  return { order, attempt, product, payment };
 }
 
 function webhookRequest(rawBody: string, headers: Record<string, string>, method = "POST") {
