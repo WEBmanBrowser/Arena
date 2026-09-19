@@ -37,7 +37,7 @@ sem divergência. Continua **sem PR aberto, sem merge para `main` e sem deploy**
 ## 2. PAYMENT P0 — integridade financeira Eupago (Cycles 1–4, COMMITADO em `478e1e0e`)
 
 Trabalho **commitado e pushed** no commit `478e1e0efef5a15dbc6a48ed02b31782a8411d5e`, branch remota
-`arena/01a0b60b-arena`. **PR #45 aberto, sem merge para `main` e sem deploy do código**; a migration 0017 foi **aplicada exclusivamente em Neon STAGING em 2026-09-19** e validada pelo POST-CHECK e pelo delta PRE → POST (ver 2.7).
+`arena/01a0b60b-arena`. **PR #45 aberto, sem merge para `main` e sem promoção do código para o runtime ativo**; a migration 0017 foi **aplicada exclusivamente em Neon STAGING em 2026-09-19** e validada pelo POST-CHECK e pelo delta PRE → POST (ver 2.7).
 Plano detalhado de rollout: `docs/integrations/eupago-p0-rollout.md`.
 
 Índice desta secção: **2.1** base P0 (Cycle 1) + Cycle 2 · **2.2** Cycle 3 · **2.3** Cycle 4 · **2.4** revisão
@@ -218,10 +218,10 @@ documental. Mantêm-se **ABERTAS** até evidência contratual ou empírica da Eu
 4. **Correção legítima de montante** — se o provider pode reentregar o mesmo `trid` com montante corrigido; o modelo atual
    grava anomalia em vez de aplicar a correção (interage diretamente com o residual 1 de 2.5).
 
-### 2.7 Estado de rollout — **0017 aplicada em STAGING; código ainda não deployado**
+### 2.7 Estado de rollout — **0017 aplicada em STAGING; código ainda não promovido para o runtime ativo**
 
-- **PR #45 aberto**: `Harden Eupago payment integrity and reconciliation`, base `main` em `14fa0f8f5ad4293eac5e4a1917608aa23e218537` e head `e55a329ea4cd2601745af16cc55ed85ced087510`. Continua **sem merge para `main`**.
-- **Não houve deploy do código deste checkpoint** para staging nem para produção.
+- **PR #45 aberto**: `Harden Eupago payment integrity and reconciliation`, base `main` em `14fa0f8f5ad4293eac5e4a1917608aa23e218537` e head `64935a2cfda6ad6c62cee11dae2db22b4b03c312`. Continua **sem merge para `main`**.
+- Os builds automáticos da branch criaram **Preview Versions/Alias** do `mdtech-staging`; **não há evidência de promoção deste checkpoint para o runtime ativo de `mdtech-staging` nem para produção**. O build do head `64935a2` terminou com sucesso e criou a Version ID `604d3f16-e5e5-48b3-b1b0-0ae99f8135e6` como preview.
 - Em **2026-09-19**, o diagnóstico **READ-ONLY / virgin-ledger** foi executado contra **Neon STAGING** e devolveu `VIRGIN`: zero registos Eupago nas tabelas relevantes e migration 0017 ainda ausente nesse momento.
 - A migration **`0017_eupago_p0_ledger_integrity.sql` foi depois aplicada exclusivamente em Neon STAGING**, através de ligação **DIRECT / Pooling OFF**, database `neondb`, role proprietária `mdtech_staging`.
 - O artefacto aplicado foi validado imediatamente antes da execução: **10393 bytes**, SHA-256 canónico **`cdd77fdb243dd8d14ae368dd58bbb703f3fc7d7fc8fa779e1676d3ac6c1f3dbb`**.
@@ -268,7 +268,7 @@ Implementação da gestão de credenciais/webhooks Eupago no Backoffice, integra
 - **Sem secrets reais configurados** — nem no repositório nem neste documento. Antes de guardar o primeiro segredo no Backoffice: `wrangler secret put SETTINGS_ENCRYPTION_KEY` (ver doc de operação).
 - **Sem pagamento real de teste** — nenhum pagamento/referência real foi criado contra a Eupago neste ciclo.
 - **Sem deploy deste checkpoint** — o commit `5c1e6c4` está pushed mas ainda não foi deployado para staging/produção.
-- **Checkpoint PAYMENT/Eupago P0 ainda sem deploy de código** — PR #45 aberto, head `e55a329ea4cd2601745af16cc55ed85ced087510`, **sem merge para `main`**. A migration 0017 foi aplicada **apenas em Neon STAGING** em 2026-09-19, após virgin-check `VIRGIN`, e o Step 2 foi validado integralmente (ver 2.7).
+- **Checkpoint PAYMENT/Eupago P0 ainda sem promoção para o runtime ativo** — PR #45 aberto, head `64935a2cfda6ad6c62cee11dae2db22b4b03c312`, **sem merge para `main`**. A migration 0017 foi aplicada **apenas em Neon STAGING** em 2026-09-19, após virgin-check `VIRGIN`, e o Step 2 foi validado integralmente (ver 2.7).
 
 ---
 
