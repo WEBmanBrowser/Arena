@@ -5,7 +5,7 @@
 > decisões vigentes e regras de segurança/continuidade. Deve ser atualizado a
 > cada checkpoint relevante. **Nunca incluir secrets neste documento.**
 
-Última atualização: 2026-09-18
+Última atualização: 2026-09-19
 
 ---
 
@@ -13,20 +13,38 @@
 
 | Ref | SHA | Notas |
 |---|---|---|
-| Base anterior | `2bf3fa609d5c941347c050ec1f365f0e1ac3b5ce` (`2bf3fa6`) | Merge do PR #40 (`arena/wintouch-cloud-integration`); ponto de partida deste ciclo |
+| Base anterior | `2bf3fa609d5c941347c050ec1f365f0e1ac3b5ce` (`2bf3fa6`) | Merge do PR #40 (`arena/wintouch-cloud-integration`); ponto de partida do ciclo Eupago backoffice |
 | Checkpoint Eupago | `5c1e6c4ff2cf8809607dab322d76c0eeb0a8e2c1` (`5c1e6c4`) | "Add secure Eupago backoffice configuration"; branch `arena/01a0a6e6-arena`; feito push para `origin` |
+| `main` (base do PAYMENT P0) | `14fa0f8f5ad4293eac5e4a1917608aa23e218537` (`14fa0f8`) | Merge do PR #44; **parent direto** do checkpoint PAYMENT/Eupago P0 |
+| Baseline lógica Cycle 3 | `97849168043fb5c81678b6f5a303876513822e68` (`9784916`) | branch remota `arena/eupago-p0-cycle3-review`; linhagem **distinta** de `main` (merge-base `14fa0f8`); serve apenas de baseline para comparação tree-a-tree |
+| **Checkpoint PAYMENT/Eupago P0 (Cycles 1–4)** | **`478e1e0efef5a15dbc6a48ed02b31782a8411d5e`** (`478e1e0`) | "Checkpoint Eupago P0 cycle 4 fixes"; branch remota **`arena/01a0b60b-arena`**; **commitado e pushed para `origin`**; 58 ficheiros (30 added + 28 modified, **0 eliminados**), +19248/−390 |
 
-Working tree: **clean** no momento deste registo. Sem PR aberto, sem merge, sem deploy do checkpoint Eupago.
+Working tree: **clean** no momento do registo do checkpoint Eupago backoffice (`5c1e6c4`). Sem PR aberto, sem merge, sem deploy desse checkpoint.
 
-> Nota (2026-09-18): o checkpoint PAYMENT P0 descrito na secção 2 está **por commitar**; o working tree tem
-> alterações locais não commitadas. Continua **sem PR, sem merge e sem deploy**.
+O checkpoint PAYMENT/Eupago P0 descrito na secção 2 está **preservado no commit `478e1e0e`**, na branch remota
+**`arena/01a0b60b-arena`** (`origin/arena/01a0b60b-arena` = `478e1e0e`, confirmado por `git ls-remote`). A relação com
+`origin/main` é **estritamente linear**: `merge-base(main, 478e1e0e) = 14fa0f8 = tip de main`, **1 commit ahead, 0 behind**,
+sem divergência. Continua **sem PR aberto, sem merge para `main` e sem deploy**.
+
+> Nota (2026-09-19): esta revisão **corrige** as afirmações anteriores de "por commitar" / "NÃO COMMITADO" / "em curso, não
+> commitado", que deixaram de ser verdadeiras quando o checkpoint foi commitado e pushed. O working tree da sessão é
+> **byte-idêntico** ao tree de `478e1e0e` (396/396 ficheiros verificados por `git hash-object`). O HEAD **local** da sessão
+> aponta para `14fa0f8` — o conteúdo do checkpoint vive na branch remota, não no HEAD local; face a esse HEAD local
+> registam-se 58 entradas alteradas (28 tracked + 30 novas), que correspondem exatamente ao conteúdo de `478e1e0e`.
 
 ---
 
-## 2. PAYMENT P0 — integridade financeira Eupago (ESTE CHECKPOINT, NÃO COMMITADO)
+## 2. PAYMENT P0 — integridade financeira Eupago (Cycles 1–4, COMMITADO em `478e1e0e`)
 
-Trabalho **em curso, não commitado** (branch de trabalho; sem PR, sem merge, sem deploy).
+Trabalho **commitado e pushed** no commit `478e1e0efef5a15dbc6a48ed02b31782a8411d5e`, branch remota
+`arena/01a0b60b-arena`. **Sem PR aberto, sem merge para `main` e sem deploy**; a migração 0017 **não foi aplicada** em
+nenhuma base de dados real (ver 2.7).
 Plano detalhado de rollout: `docs/integrations/eupago-p0-rollout.md`.
+
+Índice desta secção: **2.1** base P0 (Cycle 1) + Cycle 2 · **2.2** Cycle 3 · **2.3** Cycle 4 · **2.4** revisão
+independente · **2.5** residuais P1 · **2.6** questões contratuais abertas · **2.7** estado de rollout.
+
+### 2.1 Base P0 (Cycle 1) e Cycle 2 — invariantes registados
 
 - **Migração versionada 0017** (`drizzle/0017_eupago_p0_ledger_integrity.sql`), **aditiva, sem DROP e sem backfill financeiro automático**:
   `payment_attempts.payment_id` (nullable para histórico, obrigatório para tentativas Eupago novas),
@@ -56,6 +74,164 @@ Plano detalhado de rollout: `docs/integrations/eupago-p0-rollout.md`.
   automático; recuperação manual auditada por operador. **Sem** Cloudflare Cron Trigger.
 - **integração de pagamentos no checkout continua só `bank_transfer`** (intencional): Multibanco/MB WAY/Cartão são fase
   posterior ao P0 financeiro.
+
+### 2.2 Cycle 3 — divergência de payload e evidência durável
+
+- **Gate C2 (pré-transação)**: antes de responder `duplicate` a uma reentrega do mesmo `trid`, o payload recebido é
+  comparado **semanticamente** com o estado CURRENT da row do evento; uma divergência material nunca é reconhecida como
+  duplicado silencioso. Eventos `ignored` ficam excluídos da comparação (por desenho documentado).
+- **`PROVIDER_EVENT_CONFLICT`** e escalada via `escalateConcludedConflict` / `escalateWebhookEventConflict`: a evidência da
+  divergência fica **durável** (anomalia + auditoria + `metadata.eventConflict` = fingerprint do conflito). A escalada abre
+  a **sua própria** transação (nunca aninhada na de settlement) e é **idempotente por fingerprint** (`IS DISTINCT FROM`),
+  pelo que gémeos concorrentes não duplicam a anomalia nem a auditoria. A escalada **não liquida nada** (`settled: false`).
+- **Limite de ocorrências**: `recordSettlementAnomalyTx` deduplica por `occurrenceReference` (`onConflictDoNothing`) e está
+  limitado a `MAX_ANOMALY_OCCURRENCES = 5` por movimento (referências `trid`, `trid#2` … `trid#5`); esgotado o limite, o
+  código continua a ser registado no evento + auditoria (nada fica invisível).
+- Testes: `src/lib/payments-p0-cycle3-c1.test.ts`, `payments-p0-cycle3-c2-c3.test.ts`, `payments-p0-cycle3-admin.test.ts`.
+
+### 2.3 Cycle 4 — F-1 (TOCTOU no C8), aceitação por concorrência real, F-3 e F1b
+
+**F-1 / C8 — TOCTOU após perda concorrente do claim.** O gate C2 avaliava um snapshot lido **fora** da transação; quando
+esse snapshot ainda dizia `pending`/`failed`, o gate era saltado — mas a entrega que ganhou o claim podia ter **concluído** o
+evento enquanto esta esperava pelo lock da row. Responder apenas com base no STATUS relido reconheceria como `duplicate`
+simples um payload autenticado que diverge materialmente daquele que foi concluído: exatamente a mudança silenciosa de
+significado que o C2 existe para impedir, alcançada pela janela do C8 em vez do caminho de reentrega.
+
+Correção em `src/lib/services/eupago-settlement-service.ts`, **estritamente aditiva** (+77/−0): dentro de `if (!claimed)` e
+**antes** de `processed → duplicate`, o estado CURRENT relido (`getWebhookEvent(id, tx)`) é **novamente comparado
+semanticamente** com o payload recebido, para `processed` ou anomalia (`ignored` continua excluído, tal como no gate
+pré-transação). Havendo divergência:
+
+- fingerprint **diferente** do já registado → devolve `outcome: "payment_anomaly"` / `PROVIDER_EVENT_CONFLICT` **de dentro
+  da própria transação** (placeholder fail-closed: mesmo que a escalada pós-commit não chegue a correr, o caller nunca vê
+  `duplicate`) e entrega a evidência num marcador interno `conflictEscalation`;
+- fingerprint **já registado** → responde com a anomalia que existe (`anomalyCodeOf(current)`), nunca um duplicado simples
+  nem uma segunda row de anomalia;
+- a escalada corre **pós-commit** (o mesmo padrão já usado no dispatch do outbox), porque `escalateConcludedConflict` abre a
+  sua própria transação. **Nada é liquidado**: o claim falhou, logo nenhum payment, stock ou estado de encomenda mudou.
+
+**Aceitação F-1 — 8 testes reais de concorrência** (`src/lib/payments-p0-cycle4-f1-concurrency.test.ts`): pipeline de
+produção real contra **PostgreSQL descartável** (nada substituído por mocks), com barreira `SELECT … FOR UPDATE` **na row do
+evento** (não na do attempt) e deteção da corrida por **`pg_locks`** (backend com lock `tuple`/`transactionid` não concedido
+que detém lock de relação em `provider_webhook_events`), o que força duas entregas autênticas a colidir no claim. O cenário
+de payload **idêntico** devolve `CONSUMED_BY_CONCURRENT_DELIVERY`, código que existe **uma única vez** em todo o código de
+produção (`eupago-settlement-service.ts:421`, dentro do C8) — é o **discriminador** que prova que o caminho C8 foi realmente
+atravessado e que a corrida não degenerou em falso positivo. Complementado por `payments-p0-cycle4-f1.test.ts` (5 testes com
+mocks explicitamente anotados como tal) e por `payments-p0-cycle4-f3.test.ts` (8 testes).
+
+**F-3 — classificação `REFUNDED`** (`src/lib/reconciliation.ts`): passa a exigir evidência de refunds `succeeded` do
+**mesmo `paymentId`**, na **mesma moeda**, com **cobertura suficiente de `observedPaidCents`** (soma dos `succeeded`).
+Múltiplos refunds parciais só contam se `succeeded`; um refund de **outro** payment nunca conta; **não há fallback por
+`orderId`**. Falham **fechados**: `paymentId = NULL`, `observedPaidCents` nulo/NaN/não-inteiro/≤ 0 e moeda indeterminada.
+A resolução administrativa corre em transação com `SELECT … FOR UPDATE` na observação + re-check de `status !== 'open'`, e a
+evidência é **monótona**: as transições para `cancelled`/`failed` estão guardadas a `pending|processing` com CAS
+(`src/lib/refunds.ts`), logo `succeeded` é terminal e a soma não pode encolher concorrentemente.
+
+**F1b / `processing`.** A revisão independente **não encontrou nenhum caminho de produção atual** em que o C8 releia um
+`processing` **commitado**: os dois únicos escritores de `status = 'processing'` são atómicos — `claimWebhookEvent` (claim +
+conclusão na mesma transação de settlement; qualquer rejeição ⇒ rollback) e o claim dirigido de
+`eupago-refund-recovery-service.ts` (claim + conclusão na sua própria transação; toda a rejeição pós-claim lança
+`RecoveryPreconditionError` ⇒ rollback). Nenhum caller de produção passa o `db` externo, e um crash a meio da transação é
+abortado pela própria base de dados. **Não há corrida concreta atual**; o tema mantém-se como **robustez/P1 latente** (2.5).
+
+### 2.4 Revisão independente do Cycle 4 — `NO P0 BLOCKER FOUND`
+
+Revisão adversarial **read-only** do delta `9784916 → 478e1e0e` (8 ficheiros: 3 testes novos, 1 flip de teste, 2 apenas com
+comentários, `reconciliation.ts` e `eupago-settlement-service.ts`), feita contra o checkpoint e **não** contra `git diff HEAD`.
+
+**Resultado: `NO P0 BLOCKER FOUND`.** Nenhum finding BLOCKER ou HIGH. Três MEDIUM, todos **fail-closed** ou **latentes**
+(sem sequência explorável no código atual) — detalhados em 2.5.
+
+Validações executadas no ambiente isolado garantido por `src/test-support/setup.ts` (guard de BD por
+`current_database()`/`inet_server_port()`, Hyperdrive intercetado no load do módulo, `globalThis.fetch` embrulhado para
+contar e **falhar** qualquer HTTP real, `EMAIL_API_KEY` removida):
+
+| Validação | Resultado |
+|---|---|
+| Testes Cycle 4 (`-f1-concurrency`, `-f3`, `-f1`) | **21/21 PASS** (8 + 8 + 5) em 3,97 s |
+| Suite completa no checkpoint | **1843 testes: 1828 PASS, 14 FAIL, 1 skipped** (110 ficheiros) |
+| As 14 falhas | exclusivamente `c344-ssh2-e2e` e `eupago-config-routes` — famílias **pré-existentes e fora de âmbito**, não tocadas por este checkpoint (não corrigidas nem agravadas) |
+| Worktree vs tree de `478e1e0e` | **396/396 ficheiros byte-idênticos** (`git hash-object`) |
+| Pré-verificação do PR `origin/main...origin/arena/01a0b60b-arena` | **58 ficheiros: 30 A + 28 M + 0 D**; +19248/−390; **1 commit**; 0 binários, 0 secrets/`.env`, 0 artefactos de build, **0 ficheiros fora do âmbito Eupago P0** |
+| Superset Cycle 3 ⊂ Cycle 4 | `main...9784916` = 55 ficheiros, `main...478e1e0e` = 58; delta Cycle 3→4 = 8 ficheiros com **0 eliminações** e **0 ficheiros da Cycle 3 ausentes** do tree da Cycle 4 |
+
+Verificações adversariais que **não** revelaram problema: dupla liquidação (quatro guardas independentes — event row única e
+claimável, CAS `orders WHERE status='pending_payment'`, `classifyPaidAgainstAttempt`/`recordSecondMovementTx`, trigger
+`refund_attempts_balance_guard`); um perdedor não corrompe a conclusão do vencedor (`recordWebhookDeliveryFailure` tem
+`WHERE status IN ('pending','failed','processing')`, logo `processed`/`anomaly`/`ignored` estão protegidos); idempotência por
+fingerprint; auto-cura se a escalada pós-commit falhar (o provider repete e o gate C2 captura); a barreira do harness não é
+evitável e a segunda entrega não pode bloquear no registo (a única entrada de índice em conflito é a row committed do seed e
+não existe inseridor em progresso, porque o próprio INSERT da primeira entrega foi saltado por `ON CONFLICT DO NOTHING` e não
+criou token especulativo).
+
+### 2.5 Residuais P1 do Cycle 4 (não bloqueiam o rollout; todos fail-closed ou latentes)
+
+1. **F-3 / semântica de `requiredCents` — MEDIUM, fail-closed.** `recordSettlementAnomalyTx` grava
+   `observedPaidCents = input.amountCents`, i.e. o montante **do movimento divergente**, não a divergência. Numa anomalia
+   criada pelo próprio F-1 com `observed > paid` (p.ex. payment de 50,00 € concluído e reentrega divergente de 60,00 € ⇒
+   `expectedPaidCents=5000`, `observedPaidCents=6000`), o gate passa a exigir refunds `succeeded` ≥ 6000 para o mesmo
+   `paymentId`, mas o trigger `refund_attempts_balance_guard` lança `REFUND_EXCEEDS_REFUNDABLE_AMOUNT` quando os refunds
+   comprometidos excedem `payments.amount*100 = 5000`. Nessa classe, **`REFUNDED` fica estruturalmente inalcançável** — o
+   operador tem de usar **`MANUALLY_RECONCILED`**, que **permanece o caminho operacional válido** e está documentado na
+   mensagem de erro. Direção **segura** (nunca afirma que dinheiro foi devolvido quando não foi). **Mantém-se como
+   P1/semântica**: decidir se `requiredCents` deve ser a divergência (`observedPaidCents − expectedPaidCents`, quando
+   positiva) ou o montante em risco, em vez do movimento completo — economicamente, o valor em risco no exemplo é 1000, não
+   6000. O comportamento atual corresponde literalmente ao critério de aceitação pedido, pelo que é uma questão de requisito
+   e não um defeito de implementação.
+2. **F1b / `processing` — MEDIUM, latente.** O C8 só corre a comparação semântica para `processed` ou anomalia; qualquer
+   outro estado cai no fall-through `deferred / CLAIM_BUDGET_EXHAUSTED` **sem** verificação de conflito. Hoje é inalcançável
+   (2.3), mas o invariante "claim e conclusão commitam atomicamente" **não está afirmado nem testado em lado nenhum**, e o
+   código circundante antecipa um `processing` durável (`recordWebhookDeliveryFailure` aceita-o no WHERE;
+   `grantWebhookRecoveryBudget` rejeita com `EVENT_IN_PROGRESS`). Se alguma alteração futura o tornar durável (claim fora da
+   transação de settlement, settlement em duas fases ou longo, script de ops/backfill), o C8 responderia `deferred` a um
+   payload divergente — e com código errado. **P1 de robustez**: tratar `processing` explicitamente no C8 ou afirmar o
+   invariante no local.
+3. **Dependência de READ COMMITTED — MEDIUM, latente, fail-closed.** A releitura do C8 só vê a conclusão do vencedor porque o
+   PostgreSQL usa READ COMMITTED por omissão (cada statement com snapshot novo). Não há `isolationLevel` explícito em `src/`.
+   Sob REPEATABLE READ/SERIALIZABLE a garantia F-1 degradar-se-ia para "apanhada num retry posterior" (a releitura devolveria
+   `pending`, ou o UPDATE do claim levantaria erro de serialização ⇒ abort ⇒ `failed` ⇒ retry do provider) — sempre
+   **fail-closed**, nunca `duplicate` silencioso. **P1**: documentar a dependência no local do C8 e/ou afirmar no harness que
+   o isolamento efetivo é `read committed`.
+4. **Menores — LOW.** `recoveryGrants` é lido do snapshot e não da row relida (direção segura: grants só aumentam, logo um
+   snapshot obsoleto nunca é mais permissivo; auto-curável no retry); fingerprints alternados re-escaladam e sobrescrevem
+   `metadata.eventConflict`, com amplificação **limitada a 5** ocorrências; `ignored` excluído da comparação por desenho (os
+   `mismatch` que reclamam dinheiro gravam antes anomalia durável via `recordClaimedMovementConflictTx`); os cenários
+   divergentes do harness não provam individualmente o C8 (o observável é idêntico ao do gate pré-transação) — a prova é
+   transportada pelos cenários de payload idêntico, que partilham o mesmo harness; em falha do harness as promises das duas
+   entregas ficam penduradas (sem unhandled rejection; limpeza no `beforeEach`).
+5. **Documentação.** `docs/integrations/eupago-p0-cycle2-report.md:52` afirma que uma reentrega do mesmo `trid` é respondida
+   `duplicate` "upstream of confirmation" — afirmação **qualificada** desde a Cycle 3/4 (só se o payload for semanticamente
+   idêntico). Drift de documentação, sem impacto funcional.
+
+### 2.6 Questões contratuais Eupago — mantidas **ABERTAS**
+
+Os documentos existentes descrevem as **nossas** assunções, não o comportamento real do provider; nenhum constitui prova
+documental. Mantêm-se **ABERTAS** até evidência contratual ou empírica da Eupago:
+
+1. **Reutilização e semântica de `trid`** — todo o modelo C2/C8 assume que `trid` é a identidade da entrega e que um `trid`
+   repetido com semântica diferente é **anomalia**, não transição legítima. Por confirmar com o provider.
+2. **Transições de estado** — se `Paid → Expired` / `Cancel` / `Error` para o mesmo `trid` é transição legal ou sempre
+   anomalia. O código é consistente apenas se o provider nunca reutilizar legitimamente um `trid` entre estados.
+3. **Retries reais / 503 / `Retry-After`** — se a Eupago honra `503 + Retry-After`, quantas vezes repete, com que backoff, e
+   se pára após `200 {received:true, anomaly:true}`. **Todo o argumento de auto-cura** (deferred H2/H3, relevância dos
+   residuais 3 e 4 de 2.5) depende disto. `docs/integrations/eupago-p0-cycle2-report.md` já regista esta dependência do
+   operador como aberta.
+4. **Correção legítima de montante** — se o provider pode reentregar o mesmo `trid` com montante corrigido; o modelo atual
+   grava anomalia em vez de aplicar a correção (interage diretamente com o residual 1 de 2.5).
+
+### 2.7 Estado de rollout — **nada foi deployado, nenhuma migração aplicada**
+
+- **Não houve deploy** deste checkpoint para staging nem para produção.
+- **A migração 0017 NÃO foi aplicada em nenhuma base de dados real** — nem Neon, nem staging, nem produção. As únicas bases
+  usadas foram **PostgreSQL embutido descartável** em `os.tmpdir()`, criado e destruído pelo `scripts/test-runner.cjs` em
+  cada run.
+- Fazer merge do PR em `main` **não aplica** migrações: o conteúdo do PR **não** deve ser lido como estado deployable.
+- **Antes do rollout continua obrigatório** o diagnóstico **READ-ONLY / virgin-ledger**
+  (`scripts/eupago-ledger-virgin-check.cjs`; só SELECT, recusa alvos não-loopback). Ledger virgem → 0017 → deploy de código
+  com Eupago sem tráfego. **Não virgem → STOP** e plano de compatibilidade/backfill/cutover separado.
+- **Nunca `db:push`** para instalar a 0017 (regra mantida, ver 2.1).
+- Nenhum pagamento/referência real foi criado contra a Eupago e nenhum HTTP externo real foi efetuado em qualquer ciclo deste
+  programa (garantido em teste pelo guard de `src/test-support/setup.ts`).
 
 ---
 
@@ -91,6 +267,9 @@ Implementação da gestão de credenciais/webhooks Eupago no Backoffice, integra
 - **Sem secrets reais configurados** — nem no repositório nem neste documento. Antes de guardar o primeiro segredo no Backoffice: `wrangler secret put SETTINGS_ENCRYPTION_KEY` (ver doc de operação).
 - **Sem pagamento real de teste** — nenhum pagamento/referência real foi criado contra a Eupago neste ciclo.
 - **Sem deploy deste checkpoint** — o commit `5c1e6c4` está pushed mas ainda não foi deployado para staging/produção.
+- **Sem deploy do checkpoint PAYMENT/Eupago P0** — `478e1e0e` está pushed em `arena/01a0b60b-arena`, **sem PR aberto, sem
+  merge e sem deploy**; a migração 0017 **não foi aplicada** em nenhuma BD real e o diagnóstico virgin-ledger continua
+  obrigatório antes do rollout (ver 2.7).
 
 ---
 
