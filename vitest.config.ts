@@ -9,6 +9,8 @@ export default defineConfig({
     globals: true,
     testTimeout: 30000,
     fileParallelism: false,
+    // PAYMENT P0 (M3) — database-binding + no-real-HTTP guards.
+    setupFiles: ["src/test-support/setup.ts"],
   },
   resolve: {
     alias: {

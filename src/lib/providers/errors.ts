@@ -22,6 +22,13 @@ export const PROVIDER_ERROR_CODES = [
   "INVOICE_NOT_FOUND",
   "OPERATION_NOT_SUPPORTED",
   "UNSUPPORTED_PROVIDER",
+  /**
+   * L2/HIGH-1 — the canonical payment has MORE than one settled provider
+   * movement (a double charge). Binding a refund to an arbitrary one of them
+   * would refund an unknown movement, so the operation is refused and an
+   * operator must reconcile explicitly.
+   */
+  "AMBIGUOUS_PROVIDER_MOVEMENT",
 ] as const;
 
 export type ProviderErrorCode = (typeof PROVIDER_ERROR_CODES)[number];
@@ -37,6 +44,7 @@ const CUSTOMER_MESSAGES: Record<ProviderErrorCode, string> = {
   INVOICE_NOT_FOUND: "Documento não encontrado.",
   OPERATION_NOT_SUPPORTED: "Operação não suportada.",
   UNSUPPORTED_PROVIDER: "Fornecedor não suportado.",
+  AMBIGUOUS_PROVIDER_MOVEMENT: "Pagamento com movimentos ambíguos — é necessária reconciliação manual.",
 };
 
 /** Codes for which a controlled retry may make sense. */

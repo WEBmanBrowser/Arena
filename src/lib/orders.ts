@@ -5,69 +5,394 @@
  */
 
 import { db } from "@/db";
-import { orders, orderItems, products, orderStatusHistory, stockMovements, payments, coupons, ORDER_TRANSITIONS } from "@/db/schema";
-import { eq, sql, and, lte } from "drizzle-orm";
-import { createAuditLog } from "@/lib/audit";
+import { orders, orderItems, products, orderStatusHistory, stockMovements, payments, coupons, paymentAttempts, ORDER_TRANSITIONS } from "@/db/schema";
+import { eq, sql, and, lte, asc, desc } from "drizzle-orm";
+import { createAuditLog, createAuditLogTx } from "@/lib/audit";
 import { sendEmail, orderPaidEmail, orderCancelledEmail, orderExpiredEmail, getOrderCustomerEmail } from "@/lib/email";
+import { enqueueEmail, dispatchEmailNotification } from "@/lib/email-outbox";
+import { lockProductsAscending, type DbOrTx } from "@/lib/stock-locks";
 
 // ─── CONFIRM PAYMENT ──────────────────────────────────────
+//
+// PAYMENT P0 (items 9/21/22) — CANONICAL TRANSACTIONAL CONFIRMATION.
+//
+//  • EXACTLY ONE payment row is settled: the canonical one. The legacy
+//    behaviour (`UPDATE payments … WHERE order_id = ? AND status = 'pending'`)
+//    marked EVERY pending payment of the order as paid, which silently rewrote
+//    unrelated financial rows (e.g. a manual payment plus a provider payment).
+//  • The audit entry and the notification row are written INSIDE the
+//    transaction: they either commit with the money movement or not at all.
+//  • Stock is converted under deterministic, ascending product-id locks with
+//    before/after values read under those locks (M1).
+//  • NO external HTTP happens here — the notification is enqueued in-tx and
+//    dispatched by the caller after the commit succeeded.
 
-export async function confirmOrderPayment(orderId: number, actorId: number | null): Promise<{ success: boolean; changed: boolean; error?: string }> {
-  try {
-    let changed = false;
-    const ctx = { orderNumber: "", userId: null as number | null, guestEmail: null as string | null };
+export interface CanonicalPayment {
+  readonly id: number;
+  readonly provider: string;
+  readonly method: string;
+  readonly amount: string;
+  readonly currency: string;
+  readonly status: string;
+}
 
-    await db.transaction(async (tx) => {
-      const [order] = await tx.select().from(orders).where(eq(orders.id, orderId)).limit(1);
-      if (!order) throw new Error("VALIDATION:Encomenda não encontrada");
-      if (order.status === "paid") return; // idempotent
-      if (order.status !== "pending_payment") throw new Error(`VALIDATION:Não é possível confirmar pagamento no estado ${order.status}`);
+/**
+ * Resolve THE payment row this confirmation settles.
+ *
+ * Deterministic order:
+ *   1. an explicitly supplied paymentId (provider settlement always supplies it);
+ *   2. the payment referenced by the newest attempt still awaiting payment;
+ *   3. the single pending payment of the order;
+ *   4. the single payment of the order.
+ * Returns null when no payment row exists at all (legacy orders).
+ */
+export async function resolveCanonicalPayment(
+  tx: DbOrTx,
+  orderId: number,
+  explicitPaymentId?: number | null
+): Promise<CanonicalPayment | null> {
+  if (explicitPaymentId != null) {
+    const [row] = await tx
+      .select()
+      .from(payments)
+      .where(and(eq(payments.id, explicitPaymentId), eq(payments.orderId, orderId)))
+      .limit(1);
+    if (!row) throw new Error("VALIDATION:Pagamento canónico não encontrado para esta encomenda");
+    return row;
+  }
 
-      // Atomic status transition — prevents concurrent double-confirm
-      const [statusUpdated] = await tx.update(orders).set({ status: "paid", paymentStatus: "paid", updatedAt: new Date() })
-        .where(and(eq(orders.id, orderId), eq(orders.status, "pending_payment"))).returning();
-      if (!statusUpdated) return; // Another process already confirmed
+  const [fromAttempt] = await tx
+    .select({ id: payments.id })
+    .from(paymentAttempts)
+    .innerJoin(payments, eq(payments.id, paymentAttempts.paymentId))
+    .where(
+      and(
+        eq(paymentAttempts.orderId, orderId),
+        eq(paymentAttempts.status, "pending"),
+        eq(payments.status, "pending")
+      )
+    )
+    .orderBy(desc(paymentAttempts.id))
+    .limit(1);
+  if (fromAttempt) {
+    const [row] = await tx.select().from(payments).where(eq(payments.id, fromAttempt.id)).limit(1);
+    if (row) return row;
+  }
 
-      ctx.orderNumber = order.orderNumber; ctx.userId = order.userId; ctx.guestEmail = order.guestEmail;
-      changed = true;
+  const pending = await tx
+    .select()
+    .from(payments)
+    .where(and(eq(payments.orderId, orderId), eq(payments.status, "pending")))
+    .orderBy(asc(payments.id));
+  if (pending.length === 1) return pending[0];
 
-      await tx.update(payments).set({ status: "paid", paidAt: new Date(), updatedAt: new Date() })
-        .where(and(eq(payments.orderId, orderId), eq(payments.status, "pending")));
+  if (pending.length === 0) {
+    const all = await tx.select().from(payments).where(eq(payments.orderId, orderId)).orderBy(asc(payments.id));
+    return all.length === 1 ? all[0] : null;
+  }
 
-      const items = await tx.select().from(orderItems).where(eq(orderItems.orderId, orderId));
-      for (const item of items) {
-        if (!item.productId) continue;
-        const [prod] = await tx.select().from(products).where(eq(products.id, item.productId)).limit(1);
-        if (!prod || prod.isService) continue;
+  // Several pending payments and no provider context: the oldest pending row is
+  // the canonical one. The OTHERS are deliberately left untouched (never
+  // silently marked paid).
+  return pending[0];
+}
 
-        const [updated] = await tx.update(products).set({
-          stock: sql`${products.stock} - ${item.quantity}`,
-          reservedStock: sql`${products.reservedStock} - ${item.quantity}`,
-          soldCount: sql`${products.soldCount} + ${item.quantity}`,
-          updatedAt: new Date(),
-        }).where(and(eq(products.id, item.productId), sql`${products.stock} >= ${item.quantity}`, sql`${products.reservedStock} >= ${item.quantity}`)).returning();
+/**
+ * PAYMENT P0 (HIGH-1 / HIGH-2) — why a settlement could NOT be applied coherently.
+ *
+ * Returned ONLY to callers that ask for fail-closed provider settlement
+ * (`settlementMustBeCoherent`). The caller is then responsible for recording the
+ * durable financial anomaly (and the fund movement id) instead of reporting a
+ * silent success.
+ */
+export type ConfirmPaymentIncoherenceCode =
+  /** No canonical `payments` row exists for the order/attempt. */
+  | "PAYMENT_NOT_FOUND"
+  /** The canonical payment is ALREADY paid — a second movement needs intervention. */
+  | "PAYMENT_ALREADY_SETTLED"
+  /** The canonical payment was cancelled internally (money arrived too late). */
+  | "PAYMENT_CANCELLED"
+  /** The canonical payment is in any other non-pending, non-settleable state. */
+  | "PAYMENT_NOT_SETTLED"
+  /** The ORDER was settled by a DIFFERENT payment/movement (double charge). */
+  | "ORDER_ALREADY_SETTLED_BY_OTHER_MOVEMENT"
+  /** The order state cannot absorb a settlement (expired, cancelled, refunded…). */
+  | "ORDER_NOT_SETTLEABLE";
 
-        if (!updated) throw new Error("VALIDATION:INVENTORY_INCONSISTENCY — stock ou reserva insuficiente para confirmação");
+export interface ConfirmPaymentIncoherence {
+  readonly code: ConfirmPaymentIncoherenceCode;
+  readonly detail: string;
+  readonly paymentId: number | null;
+}
 
-        await tx.insert(stockMovements).values({
-          productId: item.productId, type: "sale", quantity: -item.quantity,
-          stockBefore: prod.stock, stockAfter: prod.stock - item.quantity,
-          reservedBefore: prod.reservedStock, reservedAfter: prod.reservedStock - item.quantity,
-          reason: `Pagamento confirmado #${order.orderNumber}`, referenceType: "order", referenceId: orderId, userId: actorId,
-        });
-      }
+export interface ConfirmOrderPaymentTxResult {
+  readonly changed: boolean;
+  readonly orderNumber: string;
+  readonly paymentId: number | null;
+  /** Notification row enqueued in-tx; dispatch it AFTER the commit. */
+  readonly notificationId: number | null;
+  /**
+   * Always present: non-null means the requested settlement was REFUSED because
+   * it could not be made coherent. In that case NOTHING was written by this
+   * function — no order transition, no stock movement, no audit, no outbox row.
+   */
+  readonly incoherence: ConfirmPaymentIncoherence | null;
+}
 
-      await tx.insert(orderStatusHistory).values({ orderId, fromStatus: "pending_payment", toStatus: "paid", changedBy: actorId, comment: "Pagamento confirmado" });
-    });
+/**
+ * The canonical confirmation, composed on the CALLER'S transaction.
+ *
+ * Used by `confirmOrderPayment()` (manual/admin flow) and, as one atomic unit,
+ * by the Eupago settlement pipeline.
+ */
+export async function confirmOrderPaymentInTx(
+  tx: DbOrTx,
+  input: {
+    orderId: number;
+    actorId: number | null;
+    paymentId?: number | null;
+    source: "manual" | "provider_webhook" | "admin" | "recovery";
+    /**
+     * HIGH-1/HIGH-2 — when true the confirmation is FAIL-CLOSED: the canonical
+     * payment must be settleable and coherent with the order, otherwise the call
+     * refuses (returning `incoherence`) instead of writing a partial settlement.
+     * Provider settlements pass true; the manual/admin flow keeps its historical
+     * behaviour.
+     */
+    settlementMustBeCoherent?: boolean;
+  }
+): Promise<ConfirmOrderPaymentTxResult> {
+  const { orderId, actorId } = input;
+  const requireCoherent = input.settlementMustBeCoherent === true;
 
-    // Post-commit — only if changed
-    if (changed) {
-      await createAuditLog({ userId: actorId, action: "order.payment_confirmed", entity: "order", entityId: orderId });
-      const recipient = await getOrderCustomerEmail(ctx);
-      if (recipient) await sendEmail({ type: "payment_confirmed", to: recipient, ...orderPaidEmail(ctx.orderNumber), referenceType: "order", referenceId: orderId, eventKey: `payment_confirmed:${orderId}` });
+  // Deterministic lock order (M1): order → payment → products(asc).
+  const [order] = await tx.select().from(orders).where(eq(orders.id, orderId)).limit(1).for("update");
+  if (!order) throw new Error("VALIDATION:Encomenda não encontrada");
+
+  const refuse = (
+    code: ConfirmPaymentIncoherenceCode,
+    detail: string,
+    paymentId: number | null
+  ): ConfirmOrderPaymentTxResult => ({
+    changed: false,
+    orderNumber: order.orderNumber,
+    paymentId,
+    notificationId: null,
+    incoherence: { code, detail, paymentId },
+  });
+
+  // ─── HIGH-1/HIGH-2 COHERENCE GATE ───────────────────────
+  // Everything below reads the AUTHORITATIVE rows under lock and decides BEFORE
+  // any write, so a refusal leaves no partial settlement behind (no order
+  // transition, no stock movement, no email). The movement evidence itself is
+  // preserved by the caller (attempt row + durable financial anomaly).
+  let canonical: CanonicalPayment | null = null;
+  if (requireCoherent) {
+    canonical = await resolveCanonicalPayment(tx, orderId, input.paymentId ?? null);
+    if (canonical) {
+      // Lock + re-read: the fresh row is the one the invariant is evaluated on.
+      const [locked] = await tx
+        .select()
+        .from(payments)
+        .where(eq(payments.id, canonical.id))
+        .limit(1)
+        .for("update");
+      if (locked) canonical = locked;
     }
 
-    return { success: true, changed };
+    if (order.status !== "pending_payment") {
+      // A movement that reaches this point has JUST been claimed for THIS
+      // delivery, so an order that is already settled was settled by a DIFFERENT
+      // movement: the same-movement redelivery is recognised earlier (duplicate
+      // claim / duplicate attempt CAS) and never reaches here. Refusing is
+      // therefore unconditional and there is no "coherent repeat" shortcut to
+      // take — money has no place to land and needs an operator.
+      const settledRows = await tx
+        .select({ id: payments.id })
+        .from(payments)
+        .where(and(eq(payments.orderId, orderId), eq(payments.status, "paid")));
+      return order.status === "paid"
+        ? refuse(
+            "ORDER_ALREADY_SETTLED_BY_OTHER_MOVEMENT",
+            `order already settled by payment ${settledRows.map((r) => r.id).join(",") || "(unknown)"}`,
+            canonical?.id ?? null
+          )
+        : refuse("ORDER_NOT_SETTLEABLE", `order status ${order.status}`, canonical?.id ?? null);
+    }
+
+    if (!canonical) {
+      return refuse("PAYMENT_NOT_FOUND", "no canonical payment row for this order", null);
+    }
+    if (canonical.status === "paid") {
+      return refuse("PAYMENT_ALREADY_SETTLED", "canonical payment is already paid", canonical.id);
+    }
+    if (canonical.status === "cancelled") {
+      return refuse("PAYMENT_CANCELLED", "canonical payment was cancelled", canonical.id);
+    }
+    if (canonical.status !== "pending") {
+      return refuse("PAYMENT_NOT_SETTLED", `canonical payment status ${canonical.status}`, canonical.id);
+    }
+  } else if (order.status === "paid") {
+    return { changed: false, orderNumber: order.orderNumber, paymentId: input.paymentId ?? null, notificationId: null, incoherence: null };
+  } else if (order.status !== "pending_payment") {
+    throw new Error(`VALIDATION:Não é possível confirmar pagamento no estado ${order.status}`);
+  }
+
+  if (!canonical) {
+    canonical = await resolveCanonicalPayment(tx, orderId, input.paymentId ?? null);
+    if (canonical) {
+      // Lock the canonical payment row explicitly so the settlement and any
+      // refund path serialize on it.
+      await tx.select({ id: payments.id }).from(payments).where(eq(payments.id, canonical.id)).limit(1).for("update");
+    }
+  }
+
+  const [statusUpdated] = await tx
+    .update(orders)
+    .set({ status: "paid", paymentStatus: "paid", updatedAt: new Date() })
+    .where(and(eq(orders.id, orderId), eq(orders.status, "pending_payment")))
+    .returning();
+  if (!statusUpdated) {
+    // Another process already confirmed. In coherent mode THIS movement did not
+    // settle anything, so it must not be reported as a success.
+    if (requireCoherent) {
+      return refuse(
+        "ORDER_ALREADY_SETTLED_BY_OTHER_MOVEMENT",
+        "order state changed concurrently — settlement not applied",
+        canonical?.id ?? null
+      );
+    }
+    // Not an error, and no second effect.
+    return { changed: false, orderNumber: order.orderNumber, paymentId: canonical?.id ?? null, notificationId: null, incoherence: null };
+  }
+
+  if (canonical) {
+    // EXACTLY ONE payment row — the canonical one. Nothing else is touched.
+    const paidRows = await tx
+      .update(payments)
+      .set({ status: "paid", paidAt: new Date(), updatedAt: new Date() })
+      .where(and(eq(payments.id, canonical.id), eq(payments.status, "pending")))
+      .returning({ id: payments.id });
+    if (requireCoherent && paidRows.length === 0) {
+      // The canonical payment was verified `pending` under lock, so this is an
+      // internal invariant breach, not a provider situation: roll back instead of
+      // committing an order marked paid with no settled payment.
+      throw new Error("INCONSISTENT_CANONICAL_PAYMENT: pagamento canónico deixou de estar pendente sob lock");
+    }
+  }
+
+  const items = await tx.select().from(orderItems).where(eq(orderItems.orderId, orderId));
+  const stockItems = items.filter((item) => item.productId);
+  const locked = await lockProductsAscending(tx, stockItems.map((item) => item.productId!));
+
+  for (const item of stockItems) {
+    const prod = locked.get(item.productId!);
+    if (!prod || prod.isService) continue;
+
+    const [updated] = await tx
+      .update(products)
+      .set({
+        stock: sql`${products.stock} - ${item.quantity}`,
+        reservedStock: sql`${products.reservedStock} - ${item.quantity}`,
+        soldCount: sql`${products.soldCount} + ${item.quantity}`,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(products.id, item.productId!),
+          sql`${products.stock} >= ${item.quantity}`,
+          sql`${products.reservedStock} >= ${item.quantity}`
+        )
+      )
+      .returning();
+
+    if (!updated) throw new Error("VALIDATION:INVENTORY_INCONSISTENCY — stock ou reserva insuficiente para confirmação");
+
+    await tx.insert(stockMovements).values({
+      productId: item.productId!,
+      type: "sale",
+      quantity: -item.quantity,
+      // Locked values (M1): the audit trail must reflect the state the
+      // invariant was actually evaluated against.
+      stockBefore: prod.stock,
+      stockAfter: prod.stock - item.quantity,
+      reservedBefore: prod.reservedStock,
+      reservedAfter: prod.reservedStock - item.quantity,
+      reason: `Pagamento confirmado #${order.orderNumber}`,
+      referenceType: "order",
+      referenceId: orderId,
+      userId: actorId,
+    });
+  }
+
+  await tx.insert(orderStatusHistory).values({
+    orderId,
+    fromStatus: "pending_payment",
+    toStatus: "paid",
+    changedBy: actorId,
+    comment: "Pagamento confirmado",
+  });
+
+  // MANDATORY financial audit inside the transaction (item 21).
+  await createAuditLogTx(tx, {
+    userId: actorId,
+    action: "order.payment_confirmed",
+    entity: "order",
+    entityId: orderId,
+    details: {
+      paymentId: canonical?.id ?? null,
+      paymentProvider: canonical?.provider ?? null,
+      amount: canonical?.amount ?? null,
+      currency: canonical?.currency ?? null,
+      source: input.source,
+    },
+  });
+
+  // Notification row inside the transaction (deduplicated by event_key).
+  const recipient = await getOrderCustomerEmail(order);
+  let notificationId: number | null = null;
+  if (recipient) {
+    const queued = await enqueueEmail(tx, {
+      type: "payment_confirmed",
+      recipient,
+      subject: orderPaidEmail(order.orderNumber).subject,
+      referenceType: "order",
+      referenceId: orderId,
+      eventKey: `payment_confirmed:${orderId}`,
+    });
+    notificationId = queued.created ? queued.id : null;
+  }
+
+  return { changed: true, orderNumber: order.orderNumber, paymentId: canonical?.id ?? null, notificationId, incoherence: null };
+}
+
+/**
+ * Public confirmation entry point (admin/manual and any non-webhook caller).
+ *
+ * POST-COMMIT ONLY: the outbound email is dispatched after the transaction
+ * commits — never inside it.
+ */
+export async function confirmOrderPayment(
+  orderId: number,
+  actorId: number | null,
+  options: { paymentId?: number | null; source?: "manual" | "admin" | "recovery" } = {}
+): Promise<{ success: boolean; changed: boolean; error?: string }> {
+  try {
+    const result = await db.transaction(async (tx) =>
+      confirmOrderPaymentInTx(tx, {
+        orderId,
+        actorId,
+        paymentId: options.paymentId ?? null,
+        source: options.source ?? "manual",
+      })
+    );
+
+    // Post-commit — only if something actually changed.
+    if (result.changed && result.notificationId != null) {
+      await dispatchEmailNotification(result.notificationId);
+    }
+
+    return { success: true, changed: result.changed };
   } catch (e) {
     return { success: false, changed: false, error: (e instanceof Error ? e.message : "Erro").replace("VALIDATION:", "") };
   }
@@ -95,7 +420,6 @@ export async function cancelOrder(orderId: number, actorId: number | null, reaso
       changed = true;
 
       if (order.status === "pending_payment") {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         await releaseOrderReservations(tx as any, orderId, order.orderNumber, actorId);
         if (order.couponCode) {
           await tx.update(coupons).set({ usedCount: sql`${coupons.usedCount} - 1` })
@@ -136,7 +460,6 @@ export async function releaseExpiredReservations(): Promise<{ expired: number }>
         if (!current) return; // already processed
         changed = true;
 
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         await releaseOrderReservations(tx as any, order.id, order.orderNumber, null);
         if (current.couponCode) {
           await tx.update(coupons).set({ usedCount: sql`${coupons.usedCount} - 1` })
@@ -161,12 +484,16 @@ export async function releaseExpiredReservations(): Promise<{ expired: number }>
 
 // ─── SHARED ───────────────────────────────────────────────
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function releaseOrderReservations(tx: any, orderId: number, orderNumber: string, actorId: number | null) {
   const items = await tx.select().from(orderItems).where(eq(orderItems.orderId, orderId));
-  for (const item of items) {
-    if (!item.productId) continue;
-    const [prod] = await tx.select().from(products).where(eq(products.id, item.productId)).limit(1);
+  const stockItems = items.filter((item: { productId: number | null }) => item.productId);
+
+  // M1 — same deterministic ascending product lock order as the confirmation
+  // and reservation paths, with the before/after values read UNDER the lock.
+  const locked = await lockProductsAscending(tx, stockItems.map((item: { productId: number | null }) => item.productId!));
+
+  for (const item of stockItems) {
+    const prod = locked.get(item.productId);
     if (!prod || prod.isService) continue;
     const [updated] = await tx.update(products).set({ reservedStock: sql`${products.reservedStock} - ${item.quantity}`, updatedAt: new Date() })
       .where(and(eq(products.id, item.productId), sql`${products.reservedStock} >= ${item.quantity}`)).returning();
