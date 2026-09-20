@@ -138,7 +138,7 @@ export default function CheckoutPage() {
           </h1>
 
           <p className="text-slate-500 mb-2">
-            N?mero: <strong>{success.orderNumber}</strong>
+            Número: <strong>{success.orderNumber}</strong>
           </p>
 
           <p className="text-lg font-bold text-slate-900 mb-4">
@@ -205,7 +205,7 @@ export default function CheckoutPage() {
               onClick={() => router.push("/")}
               className="px-6 py-3 bg-sky-600 text-white rounded-lg font-medium hover:bg-sky-700 transition"
             >
-              Voltar ? Loja
+              Voltar à Loja
             </button>
           </div>
         </div>

@@ -33,7 +33,7 @@ export default async function CheckoutSuccessPage({ searchParams }: PageProps) {
           href="/"
           className="inline-block px-6 py-3 bg-sky-600 text-white rounded-lg font-medium hover:bg-sky-700 transition"
         >
-          Voltar a Loja
+          Voltar à Loja
         </Link>
       </div>
     </div>
