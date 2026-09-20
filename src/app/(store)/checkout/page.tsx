@@ -17,10 +17,17 @@ export default function CheckoutPage() {
   const [success, setSuccess] = useState<any>(null);
   const [quote, setQuote] = useState<Quote | null>(null);
   const [couponCode, setCouponCode] = useState("");
+  const [accountAddresses, setAccountAddresses] = useState<any[]>([]);
+  const [selectedBillingAddressId, setSelectedBillingAddressId] = useState<number | null>(null);
+  const [selectedShippingAddressId, setSelectedShippingAddressId] = useState<number | null>(null);
+  const [shippingSameAsBilling, setShippingSameAsBilling] = useState(true);
+  const [saveBillingAddress, setSaveBillingAddress] = useState(false);
+  const [saveShippingAddress, setSaveShippingAddress] = useState(false);
 
   const [form, setForm] = useState({
     name: "", email: "", phone: "", nif: "", companyName: "",
     address1: "", address2: "", city: "", postalCode: "",
+    shippingAddress1: "", shippingAddress2: "", shippingCity: "", shippingPostalCode: "",
     deliveryType: "shipping",
     paymentMethod: "bank_transfer",
     notes: "",
@@ -36,6 +43,43 @@ export default function CheckoutPage() {
     fetch("/api/auth/me").then(r => r.json()).then(d => {
       if (d.user) {
         setUser(d.user);
+        fetch("/api/account/addresses")
+          .then(r => r.json())
+          .then(data => {
+            if (data.addresses) {
+              setAccountAddresses(data.addresses);
+
+              const billing = data.addresses.find((a: any) => a.isDefaultBilling) || data.addresses[0];
+              const shipping = data.addresses.find((a: any) => a.isDefaultShipping) || billing;
+
+              if (billing && shipping) {
+                setShippingSameAsBilling(billing.id === shipping.id);
+              }
+
+              if (billing) {
+                setSelectedBillingAddressId(billing.id);
+                setForm(f => ({
+                  ...f,
+                  address1: billing.address1 || "",
+                  address2: billing.address2 || "",
+                  city: billing.city || "",
+                  postalCode: billing.postalCode || "",
+                }));
+              }
+
+              if (shipping) {
+                setSelectedShippingAddressId(shipping.id);
+                setForm(f => ({
+                  ...f,
+                  shippingAddress1: shipping.address1 || "",
+                  shippingAddress2: shipping.address2 || "",
+                  shippingCity: shipping.city || "",
+                  shippingPostalCode: shipping.postalCode || "",
+                }));
+              }
+            }
+          })
+          .catch(() => {});
         setForm(f => ({ ...f, name: d.user.name, email: d.user.email, phone: d.user.phone || "", nif: d.user.nif || "", companyName: d.user.company || "" }));
       }
     });
@@ -66,6 +110,119 @@ export default function CheckoutPage() {
     queueMicrotask(() => { void fetchQuote(cart, couponCode, form.deliveryType); });
   }, [cart, couponCode, form.deliveryType, fetchQuote]);
 
+  const saveProfileToAccount = async () => {
+    if (!user) return;
+
+    const res = await fetch("/api/account/profile", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: form.name.trim(),
+        phone: form.phone.trim() || null,
+        nif: form.nif.trim() || null,
+        company: form.companyName.trim() || null,
+      }),
+    });
+
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.error || "Erro ao guardar dados do cliente");
+    }
+
+    if (data.profile) {
+      setUser((current: any) => ({ ...current, ...data.profile }));
+    }
+  };
+
+  const saveBillingAddressToAccount = async () => {
+    if (!user) return;
+
+    const addressUrl = selectedBillingAddressId
+      ? `/api/account/addresses/${selectedBillingAddressId}`
+      : "/api/account/addresses";
+
+    const res = await fetch(addressUrl, {
+      method: selectedBillingAddressId ? "PATCH" : "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        label: "Faturação",
+        name: form.name.trim(),
+        address1: form.address1.trim(),
+        address2: form.address2.trim() || null,
+        city: form.city.trim(),
+        postalCode: form.postalCode.trim(),
+        country: "Portugal",
+        phone: form.phone.trim() || null,
+        setDefaultBilling: true,
+        setDefaultShipping: shippingSameAsBilling,
+      }),
+    });
+
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.error || "Erro ao guardar morada de faturação");
+    }
+
+    if (data.address) {
+      setAccountAddresses(prev => {
+        const others = prev
+          .filter(a => a.id !== data.address.id)
+          .map(a => ({
+            ...a,
+            isDefaultBilling: false,
+            ...(shippingSameAsBilling ? { isDefaultShipping: false } : {}),
+          }));
+
+        return [data.address, ...others];
+      });
+
+      setSelectedBillingAddressId(data.address.id);
+      if (shippingSameAsBilling) setSelectedShippingAddressId(data.address.id);
+    }
+  };
+
+  const saveShippingAddressToAccount = async () => {
+    if (!user || shippingSameAsBilling) return;
+
+    const addressUrl = selectedShippingAddressId
+      ? `/api/account/addresses/${selectedShippingAddressId}`
+      : "/api/account/addresses";
+
+    const res = await fetch(addressUrl, {
+      method: selectedShippingAddressId ? "PATCH" : "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        label: "Entrega",
+        name: form.name.trim(),
+        address1: form.shippingAddress1.trim(),
+        address2: form.shippingAddress2.trim() || null,
+        city: form.shippingCity.trim(),
+        postalCode: form.shippingPostalCode.trim(),
+        country: "Portugal",
+        phone: form.phone.trim() || null,
+        setDefaultBilling: false,
+        setDefaultShipping: true,
+      }),
+    });
+
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.error || "Erro ao guardar morada de entrega");
+    }
+
+    if (data.address) {
+      setAccountAddresses(prev => {
+        const others = prev
+          .filter(a => a.id !== data.address.id)
+          .map(a => ({ ...a, isDefaultShipping: false }));
+
+        return [data.address, ...others];
+      });
+
+      setSelectedShippingAddressId(data.address.id);
+    }
+  };
+
   const handleSubmit = async () => {
     if (!quote || !quote.allInStock) { setError("Existem produtos sem stock"); return; }
     setLoading(true);
@@ -76,8 +233,26 @@ export default function CheckoutPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           items: cart.map(c => ({ productId: c.productId, quantity: c.quantity })),
-          billingAddress: { name: form.name, address1: form.address1, address2: form.address2, city: form.city, postalCode: form.postalCode, country: "Portugal" },
-          shippingAddress: form.deliveryType === "shipping" ? { name: form.name, address1: form.address1, address2: form.address2, city: form.city, postalCode: form.postalCode, country: "Portugal" } : null,
+          billingAddress: {
+            name: form.name,
+            address1: form.address1,
+            address2: form.address2,
+            city: form.city,
+            postalCode: form.postalCode,
+            country: "Portugal",
+            phone: form.phone || null,
+          },
+          shippingAddress: form.deliveryType === "shipping"
+            ? {
+                name: form.name,
+                address1: shippingSameAsBilling ? form.address1 : form.shippingAddress1,
+                address2: shippingSameAsBilling ? form.address2 : form.shippingAddress2,
+                city: shippingSameAsBilling ? form.city : form.shippingCity,
+                postalCode: shippingSameAsBilling ? form.postalCode : form.shippingPostalCode,
+                country: "Portugal",
+                phone: form.phone || null,
+              }
+            : null,
           paymentMethod: form.paymentMethod,
           shippingMethod: form.deliveryType === "shipping" ? "home_delivery" : "store_pickup",
           deliveryType: form.deliveryType,
@@ -86,7 +261,7 @@ export default function CheckoutPage() {
           companyName: form.companyName || null,
           guestEmail: !user ? form.email : null,
           guestName: !user ? form.name : null,
-          guestPhone: !user ? form.phone : null,
+          guestPhone: form.phone || null,
           notes: form.notes || null,
         }),
       });
@@ -95,6 +270,26 @@ export default function CheckoutPage() {
       if (!res.ok || data.error) {
         setError(data.error || "Erro ao processar encomenda");
       } else if (data.order) {
+        // A encomenda já foi criada. A persistência dos dados da conta é
+        // secundária e nunca deve transformar uma encomenda válida num erro.
+        if (user) {
+          try {
+            await saveProfileToAccount();
+
+            if (saveBillingAddress) {
+              await saveBillingAddressToAccount();
+              setSaveBillingAddress(false);
+            }
+
+            if (saveShippingAddress && !shippingSameAsBilling) {
+              await saveShippingAddressToAccount();
+              setSaveShippingAddress(false);
+            }
+          } catch (accountError) {
+            console.error("checkout account persistence failed:", accountError);
+          }
+        }
+
         // The order already exists at this point. Clear the cart before
         // handling the provider result so a payment provisioning problem
         // cannot lead to an accidental duplicate order.
@@ -117,6 +312,37 @@ export default function CheckoutPage() {
         setSuccess({
           ...data.order,
           payment,
+          checkout: {
+            customer: {
+              name: form.name,
+              email: form.email,
+              phone: form.phone,
+              nif: form.nif,
+              companyName: form.companyName,
+            },
+            billingAddress: {
+              address1: form.address1,
+              address2: form.address2,
+              city: form.city,
+              postalCode: form.postalCode,
+            },
+            deliveryType: form.deliveryType,
+            shippingAddress: form.deliveryType === "shipping"
+              ? {
+                  address1: shippingSameAsBilling ? form.address1 : form.shippingAddress1,
+                  address2: shippingSameAsBilling ? form.address2 : form.shippingAddress2,
+                  city: shippingSameAsBilling ? form.city : form.shippingCity,
+                  postalCode: shippingSameAsBilling ? form.postalCode : form.shippingPostalCode,
+                }
+              : null,
+            paymentMethod: form.paymentMethod,
+            notes: form.notes,
+            items: cart.map(item => ({
+              productId: item.productId,
+              name: item.name,
+              quantity: item.quantity,
+            })),
+          },
         });
       }
     } catch { setError("Erro ao processar encomenda"); }
@@ -200,6 +426,100 @@ export default function CheckoutPage() {
             A aguardar confirmação do pagamento
           </div>
 
+          {success.checkout && (
+            <div className="mb-8 text-left">
+              <h2 className="text-lg font-bold text-slate-800 mb-4">
+                Resumo da encomenda
+              </h2>
+
+              <div className="grid sm:grid-cols-2 gap-3 text-sm mb-4">
+                <div className="p-4 bg-slate-50 rounded-lg">
+                  <p className="font-semibold text-slate-800 mb-2">Dados do cliente</p>
+                  <p>{success.checkout.customer.name}</p>
+                  <p>{success.checkout.customer.email}</p>
+                  {success.checkout.customer.phone && (
+                    <p>{success.checkout.customer.phone}</p>
+                  )}
+                  {success.checkout.customer.nif && (
+                    <p>NIF: {success.checkout.customer.nif}</p>
+                  )}
+                  {success.checkout.customer.companyName && (
+                    <p>Empresa: {success.checkout.customer.companyName}</p>
+                  )}
+                </div>
+
+                <div className="p-4 bg-slate-50 rounded-lg">
+                  <p className="font-semibold text-slate-800 mb-2">Morada de faturação</p>
+                  <p>{success.checkout.billingAddress.address1}</p>
+                  {success.checkout.billingAddress.address2 && (
+                    <p>{success.checkout.billingAddress.address2}</p>
+                  )}
+                  <p>
+                    {success.checkout.billingAddress.postalCode}{" "}
+                    {success.checkout.billingAddress.city}
+                  </p>
+                  <p>Portugal</p>
+                </div>
+
+                <div className="p-4 bg-slate-50 rounded-lg">
+                  <p className="font-semibold text-slate-800 mb-2">Entrega</p>
+                  {success.checkout.deliveryType === "pickup" ? (
+                    <p>Levantamento em loja — Esposende</p>
+                  ) : success.checkout.shippingAddress ? (
+                    <>
+                      <p>{success.checkout.shippingAddress.address1}</p>
+                      {success.checkout.shippingAddress.address2 && (
+                        <p>{success.checkout.shippingAddress.address2}</p>
+                      )}
+                      <p>
+                        {success.checkout.shippingAddress.postalCode}{" "}
+                        {success.checkout.shippingAddress.city}
+                      </p>
+                      <p>Portugal</p>
+                    </>
+                  ) : null}
+                </div>
+
+                <div className="p-4 bg-slate-50 rounded-lg">
+                  <p className="font-semibold text-slate-800 mb-2">Pagamento</p>
+                  <p>
+                    {{
+                      bank_transfer: "Transferência Bancária",
+                      multibanco: "Multibanco",
+                      mbway: "MB WAY",
+                      card: "Cartão",
+                    }[success.checkout.paymentMethod as "bank_transfer" | "multibanco" | "mbway" | "card"] || success.checkout.paymentMethod}
+                  </p>
+                  {success.checkout.notes && (
+                    <p className="mt-2 text-slate-600">
+                      <span className="font-medium">Notas:</span>{" "}
+                      {success.checkout.notes}
+                    </p>
+                  )}
+                </div>
+              </div>
+
+              <div className="border rounded-lg overflow-hidden">
+                <div className="px-4 py-3 bg-slate-50 border-b font-semibold text-sm text-slate-800">
+                  Artigos
+                </div>
+                <div className="divide-y">
+                  {success.checkout.items.map((item: any) => (
+                    <div
+                      key={item.productId}
+                      className="flex justify-between gap-4 px-4 py-3 text-sm"
+                    >
+                      <span className="text-slate-700">{item.name}</span>
+                      <span className="font-medium text-slate-800 whitespace-nowrap">
+                        {item.quantity}×
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+
           <div>
             <button
               onClick={() => router.push("/")}
@@ -259,17 +579,239 @@ export default function CheckoutPage() {
                   <div className="flex-1"><p className="font-medium text-sm">📍 Levantamento em Loja</p><p className="text-xs text-slate-500">Grátis — Esposende — Seg-Sex 9:00-18:30</p></div>
                 </label>
               </div>
-              {form.deliveryType === "shipping" && (
-                <div className="space-y-4 mt-4">
-                  <h3 className="font-medium text-sm text-slate-700">Morada de Entrega</h3>
-                  <div><label className="text-xs text-slate-500 block mb-1">Morada *</label><input value={form.address1} onChange={e => update("address1", e.target.value)} className="w-full border rounded-lg px-3 py-2 text-sm" /></div>
-                  <div><label className="text-xs text-slate-500 block mb-1">Complemento</label><input value={form.address2} onChange={e => update("address2", e.target.value)} className="w-full border rounded-lg px-3 py-2 text-sm" /></div>
-                  <div className="grid grid-cols-2 gap-4">
-                    <div><label className="text-xs text-slate-500 block mb-1">Cidade *</label><input value={form.city} onChange={e => update("city", e.target.value)} className="w-full border rounded-lg px-3 py-2 text-sm" /></div>
-                    <div><label className="text-xs text-slate-500 block mb-1">Código Postal *</label><input value={form.postalCode} onChange={e => update("postalCode", e.target.value)} className="w-full border rounded-lg px-3 py-2 text-sm" placeholder="0000-000" /></div>
+
+              {/* MORADA DE FATURAÇÃO */}
+              <div className="space-y-4 mt-4">
+                <h3 className="font-medium text-sm text-slate-700">
+                  Morada de Faturação
+                </h3>
+
+                {accountAddresses.length > 0 && (
+                  <div>
+                    <label className="text-xs text-slate-500 block mb-1">
+                      Morada de faturação guardada
+                    </label>
+                    <select
+                      className="w-full border rounded-lg px-3 py-2 text-sm"
+                      value={selectedBillingAddressId ?? ""}
+                      onChange={e => {
+                        if (!e.target.value) {
+                          setSelectedBillingAddressId(null);
+                          setSaveBillingAddress(true);
+                          return;
+                        }
+
+                        const id = Number(e.target.value);
+                        const a = accountAddresses.find((x: any) => x.id === id);
+                        if (!a) return;
+
+                        setSelectedBillingAddressId(id);
+                        setSaveBillingAddress(false);
+                        setForm(f => ({
+                          ...f,
+                          name: a.name || f.name,
+                          address1: a.address1 || "",
+                          address2: a.address2 || "",
+                          city: a.city || "",
+                          postalCode: a.postalCode || "",
+                          phone: a.phone || f.phone,
+                        }));
+                      }}
+                    >
+                      <option value="">Selecionar morada de faturação...</option>
+                      {accountAddresses.map((a: any) => (
+                        <option key={a.id} value={a.id}>
+                          {a.label || "Morada"} - {a.address1}, {a.postalCode} {a.city}
+                          {a.isDefaultBilling ? " (predefinida)" : ""}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+
+                <div>
+                  <label className="text-xs text-slate-500 block mb-1">
+                    Morada *
+                  </label>
+                  <input
+                    value={form.address1}
+                    onChange={e => update("address1", e.target.value)}
+                    className="w-full border rounded-lg px-3 py-2 text-sm"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-xs text-slate-500 block mb-1">
+                    Complemento
+                  </label>
+                  <input
+                    value={form.address2}
+                    onChange={e => update("address2", e.target.value)}
+                    className="w-full border rounded-lg px-3 py-2 text-sm"
+                  />
+                </div>
+
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="text-xs text-slate-500 block mb-1">
+                      Cidade *
+                    </label>
+                    <input
+                      value={form.city}
+                      onChange={e => update("city", e.target.value)}
+                      className="w-full border rounded-lg px-3 py-2 text-sm"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-xs text-slate-500 block mb-1">
+                      Código Postal *
+                    </label>
+                    <input
+                      value={form.postalCode}
+                      onChange={e => update("postalCode", e.target.value)}
+                      className="w-full border rounded-lg px-3 py-2 text-sm"
+                      placeholder="0000-000"
+                    />
                   </div>
                 </div>
+                {user && (
+                  <label className="flex items-center gap-2 text-sm text-slate-700 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={saveBillingAddress}
+                      onChange={e => setSaveBillingAddress(e.target.checked)}
+                      className="accent-sky-600"
+                    />
+                    Guardar esta morada de faturação na minha conta
+                  </label>
+                )}
+
+              </div>
+
+              {/* MORADA DE ENTREGA - APENAS PARA ENVIO */}
+              {form.deliveryType === "shipping" && (
+                <div className="mt-6 pt-6 border-t">
+                  <label className="flex items-center gap-2 text-sm text-slate-700 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={shippingSameAsBilling}
+                      onChange={e => setShippingSameAsBilling(e.target.checked)}
+                      className="accent-sky-600"
+                    />
+                    A morada de entrega é igual à morada de faturação
+                  </label>
+                </div>
               )}
+
+              {form.deliveryType === "shipping" && !shippingSameAsBilling && (
+                <div className="space-y-4 mt-4">
+                  <h3 className="font-medium text-sm text-slate-700">
+                    Morada de Entrega
+                  </h3>
+
+                  {accountAddresses.length > 0 && (
+                    <div>
+                      <label className="text-xs text-slate-500 block mb-1">
+                        Morada de entrega guardada
+                      </label>
+                      <select
+                        className="w-full border rounded-lg px-3 py-2 text-sm"
+                        value={selectedShippingAddressId ?? ""}
+                        onChange={e => {
+                          if (!e.target.value) {
+                            setSelectedShippingAddressId(null);
+                            setSaveShippingAddress(true);
+                            return;
+                          }
+
+                          const id = Number(e.target.value);
+                          const a = accountAddresses.find((x: any) => x.id === id);
+                          if (!a) return;
+
+                          setSelectedShippingAddressId(id);
+                          setSaveShippingAddress(false);
+                          setForm(f => ({
+                            ...f,
+                            shippingAddress1: a.address1 || "",
+                            shippingAddress2: a.address2 || "",
+                            shippingCity: a.city || "",
+                            shippingPostalCode: a.postalCode || "",
+                          }));
+                        }}
+                      >
+                        <option value="">Selecionar morada de entrega...</option>
+                        {accountAddresses.map((a: any) => (
+                          <option key={a.id} value={a.id}>
+                            {a.label || "Morada"} - {a.address1}, {a.postalCode} {a.city}
+                            {a.isDefaultShipping ? " (predefinida)" : ""}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+
+                  <div>
+                    <label className="text-xs text-slate-500 block mb-1">
+                      Morada *
+                    </label>
+                    <input
+                      value={form.shippingAddress1}
+                      onChange={e => update("shippingAddress1", e.target.value)}
+                      className="w-full border rounded-lg px-3 py-2 text-sm"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-xs text-slate-500 block mb-1">
+                      Complemento
+                    </label>
+                    <input
+                      value={form.shippingAddress2}
+                      onChange={e => update("shippingAddress2", e.target.value)}
+                      className="w-full border rounded-lg px-3 py-2 text-sm"
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="text-xs text-slate-500 block mb-1">
+                        Cidade *
+                      </label>
+                      <input
+                        value={form.shippingCity}
+                        onChange={e => update("shippingCity", e.target.value)}
+                        className="w-full border rounded-lg px-3 py-2 text-sm"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="text-xs text-slate-500 block mb-1">
+                        Código Postal *
+                      </label>
+                      <input
+                        value={form.shippingPostalCode}
+                        onChange={e => update("shippingPostalCode", e.target.value)}
+                        className="w-full border rounded-lg px-3 py-2 text-sm"
+                        placeholder="0000-000"
+                      />
+                    </div>
+                  </div>
+
+                  {user && (
+                    <label className="flex items-center gap-2 text-sm text-slate-700 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={saveShippingAddress}
+                        onChange={e => setSaveShippingAddress(e.target.checked)}
+                        className="accent-sky-600"
+                      />
+                      Guardar esta morada de entrega na minha conta
+                    </label>
+                  )}
+                </div>
+              )}
+
               <div className="flex gap-3">
                 <button onClick={() => setStep(1)} className="px-6 py-2 border rounded-lg text-sm text-slate-600 hover:bg-slate-50 transition">← Voltar</button>
                 <button onClick={() => setStep(3)} className="px-6 py-2 bg-sky-600 hover:bg-sky-700 text-white text-sm rounded-lg font-medium transition">Continuar →</button>
@@ -327,19 +869,61 @@ export default function CheckoutPage() {
                 </div>
               )}
 
-              <div className="space-y-3 text-sm">
-                <div className="p-3 bg-slate-50 rounded-lg"><strong>Dados:</strong> {form.name} — {form.email}{form.phone ? ` — ${form.phone}` : ""}</div>
-                <div className="p-3 bg-slate-50 rounded-lg"><strong>Entrega:</strong> {form.deliveryType === "pickup" ? "Levantamento em Esposende" : `${form.address1}, ${form.city} ${form.postalCode}`}</div>
-                <div className="p-3 bg-slate-50 rounded-lg">
-                  <strong>Pagamento:</strong>{" "}
-                  {{
-                    bank_transfer: "Transferência Bancária",
-                    multibanco: "Multibanco",
-                    mbway: "MB WAY",
-                    card: "Cartão",
-                  }[form.paymentMethod] || form.paymentMethod}
+              <div className="grid sm:grid-cols-2 gap-3 text-sm">
+                <div className="p-4 bg-slate-50 rounded-lg">
+                  <p className="font-semibold text-slate-800 mb-2">Dados do cliente</p>
+                  <p>{form.name}</p>
+                  <p>{form.email}</p>
+                  {form.phone && <p>{form.phone}</p>}
+                  {form.nif && <p>NIF: {form.nif}</p>}
+                  {form.companyName && <p>Empresa: {form.companyName}</p>}
                 </div>
-                {form.nif && <div className="p-3 bg-slate-50 rounded-lg"><strong>NIF:</strong> {form.nif}</div>}
+
+                <div className="p-4 bg-slate-50 rounded-lg">
+                  <p className="font-semibold text-slate-800 mb-2">Morada de faturação</p>
+                  <p>{form.address1}</p>
+                  {form.address2 && <p>{form.address2}</p>}
+                  <p>{form.postalCode} {form.city}</p>
+                  <p>Portugal</p>
+                </div>
+
+                <div className="p-4 bg-slate-50 rounded-lg">
+                  <p className="font-semibold text-slate-800 mb-2">Entrega</p>
+                  {form.deliveryType === "pickup" ? (
+                    <p>Levantamento em loja — Esposende</p>
+                  ) : shippingSameAsBilling ? (
+                    <>
+                      <p>{form.address1}</p>
+                      {form.address2 && <p>{form.address2}</p>}
+                      <p>{form.postalCode} {form.city}</p>
+                      <p>Portugal</p>
+                    </>
+                  ) : (
+                    <>
+                      <p>{form.shippingAddress1}</p>
+                      {form.shippingAddress2 && <p>{form.shippingAddress2}</p>}
+                      <p>{form.shippingPostalCode} {form.shippingCity}</p>
+                      <p>Portugal</p>
+                    </>
+                  )}
+                </div>
+
+                <div className="p-4 bg-slate-50 rounded-lg">
+                  <p className="font-semibold text-slate-800 mb-2">Pagamento</p>
+                  <p>
+                    {{
+                      bank_transfer: "Transferência Bancária",
+                      multibanco: "Multibanco",
+                      mbway: "MB WAY",
+                      card: "Cartão",
+                    }[form.paymentMethod] || form.paymentMethod}
+                  </p>
+                  {form.notes && (
+                    <p className="mt-2 text-slate-600">
+                      <span className="font-medium">Notas:</span> {form.notes}
+                    </p>
+                  )}
+                </div>
               </div>
               {error && <p className="text-sm text-red-500">{error}</p>}
               <div className="flex gap-3">

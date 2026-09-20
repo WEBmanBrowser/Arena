@@ -424,33 +424,250 @@ export default function ContaClient() {
                       <button disabled={ordersPagination.page >= ordersPagination.totalPages} onClick={() => loadOrders(ordersPagination.page + 1)} className="px-3 py-1 border rounded disabled:opacity-50">Seguinte</button>
                     </div>
                   )}
-                  {orderDetail && (
-                    <div className="mt-4 bg-white border rounded-xl p-4">
-                      <div className="flex justify-between mb-2">
-                        <h3 className="font-bold">Encomenda #{((orderDetail as any).order?.orderNumber || (orderDetail as any).orderNumber) as string}</h3>
-                        <button onClick={() => setOrderDetail(null)} className="text-slate-400">✕</button>
+                  {orderDetail && (() => {
+                    const detail = orderDetail as any;
+                    const order = detail.order ?? detail;
+                    const items = detail.items ?? [];
+                    const billing = order.billingAddress as any;
+                    const shipping = order.shippingAddress as any;
+
+                    const paymentMethodLabel = ({
+                      bank_transfer: "Transferência Bancária",
+                      multibanco: "Multibanco",
+                      mbway: "MB WAY",
+                      card: "Cartão",
+                    } as Record<string, string>)[order.paymentMethod] || order.paymentMethod || "—";
+
+                    return (
+                      <div className="mt-5 bg-white border rounded-xl overflow-hidden">
+                        <div className="p-5 border-b bg-slate-50">
+                          <div className="flex items-start justify-between gap-4">
+                            <div>
+                              <h3 className="text-lg font-bold text-slate-800">
+                                Encomenda #{order.orderNumber}
+                              </h3>
+                              <p className="text-sm text-slate-500 mt-1">
+                                Realizada em {fmtDate(order.createdAt)}
+                              </p>
+                            </div>
+                            <button
+                              onClick={() => setOrderDetail(null)}
+                              className="text-slate-400 hover:text-slate-700 text-lg"
+                              aria-label="Fechar detalhe"
+                            >
+                              ✕
+                            </button>
+                          </div>
+
+                          <div className="flex flex-wrap gap-2 mt-4">
+                            <span className={`px-2.5 py-1 rounded-full text-xs font-medium ${statusColor(order.status)}`}>
+                              {STATUS_LABELS[order.status] || order.status}
+                            </span>
+                            <span className={`px-2.5 py-1 rounded-full text-xs font-medium ${statusColor(order.paymentStatus)}`}>
+                              Pagamento: {PAYMENT_LABELS[order.paymentStatus] || order.paymentStatus}
+                            </span>
+                          </div>
+                        </div>
+
+                        <div className="p-5">
+                          <h4 className="font-semibold text-slate-800 mb-3">Artigos</h4>
+                          <div className="border rounded-lg overflow-hidden">
+                            <div className="hidden sm:grid grid-cols-[1fr_80px_110px_110px] gap-3 px-4 py-2 bg-slate-50 border-b text-xs font-medium text-slate-500">
+                              <span>Produto</span>
+                              <span className="text-center">Qtd.</span>
+                              <span className="text-right">Preço</span>
+                              <span className="text-right">Total</span>
+                            </div>
+
+                            {items.length ? items.map((item: any) => (
+                              <div
+                                key={item.id}
+                                className="grid sm:grid-cols-[1fr_80px_110px_110px] gap-2 sm:gap-3 px-4 py-3 border-b last:border-b-0 text-sm"
+                              >
+                                <div>
+                                  <p className="font-medium text-slate-800">{item.productName}</p>
+                                  {item.productSku && (
+                                    <p className="text-xs text-slate-400 mt-0.5">SKU: {item.productSku}</p>
+                                  )}
+                                </div>
+                                <div className="sm:text-center text-slate-600">
+                                  <span className="sm:hidden text-xs text-slate-400">Quantidade: </span>
+                                  {item.quantity}
+                                </div>
+                                <div className="sm:text-right text-slate-600">
+                                  <span className="sm:hidden text-xs text-slate-400">Preço unitário: </span>
+                                  {fmtMoney(item.unitPriceGross)}
+                                </div>
+                                <div className="sm:text-right font-medium text-slate-800">
+                                  <span className="sm:hidden text-xs text-slate-400 font-normal">Total: </span>
+                                  {fmtMoney(item.lineTotalGross)}
+                                </div>
+                              </div>
+                            )) : (
+                              <p className="px-4 py-3 text-sm text-slate-400">Sem artigos registados.</p>
+                            )}
+                          </div>
+
+                          <div className="mt-4 ml-auto max-w-sm space-y-1.5 text-sm">
+                            <div className="flex justify-between text-slate-600">
+                              <span>Subtotal</span>
+                              <span>{fmtMoney(order.subtotal)}</span>
+                            </div>
+                            {parseFloat(order.discount || "0") > 0 && (
+                              <div className="flex justify-between text-slate-600">
+                                <span>Desconto{order.couponCode ? ` (${order.couponCode})` : ""}</span>
+                                <span>-{fmtMoney(order.discount)}</span>
+                              </div>
+                            )}
+                            <div className="flex justify-between text-slate-600">
+                              <span>Portes</span>
+                              <span>{parseFloat(order.shipping || "0") === 0 ? "Grátis" : fmtMoney(order.shipping)}</span>
+                            </div>
+                            <div className="flex justify-between text-slate-500 text-xs">
+                              <span>IVA incluído</span>
+                              <span>{fmtMoney(order.vat)}</span>
+                            </div>
+                            <div className="flex justify-between border-t pt-2 mt-2 text-base font-bold text-slate-800">
+                              <span>Total</span>
+                              <span>{fmtMoney(order.total)}</span>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="grid md:grid-cols-2 gap-4 px-5 pb-5">
+                          <div className="border rounded-lg p-4">
+                            <h4 className="font-semibold text-sm text-slate-800 mb-3">Faturação</h4>
+                            {billing ? (
+                              <div className="text-sm text-slate-600 space-y-0.5">
+                                <p className="font-medium text-slate-800">{billing.name}</p>
+                                <p>{billing.address1}</p>
+                                {billing.address2 && <p>{billing.address2}</p>}
+                                <p>{billing.postalCode} {billing.city}</p>
+                                <p>{billing.country || "Portugal"}</p>
+                                {billing.phone && <p className="pt-1">Tel.: {billing.phone}</p>}
+                                {order.nif && <p>NIF: {order.nif}</p>}
+                                {order.companyName && <p>Empresa: {order.companyName}</p>}
+                              </div>
+                            ) : (
+                              <p className="text-sm text-slate-400">Sem morada de faturação registada.</p>
+                            )}
+                          </div>
+
+                          <div className="border rounded-lg p-4">
+                            <h4 className="font-semibold text-sm text-slate-800 mb-3">Entrega</h4>
+                            {order.deliveryType === "pickup" ? (
+                              <div className="text-sm text-slate-600">
+                                <p className="font-medium text-slate-800">Levantamento em loja</p>
+                                <p>Esposende</p>
+                              </div>
+                            ) : shipping ? (
+                              <div className="text-sm text-slate-600 space-y-0.5">
+                                <p className="font-medium text-slate-800">{shipping.name}</p>
+                                <p>{shipping.address1}</p>
+                                {shipping.address2 && <p>{shipping.address2}</p>}
+                                <p>{shipping.postalCode} {shipping.city}</p>
+                                <p>{shipping.country || "Portugal"}</p>
+                                {shipping.phone && <p className="pt-1">Tel.: {shipping.phone}</p>}
+                              </div>
+                            ) : (
+                              <p className="text-sm text-slate-400">Sem morada de entrega registada.</p>
+                            )}
+
+                            {order.trackingNumber && (
+                              <div className="mt-3 pt-3 border-t text-sm">
+                                <span className="text-slate-500">Tracking: </span>
+                                <span className="font-medium text-slate-800">{order.trackingNumber}</span>
+                              </div>
+                            )}
+                          </div>
+
+                          <div className="border rounded-lg p-4">
+                            <h4 className="font-semibold text-sm text-slate-800 mb-3">Pagamento</h4>
+                            <div className="text-sm space-y-1.5">
+                              <div className="flex justify-between gap-3">
+                                <span className="text-slate-500">Método</span>
+                                <span className="font-medium text-slate-800">{paymentMethodLabel}</span>
+                              </div>
+                              <div className="flex justify-between gap-3">
+                                <span className="text-slate-500">Estado</span>
+                                <span className="font-medium text-slate-800">
+                                  {PAYMENT_LABELS[order.paymentStatus] || order.paymentStatus}
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="border rounded-lg p-4">
+                            <h4 className="font-semibold text-sm text-slate-800 mb-3">Informação da encomenda</h4>
+                            <div className="text-sm space-y-1.5">
+                              <div className="flex justify-between gap-3">
+                                <span className="text-slate-500">N.º encomenda</span>
+                                <span className="font-medium text-slate-800">{order.orderNumber}</span>
+                              </div>
+                              <div className="flex justify-between gap-3">
+                                <span className="text-slate-500">Data</span>
+                                <span className="text-slate-800">{fmtDate(order.createdAt)}</span>
+                              </div>
+                              <div className="flex justify-between gap-3">
+                                <span className="text-slate-500">Entrega</span>
+                                <span className="text-slate-800">
+                                  {order.deliveryType === "pickup" ? "Levantamento em loja" : "Envio"}
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+
+                        {order.notes && (
+                          <div className="mx-5 mb-5 border rounded-lg p-4">
+                            <h4 className="font-semibold text-sm text-slate-800 mb-2">Notas</h4>
+                            <p className="text-sm text-slate-600 whitespace-pre-wrap">{order.notes}</p>
+                          </div>
+                        )}
+
+                        <div className="px-5 pb-5 space-y-4">
+                          {detail.invoiceDocuments?.length ? (
+                            <div className="border rounded-lg p-4">
+                              <h4 className="font-semibold text-sm text-slate-800 mb-3">Documentos fiscais</h4>
+                              <div className="space-y-2">
+                                {detail.invoiceDocuments.map((doc: any) => (
+                                  <div key={doc.id} className="text-sm text-slate-600">
+                                    <span className="font-medium text-slate-800">
+                                      {doc.documentType === "invoice" ? "Fatura" : "Documento"}
+                                    </span>
+                                    {" · "}
+                                    {doc.documentNumber || doc.documentReference || "—"}
+                                    {doc.amountCents != null && ` · ${(doc.amountCents / 100).toFixed(2)} ${doc.currency}`}
+                                    {doc.issuedAt && ` · ${fmtDate(doc.issuedAt)}`}
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="text-xs text-slate-400">Sem documento fiscal registado.</div>
+                          )}
+
+                          {detail.refunds?.length ? (
+                            <div className="border rounded-lg p-4">
+                              <h4 className="font-semibold text-sm text-slate-800 mb-3">Reembolsos</h4>
+                              <div className="space-y-2">
+                                {detail.refunds.map((r: any, i: number) => (
+                                  <p key={i} className="text-sm text-slate-600">
+                                    {(r.amountCents / 100).toFixed(2)} {r.currency}
+                                    {" · "}
+                                    {r.status === "succeeded" ? "Reembolsado" : r.status === "pending" ? "Pendente" : "Em processamento"}
+                                    {" · "}
+                                    {fmtDate(r.completedAt ?? r.createdAt)}
+                                  </p>
+                                ))}
+                              </div>
+                            </div>
+                          ) : null}
+                        </div>
                       </div>
-                      <p className="text-xs text-slate-500 mb-3">Detalhe disponível com snapshots históricos (dados preservados).</p>
-                      {(orderDetail as any).invoiceDocuments?.length ? (
-                        <div className="border-t pt-3">
-                          <h4 className="font-semibold text-sm mb-2">Documentos fiscais</h4>
-                          {(orderDetail as any).invoiceDocuments.map((doc: any) => (
-                            <p key={doc.id} className="text-xs text-slate-600">{doc.documentType === "invoice" ? "Fatura" : "Documento"}: {doc.documentNumber || doc.documentReference} · {doc.amountCents != null ? `${(doc.amountCents / 100).toFixed(2)} ${doc.currency}` : ""} · {fmtDate(doc.issuedAt)}</p>
-                          ))}
-                        </div>
-                      ) : <p className="text-xs text-slate-400">Sem documento fiscal registado.</p>}
-                      {(orderDetail as any).refunds?.length ? (
-                        <div className="border-t pt-3">
-                          <h4 className="font-semibold text-sm mb-2">Reembolsos</h4>
-                          {(orderDetail as any).refunds.map((r: any, i: number) => (
-                            <p key={i} className="text-xs text-slate-600">
-                              {(r.amountCents / 100).toFixed(2)} {r.currency} · {r.status === "succeeded" ? "Reembolsado" : r.status === "pending" ? "Pendente" : "Em processamento"} · {fmtDate(r.completedAt ?? r.createdAt)}
-                            </p>
-                          ))}
-                        </div>
-                      ) : null}
-                    </div>
-                  )}
+                    );
+                  })()}
+
                 </>
               )}
             </div>
