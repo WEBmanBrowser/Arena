@@ -91,12 +91,33 @@ export default function CheckoutPage() {
         }),
       });
       const data = await res.json();
-      if (data.error) { setError(data.error); }
-      else {
-        setSuccess(data.order);
+
+      if (!res.ok || data.error) {
+        setError(data.error || "Erro ao processar encomenda");
+      } else if (data.order) {
+        // The order already exists at this point. Clear the cart before
+        // handling the provider result so a payment provisioning problem
+        // cannot lead to an accidental duplicate order.
         localStorage.removeItem("mdtech_cart");
         localStorage.removeItem("mdtech_coupon");
         window.dispatchEvent(new Event("cart-updated"));
+
+        const payment = data.payment ?? null;
+
+        if (
+          payment?.method === "card" &&
+          payment.outcome === "created" &&
+          typeof payment.redirectUrl === "string" &&
+          payment.redirectUrl.startsWith("https://")
+        ) {
+          window.location.assign(payment.redirectUrl);
+          return;
+        }
+
+        setSuccess({
+          ...data.order,
+          payment,
+        });
       }
     } catch { setError("Erro ao processar encomenda"); }
     setLoading(false);
@@ -107,22 +128,86 @@ export default function CheckoutPage() {
   }
 
   if (success) {
+    const payment = success.payment;
+
     return (
       <div className="max-w-3xl mx-auto px-4 py-16 text-center">
         <div className="bg-white rounded-2xl border p-8">
-          <p className="text-5xl mb-4">📦</p>
-          <h1 className="text-2xl font-bold text-slate-800 mb-2">Encomenda registada com sucesso</h1>
-          <p className="text-slate-500 mb-2">Número: <strong>{success.orderNumber}</strong></p>
-          <p className="text-lg font-bold text-slate-900 mb-2">Total: {parseFloat(success.total).toFixed(2)}€</p>
-          <div className="inline-block px-3 py-1 rounded-full text-sm font-medium bg-amber-50 text-amber-700 mb-4">
-            ⏳ A aguardar pagamento
-          </div>
-          <p className="text-sm text-slate-500 mb-6">
-            Consulte a sua área de cliente ou contacte-nos para obter os dados de pagamento.
+          <h1 className="text-2xl font-bold text-slate-800 mb-2">
+            Encomenda registada com sucesso
+          </h1>
+
+          <p className="text-slate-500 mb-2">
+            N?mero: <strong>{success.orderNumber}</strong>
           </p>
-          <button onClick={() => router.push("/")} className="px-6 py-3 bg-sky-600 text-white rounded-lg font-medium hover:bg-sky-700 transition">
-            Voltar à Loja
-          </button>
+
+          <p className="text-lg font-bold text-slate-900 mb-4">
+            Total: {parseFloat(success.total).toFixed(2)} EUR
+          </p>
+
+          {payment?.method === "multibanco" && payment.outcome === "created" && (
+            <div className="max-w-md mx-auto mb-6 rounded-xl border bg-slate-50 p-5 text-left">
+              <p className="font-semibold text-slate-800 mb-3">Pagamento por Multibanco</p>
+              <p className="text-sm text-slate-600 mb-1">
+                Entidade: <strong>{payment.entity || "-"}</strong>
+              </p>
+              <p className="text-sm text-slate-600 mb-1">
+                Referência: <strong>{payment.reference || "-"}</strong>
+              </p>
+              <p className="text-sm text-slate-600">
+                Valor: <strong>{parseFloat(success.total).toFixed(2)} EUR</strong>
+              </p>
+              {payment.expiresAt && (
+                <p className="text-xs text-slate-500 mt-3">
+                  Referência válida até {new Date(payment.expiresAt).toLocaleString("pt-PT")}.
+                </p>
+              )}
+            </div>
+          )}
+
+          {payment?.method === "mbway" && payment.outcome === "created" && (
+            <div className="max-w-md mx-auto mb-6 rounded-xl border bg-slate-50 p-5">
+              <p className="font-semibold text-slate-800 mb-2">Pedido MB WAY enviado</p>
+              <p className="text-sm text-slate-600">
+                Confirme o pagamento na aplicação MB WAY. A encomenda será atualizada depois da confirmação do pagamento.
+              </p>
+            </div>
+          )}
+
+          {payment?.method === "bank_transfer" && (
+            <div className="max-w-md mx-auto mb-6 rounded-xl border bg-slate-50 p-5">
+              <p className="font-semibold text-slate-800 mb-2">Transferência bancária</p>
+              <p className="text-sm text-slate-600">
+                A encomenda encontra-se registada e aguarda pagamento.
+              </p>
+            </div>
+          )}
+
+          {(payment?.outcome === "provisioning_error" ||
+            payment?.outcome === "reconciliation_required" ||
+            payment?.outcome === "rejected") && (
+            <div className="max-w-md mx-auto mb-6 rounded-xl border border-amber-200 bg-amber-50 p-5">
+              <p className="font-semibold text-amber-800 mb-2">
+                Pagamento ainda não concluído
+              </p>
+              <p className="text-sm text-amber-700">
+                A encomenda já foi registada. Não volte a criar a encomenda. Consulte a sua área de cliente ou contacte-nos para concluir o pagamento.
+              </p>
+            </div>
+          )}
+
+          <div className="inline-block px-3 py-1 rounded-full text-sm font-medium bg-amber-50 text-amber-700 mb-6">
+            A aguardar confirmação do pagamento
+          </div>
+
+          <div>
+            <button
+              onClick={() => router.push("/")}
+              className="px-6 py-3 bg-sky-600 text-white rounded-lg font-medium hover:bg-sky-700 transition"
+            >
+              Voltar ? Loja
+            </button>
+          </div>
         </div>
       </div>
     );
@@ -196,12 +281,28 @@ export default function CheckoutPage() {
             <div className="bg-white border rounded-xl p-6 space-y-4 animate-fade-in">
               <h2 className="font-bold text-slate-800">Método de Pagamento</h2>
               <div className="space-y-3">
-                <label className={`flex items-center gap-4 p-4 border rounded-xl cursor-pointer transition ${form.paymentMethod === "bank_transfer" ? "border-sky-300 bg-sky-50" : "hover:border-slate-300"}`}>
-                  <input type="radio" name="payment" value="bank_transfer" checked={form.paymentMethod === "bank_transfer"} onChange={e => update("paymentMethod", e.target.value)} className="accent-sky-600" />
-                  <div><p className="font-medium text-sm">🏦 Transferência Bancária</p><p className="text-xs text-slate-500">IBAN será fornecido após confirmação</p></div>
-                </label>
+                {[
+                  { value: "bank_transfer", title: "Transferência Bancária", description: "Pague através de transferência bancária." },
+                  { value: "multibanco", title: "Multibanco", description: "Receba uma entidade e referência para efetuar o pagamento." },
+                  { value: "mbway", title: "MB WAY", description: "Receba o pedido de pagamento no seu telemóvel." },
+                  { value: "card", title: "Cartão", description: "Pagamento seguro através da página de pagamento Eupago." },
+                ].map(method => (
+                  <label key={method.value} className={`flex items-center gap-4 p-4 border rounded-xl cursor-pointer transition ${form.paymentMethod === method.value ? "border-sky-300 bg-sky-50" : "hover:border-slate-300"}`}>
+                    <input
+                      type="radio"
+                      name="payment"
+                      value={method.value}
+                      checked={form.paymentMethod === method.value}
+                      onChange={e => update("paymentMethod", e.target.value)}
+                      className="accent-sky-600"
+                    />
+                    <div>
+                      <p className="font-medium text-sm">{method.title}</p>
+                      <p className="text-xs text-slate-500">{method.description}</p>
+                    </div>
+                  </label>
+                ))}
               </div>
-              <p className="text-xs text-slate-400">Outros métodos de pagamento (Multibanco, MB WAY, Cartão) estarão disponíveis em breve.</p>
               <div><label className="text-xs text-slate-500 block mb-1">Notas (opcional)</label><textarea value={form.notes} onChange={e => update("notes", e.target.value)} className="w-full border rounded-lg px-3 py-2 text-sm" rows={2} /></div>
               <div className="flex gap-3">
                 <button onClick={() => setStep(2)} className="px-6 py-2 border rounded-lg text-sm text-slate-600 hover:bg-slate-50 transition">← Voltar</button>
@@ -229,7 +330,15 @@ export default function CheckoutPage() {
               <div className="space-y-3 text-sm">
                 <div className="p-3 bg-slate-50 rounded-lg"><strong>Dados:</strong> {form.name} — {form.email}{form.phone ? ` — ${form.phone}` : ""}</div>
                 <div className="p-3 bg-slate-50 rounded-lg"><strong>Entrega:</strong> {form.deliveryType === "pickup" ? "Levantamento em Esposende" : `${form.address1}, ${form.city} ${form.postalCode}`}</div>
-                <div className="p-3 bg-slate-50 rounded-lg"><strong>Pagamento:</strong> Transferência Bancária</div>
+                <div className="p-3 bg-slate-50 rounded-lg">
+                  <strong>Pagamento:</strong>{" "}
+                  {{
+                    bank_transfer: "Transferência Bancária",
+                    multibanco: "Multibanco",
+                    mbway: "MB WAY",
+                    card: "Cartão",
+                  }[form.paymentMethod] || form.paymentMethod}
+                </div>
                 {form.nif && <div className="p-3 bg-slate-50 rounded-lg"><strong>NIF:</strong> {form.nif}</div>}
               </div>
               {error && <p className="text-sm text-red-500">{error}</p>}

@@ -9,6 +9,8 @@ import { sendEmail, orderCreatedEmail } from "@/lib/email";
 import { calculateShippingForCart, ShippingRateError } from "@/lib/shipping-rates";
 import { checkRateLimit, clientIp, rateLimitResponse } from "@/lib/rate-limit";
 import { lockProductsAscending } from "@/lib/stock-locks";
+import { checkoutOrderSchema } from "@/lib/checkout-order-schema";
+import { createEupagoPayment } from "@/lib/services/eupago-payment-service";
 
 /**
  * B.5.4 — POST /api/orders abuse protection (existing Postgres rate-limit
@@ -45,14 +47,52 @@ export async function POST(req: NextRequest) {
     }
 
     const body = await req.json();
-    const { items, billingAddress, shippingAddress, paymentMethod, shippingMethod,
-            deliveryType, couponCode, nif, companyName, guestEmail, guestName, guestPhone, notes } = body;
-
-    if (!items || !Array.isArray(items) || items.length === 0) {
-      return NextResponse.json({ error: "Carrinho vazio" }, { status: 400 });
+    const parsedBody = checkoutOrderSchema.safeParse(body);
+    if (!parsedBody.success) {
+      return NextResponse.json({
+        error: "Dados da encomenda invalidos",
+        issues: parsedBody.error.issues,
+      }, { status: 400 });
     }
 
+    const { items, billingAddress, shippingAddress, paymentMethod, shippingMethod,
+            deliveryType, couponCode, nif, companyName, guestEmail, guestName, guestPhone, notes } = parsedBody.data;
+
     const user = rateLimitedUser;
+
+    // Resolve payment identity server-side. Authenticated customer data always
+    // wins over guest fields supplied by the browser.
+    const paymentCustomerEmail = user?.email ?? guestEmail ?? null;
+    const paymentCustomerName = user?.name ?? guestName ?? null;
+    const rawPaymentCustomerPhone = user?.phone ?? guestPhone ?? null;
+    const paymentCustomerPhoneDigits = rawPaymentCustomerPhone
+      ? rawPaymentCustomerPhone.replace(/\D/g, "")
+      : null;
+    const paymentCustomerPhone =
+      paymentCustomerPhoneDigits?.startsWith("351") && paymentCustomerPhoneDigits.length === 12
+        ? paymentCustomerPhoneDigits.slice(3)
+        : paymentCustomerPhoneDigits;
+
+    // Provider-specific identity requirements must fail before the order
+    // transaction so no order, stock reservation or coupon mutation is created.
+    if (paymentMethod === "mbway" && (!paymentCustomerPhone || !/^\d{6,15}$/.test(paymentCustomerPhone))) {
+      return NextResponse.json(
+        { error: "Telefone valido obrigatorio para pagamento MB WAY" },
+        { status: 400 },
+      );
+    }
+
+    const siteUrl =
+      paymentMethod === "card"
+        ? (process.env.NEXT_PUBLIC_SITE_URL || process.env.SITE_URL || "https://loja.mdtech.pt").replace(/\/+$/, "")
+        : null;
+
+    if (paymentMethod === "card" && !paymentCustomerEmail) {
+      return NextResponse.json(
+        { error: "Email obrigatorio para pagamento por cartao" },
+        { status: 400 },
+      );
+    }
 
     const result = await db.transaction(async (tx) => {
       // ── 1. Validate products ────────────────────────────────
@@ -68,11 +108,7 @@ export async function POST(req: NextRequest) {
       }> = [];
 
       for (const item of items) {
-        const productId = parseInt(item.productId);
-        const quantity = parseInt(item.quantity);
-        if (!productId || !quantity || quantity < 1 || quantity > 100) {
-          throw new Error("VALIDATION:Dados do produto inválidos");
-        }
+        const { productId, quantity } = item;
         const [product] = await tx.select().from(products)
           .where(and(eq(products.id, productId), eq(products.isActive, true))).limit(1);
         if (!product) throw new Error(`VALIDATION:Produto não encontrado: ${productId}`);
@@ -167,7 +203,7 @@ export async function POST(req: NextRequest) {
         discount: toEuros(discountCents),
         vat: toEuros(totalVatCents),
         total: toEuros(totalCents),
-        paymentMethod: paymentMethod || "bank_transfer",
+        paymentMethod,
         paymentStatus: "pending",
         shippingMethod: delivery === "pickup" ? "store_pickup" : (shippingQuote.winningClass?.key || shippingMethod || null),
         deliveryType: delivery,
@@ -233,10 +269,12 @@ export async function POST(req: NextRequest) {
       }
 
       // ── 7. Create payment record ────────────────────────────
-      await tx.insert(payments).values({
-        orderId: order.id, provider: "manual", method: paymentMethod || "bank_transfer",
-        amount: toEuros(totalCents), currency: "EUR", status: "pending",
-      });
+      if (paymentMethod === "bank_transfer") {
+        await tx.insert(payments).values({
+          orderId: order.id, provider: "manual", method: "bank_transfer",
+          amount: toEuros(totalCents), currency: "EUR", status: "pending",
+        });
+      }
 
       // ── 8. Record initial status ────────────────────────────
       await tx.insert(orderStatusHistory).values({
@@ -244,19 +282,124 @@ export async function POST(req: NextRequest) {
         changedBy: user?.id ?? null, comment: "Encomenda criada",
       });
 
-      return order;
+      return { order, totalCents };
     });
 
-    // Post-commit email
-    const recipientEmail = result.guestEmail || (user ? user.email : null);
-    if (recipientEmail) {
-      const tmpl = orderCreatedEmail(result.orderNumber, result.total);
-      const eventKey = `order_created:${result.id}`;
-      await sendEmail({ type: "order_created", to: recipientEmail, ...tmpl, referenceType: "order", referenceId: result.id, eventKey });
+    // Provider payment creation happens only after the order/stock transaction
+    // has committed. A provider failure must never make the API claim that the
+    // already-created order itself failed.
+    let paymentResult: Awaited<ReturnType<typeof createEupagoPayment>> | null = null;
+    let paymentProvisioningError = false;
+
+    if (paymentMethod !== "bank_transfer") {
+      try {
+        paymentResult = await createEupagoPayment({
+          orderId: result.order.id,
+          method: paymentMethod,
+          amountCents: result.totalCents,
+          actorId: user?.id ?? null,
+          customerName: paymentCustomerName,
+          customerEmail: paymentCustomerEmail,
+          ...(paymentMethod === "mbway"
+            ? {
+                customerPhone: paymentCustomerPhone!,
+                countryCode: "351",
+              }
+            : {}),
+          ...(paymentMethod === "card"
+            ? {
+                successUrl: `${siteUrl}/checkout/sucesso?order=${encodeURIComponent(result.order.orderNumber)}`,
+                failUrl: `${siteUrl}/checkout/falha?order=${encodeURIComponent(result.order.orderNumber)}`,
+                backUrl: `${siteUrl}/checkout/falha?order=${encodeURIComponent(result.order.orderNumber)}`,
+              }
+            : {}),
+        });
+      } catch (error) {
+        paymentProvisioningError = true;
+        console.error("Post-commit Eupago provisioning error:", {
+          orderId: result.order.id,
+          paymentMethod,
+          error,
+        });
+      }
     }
 
+    // Post-commit email is best-effort. A notification failure must never turn
+    // an already-created order into an apparent order-creation failure.
+    const recipientEmail = result.order.guestEmail || (user ? user.email : null);
+    if (recipientEmail) {
+      try {
+        const tmpl = orderCreatedEmail(result.order.orderNumber, result.order.total);
+        const eventKey = `order_created:${result.order.id}`;
+        await sendEmail({
+          type: "order_created",
+          to: recipientEmail,
+          ...tmpl,
+          referenceType: "order",
+          referenceId: result.order.id,
+          eventKey,
+        });
+      } catch (error) {
+        console.error("Post-commit order email error:", {
+          orderId: result.order.id,
+          error,
+        });
+      }
+    }
+
+    const payment =
+      paymentMethod === "bank_transfer"
+        ? {
+            method: "bank_transfer" as const,
+            outcome: "pending" as const,
+          }
+        : paymentProvisioningError
+          ? {
+              method: paymentMethod,
+              outcome: "provisioning_error" as const,
+            }
+          : paymentResult?.outcome === "created"
+            ? {
+                method: paymentMethod,
+                outcome: "created" as const,
+                ...(paymentMethod === "multibanco"
+                  ? {
+                      entity: paymentResult.attempt.providerEntity,
+                      reference: paymentResult.attempt.providerReference,
+                      expiresAt: paymentResult.attempt.expiresAt?.toISOString() ?? null,
+                    }
+                  : {}),
+                ...(paymentMethod === "card"
+                  ? { redirectUrl: paymentResult.redirectUrl ?? null }
+                  : {}),
+              }
+            : paymentResult?.outcome === "rejected"
+              ? {
+                  method: paymentMethod,
+                  outcome: "rejected" as const,
+                  code: paymentResult.code,
+                }
+              : paymentResult?.outcome === "reconciliation_required"
+                ? {
+                    method: paymentMethod,
+                    outcome: "reconciliation_required" as const,
+                    code: paymentResult.code,
+                  }
+                : {
+                    method: paymentMethod,
+                    outcome: "provisioning_error" as const,
+                  };
+
     return NextResponse.json({
-      order: { id: result.id, orderNumber: result.orderNumber, total: result.total, status: result.status, paymentStatus: result.paymentStatus, paymentMethod: result.paymentMethod },
+      order: {
+        id: result.order.id,
+        orderNumber: result.order.orderNumber,
+        total: result.order.total,
+        status: result.order.status,
+        paymentStatus: result.order.paymentStatus,
+        paymentMethod: result.order.paymentMethod,
+      },
+      payment,
     });
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : "Erro ao criar encomenda";
