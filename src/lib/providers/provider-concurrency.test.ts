@@ -159,11 +159,11 @@ describe("B.3.1 concurrency — issued fiscal document immutability", () => {
     let issuedWins = 0;
 
     for (let trial = 0; trial < TRIALS; trial++) {
-      const doc = await createInvoiceDocument({ orderId: order.id, provider: "xd", documentType: "invoice" });
+      const doc = await createInvoiceDocument({ orderId: order.id, provider: "wintouch", documentType: "invoice" });
 
       const results = await Promise.allSettled([
         markInvoiceDocumentIssued(doc.id, {
-          providerDocumentId: `XD-RACE-${trial}`,
+          providerDocumentId: `WT-RACE-${trial}`,
           documentNumber: `FT 2026/${trial}`,
           series: "2026",
         }),
@@ -183,7 +183,7 @@ describe("B.3.1 concurrency — issued fiscal document immutability", () => {
         // a concurrent cancel/fail rewrote the row.
         expect(stored!.status).toBe("issued");
         expect(stored!.documentNumber).toBe(`FT 2026/${trial}`);
-        expect(stored!.providerDocumentId).toBe(`XD-RACE-${trial}`);
+        expect(stored!.providerDocumentId).toBe(`WT-RACE-${trial}`);
         expect(stored!.issuedAt).toBeInstanceOf(Date);
       } else {
         // If issuing lost the race the document must NOT carry fiscal identity.
@@ -200,23 +200,23 @@ describe("B.3.1 concurrency — issued fiscal document immutability", () => {
 
   it("rejects every post-issue mutation, sequentially and repeatedly", async () => {
     const order = await createTestOrder("paid");
-    const doc = await createInvoiceDocument({ orderId: order.id, provider: "xd", documentType: "invoice" });
+    const doc = await createInvoiceDocument({ orderId: order.id, provider: "wintouch", documentType: "invoice" });
     await markInvoiceDocumentIssued(doc.id, {
-      providerDocumentId: "XD-IMMUTABLE", documentNumber: "FT 2026/500", series: "2026",
+      providerDocumentId: "WT-IMMUTABLE", documentNumber: "FT 2026/500", series: "2026",
     });
 
     for (let i = 0; i < 3; i++) {
       await expect(markInvoiceDocumentFailed(doc.id)).rejects.toMatchObject({ code: "OPERATION_NOT_SUPPORTED" });
       await expect(cancelInvoiceDocument(doc.id)).rejects.toMatchObject({ code: "OPERATION_NOT_SUPPORTED" });
       await expect(
-        markInvoiceDocumentIssued(doc.id, { providerDocumentId: "XD-OTHER", documentNumber: "FT 2026/999" })
+        markInvoiceDocumentIssued(doc.id, { providerDocumentId: "WT-OTHER", documentNumber: "FT 2026/999" })
       ).rejects.toMatchObject({ code: "OPERATION_NOT_SUPPORTED" });
     }
 
     const stored = await getInvoiceDocument(doc.id);
     expect(stored!.status).toBe("issued");
     expect(stored!.documentNumber).toBe("FT 2026/500");
-    expect(stored!.providerDocumentId).toBe("XD-IMMUTABLE");
+    expect(stored!.providerDocumentId).toBe("WT-IMMUTABLE");
     // The row is never removed — cancellation/failure are states, not deletes.
     expect(await listInvoiceDocumentsForOrder(order.id)).toHaveLength(1);
   });
@@ -228,9 +228,9 @@ describe("B.3.1 concurrency — issued fiscal document immutability", () => {
 
   it("does not touch the order while documents race", async () => {
     const order = await createTestOrder("paid");
-    const doc = await createInvoiceDocument({ orderId: order.id, provider: "xd", documentType: "invoice" });
+    const doc = await createInvoiceDocument({ orderId: order.id, provider: "wintouch", documentType: "invoice" });
     await Promise.allSettled([
-      markInvoiceDocumentIssued(doc.id, { providerDocumentId: "XD-O", documentNumber: "FT 1" }),
+      markInvoiceDocumentIssued(doc.id, { providerDocumentId: "WT-O", documentNumber: "FT 1" }),
       cancelInvoiceDocument(doc.id),
     ]);
     const [reloaded] = await db.select().from(orders).where(eq(orders.id, order.id));

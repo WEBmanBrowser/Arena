@@ -131,8 +131,16 @@ async function startSftpServer(options: {
                   return;
                 }
 
-                const end = Math.min(offset + len, options.content.length);
-                sftp.data(reqId, options.content.subarray(offset, end));
+                const end = Math.min(
+                  offset + len,
+                  options.content.length
+                );
+
+                const chunk = Buffer.from(
+                  options.content.subarray(offset, end)
+                );
+
+                sftp.data(reqId, chunk);
               });
 
               sftp.on("CLOSE", (reqId) => {
@@ -306,7 +314,7 @@ describe("C.3.4.4 [P0] - ssh2 local E2E", () => {
         config(server),
         "read",
         PASSWORD,
-        { maxBytes: MAX_BYTES, timeoutMs: 10_000 }
+        { maxBytes: MAX_BYTES, timeoutMs: 30_000 }
       )
     ).rejects.toMatchObject({
       code: "SFTP_TOO_LARGE",

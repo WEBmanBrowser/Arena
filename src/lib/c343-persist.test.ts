@@ -372,3 +372,81 @@ describe("J: duplicados em pricelist também conflict", () => {
     expect(preview.lines.every(l=>l.status==="conflict")).toBe(true);
   });
 });
+
+describe("K: pricelist new_product -> supplier link -> stock", () => {
+  it("produto criado pelo pricelist fica imediatamente identificavel pelo ProductID no stock", async () => {
+    const productId = `${TAG}-CHAIN-PID`;
+
+    const pricePreview = await previewSupplierImport({
+      supplierId,
+      source: uploadSource({
+        fileName: "pricelist-1.txt",
+        csvText: pricelistTxt([{
+          ProductID: productId,
+          EuropeanArticleNumber: "5600000003435",
+          Description: `${TAG} Chain Product`,
+          NetPrice: "42,50",
+          ManufacturerPartNumber: "MPN-CHAIN",
+        }]),
+      }),
+      userId: MANAGER.id,
+    });
+
+    expect(pricePreview.lines[0].status).toBe("new_product");
+    expect(pricePreview.lines[0].supplierSku).toBe(productId);
+
+    const priceOutcome = await applySupplierImport({
+      importId: pricePreview.importId,
+      previewToken: pricePreview.previewToken,
+      userId: MANAGER.id,
+    });
+
+    expect(priceOutcome.applied).toBe(1);
+    expect(priceOutcome.created).toBe(1);
+
+    const [link] = await db
+      .select()
+      .from(productSuppliers)
+      .where(and(
+        eq(productSuppliers.supplierId, supplierId),
+        eq(productSuppliers.supplierSku, productId)
+      ))
+      .limit(1);
+
+    expect(link).toBeDefined();
+    expect(link.supplierSku).toBe(productId);
+
+    const stockPreview = await previewSupplierImport({
+      supplierId,
+      source: uploadSource({
+        fileName: "stock.txt",
+        csvText: stockTxt([{
+          ProductID: productId,
+          AvailableQuantity: "37",
+        }]),
+      }),
+      userId: MANAGER.id,
+    });
+
+    expect(stockPreview.lines[0].status).toBe("ready");
+    expect(stockPreview.lines[0].productId).toBe(link.productId);
+    expect(stockPreview.lines[0].supplierStock).toBe(37);
+    expect(stockPreview.lines[0].codes).not.toContain("STOCK_UNKNOWN_SKU");
+
+    const stockOutcome = await applySupplierImport({
+      importId: stockPreview.importId,
+      previewToken: stockPreview.previewToken,
+      userId: MANAGER.id,
+    });
+
+    expect(stockOutcome.applied).toBe(1);
+
+    const [afterLink] = await db
+      .select()
+      .from(productSuppliers)
+      .where(eq(productSuppliers.id, link.id))
+      .limit(1);
+
+    expect(afterLink.supplierStock).toBe(37);
+  });
+});

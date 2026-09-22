@@ -249,6 +249,14 @@ describe("C.3.4.3.1 — parseAlsoStock (com header, resolução por nome)", () =
     expect(parsed.rows[0].issues.some((i) => i.code === "AVAILABLE_NEXT_QUANTITY_UNKNOWN")).toBe(true);
   });
 
+  it("AvailableQuantity 1410065407 → null com warning (valor anómalo ALSO)", () => {
+    const txt = `${stockHeader(["ProductID", "AvailableQuantity"])}\nPID1\t1410065407`;
+    const parsed = parseAlsoStock(txt);
+    expect(parsed.rows[0].stock).toBeNull();
+    expect(parsed.rows[0].supplierStock).toBeNull();
+    expect(parsed.rows[0].issues.some((i) => i.code === "AVAILABLE_NEXT_QUANTITY_UNKNOWN")).toBe(true);
+  });
+
   it("AvailableNextQuantity -1 → null com warning", () => {
     const txt = `${stockHeader(baseHeader)}\nPID123\t10\t2026-10-01\t-1\t2026-09-07\t14:30`;
     const parsed = parseAlsoStock(txt);

@@ -1,4 +1,4 @@
-﻿import { createHash } from "node:crypto";
+import { createHash } from "node:crypto";
 import { Buffer } from "node:buffer";
 import { Client, type SFTPWrapper } from "ssh2";
 import { SftpError } from "./errors";
@@ -128,40 +128,120 @@ function readRemote(
   maxBytes: number
 ): Promise<Uint8Array> {
   return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    let total = 0;
     let settled = false;
 
-    const finishError = (err: unknown) => {
+    const finish = (err?: unknown, bytes?: Uint8Array) => {
       if (settled) return;
       settled = true;
-      reject(err);
+      if (err) reject(err);
+      else resolve(bytes ?? new Uint8Array());
     };
 
-    const stream = sftp.createReadStream(remotePath);
+    const closeHandle = (
+      handle: Buffer,
+      err?: unknown,
+      bytes?: Uint8Array
+    ) => {
+      // The operation result must not depend on the server
+      // acknowledging SSH_FXP_CLOSE.
+      finish(err, bytes);
 
-    stream.on("data", (chunk: Buffer | Uint8Array) => {
-      if (settled) return;
+      // Best-effort handle cleanup.
+      try {
+        sftp.close(handle, () => {
+          // Cleanup only; operation is already settled.
+        });
+      } catch {
+        // Ignore cleanup failures.
+      }
+    };
 
-      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-      total += buf.length;
-
-      if (total > maxBytes) {
-        settled = true;
-        stream.destroy();
-        reject(new SftpError("SFTP_TOO_LARGE"));
+    sftp.open(remotePath, "r", (openErr, handle) => {
+      if (openErr) {
+        finish(openErr);
         return;
       }
 
-      chunks.push(buf);
-    });
+      const chunks: Buffer[] = [];
+      let total = 0;
+      let position = 0;
 
-    stream.on("error", finishError);
+      const readNext = () => {
+        if (settled) return;
 
-    stream.on("end", () => {
-      if (settled) return;
-      settled = true;
-      resolve(new Uint8Array(Buffer.concat(chunks, total)));
+        // Never request more than the remaining allowed bytes.
+        // Requesting one extra byte lets us prove that the remote file
+        // exceeds maxBytes without trusting STAT/FSTAT.
+        // Keep each SFTP READ below ssh2's internal maxReadLen so
+        // ssh2 does not split a single read request into multiple
+        // internal READ requests.
+        const READ_CHUNK_SIZE = 30 * 1024;
+        const requestLength = Math.min(
+          READ_CHUNK_SIZE,
+          maxBytes - total + 1
+        );
+
+        if (requestLength <= 0) {
+          closeHandle(
+            handle,
+            new SftpError("SFTP_TOO_LARGE")
+          );
+          return;
+        }
+
+        const buffer = Buffer.allocUnsafe(requestLength);
+
+        sftp.read(
+          handle,
+          buffer,
+          0,
+          requestLength,
+          position,
+          (err, bytesRead) => {
+
+            if (settled) return;
+
+            if (err) {
+              const code = (err as { code?: unknown }).code;
+
+              if (code === "EOF" || code === 1) {
+                closeHandle(
+                  handle,
+                  undefined,
+                  new Uint8Array(Buffer.concat(chunks, total))
+                );
+                return;
+              }
+
+              closeHandle(handle, err);
+              return;
+            }
+
+            if (!bytesRead) {
+              closeHandle(
+                handle,
+                undefined,
+                new Uint8Array(Buffer.concat(chunks, total))
+              );
+              return;
+            }
+
+            total += bytesRead;
+            position += bytesRead;
+
+            if (total > maxBytes) {
+              closeHandle(handle, new SftpError("SFTP_TOO_LARGE"));
+              return;
+            }
+
+            chunks.push(buffer.subarray(0, bytesRead));
+
+            readNext();
+          }
+        );
+      };
+
+      readNext();
     });
   });
 }

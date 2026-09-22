@@ -31,10 +31,13 @@ export const WINTOUCH_PROVIDER_ID = "wintouch" as const;
 
 /** Literal resource paths in scope for the C.4 PROBE phase (read-only). */
 const WINTOUCH_PATHS = {
-  documentTypes: "/Document_Types",
-  paymentMethods: "/payment_methods",
-  entities: "/entities",
-  productDocuments: "/product_documents",
+  documentTypes: "/api/v1/document_types",
+  documentSeries: "/api/v1/document_series",
+  paymentMethods: "/api/v1/payment_methods",
+  sectors: "/api/v1/sectors",
+  workstations: "/api/v1/settings/commercial/workstations",
+  entities: "/api/v1/entities",
+  productDocuments: "/api/v1/product_documents",
 } as const;
 
 export type WintouchEndpoint = keyof typeof WINTOUCH_PATHS;
@@ -44,6 +47,176 @@ export interface WintouchConfig {
   readonly baseUrl: string;
   /** Raw API key. In-memory only — never log, persist or serialize. */
   readonly apiKey: string;
+}
+
+export interface WintouchFiscalDocumentProfile {
+  readonly documentTypeId: string;
+  readonly documentSerieId: string;
+}
+
+export interface WintouchFiscalConfig {
+  /** Optional: paid ecommerce uses FS/FATREC, never FT automatically. */
+  readonly invoice: WintouchFiscalDocumentProfile | null;
+  readonly simplifiedInvoice: WintouchFiscalDocumentProfile;
+  readonly invoiceReceipt: WintouchFiscalDocumentProfile;
+  readonly sectorId: string;
+  readonly workstationId: string;
+  /**
+   * WINTOUCH payment methods by checkout method.
+   *
+   * Optional by design: an unconfigured method must fail closed
+   * before fiscal creation instead of being silently substituted.
+   */
+  readonly paymentMethods: {
+    readonly bankTransfer: string | null;
+    readonly multibanco: string | null;
+    readonly mbway: string | null;
+    readonly card: string | null;
+  };
+  readonly enterpriseId: string;
+  readonly currencyId: string;
+  readonly countryId: string;
+  readonly saveMode: number;
+  vatId: string;
+  vatRate: number;
+  productId: string;
+  warehouseId: string;
+}
+
+function requiredUuid(env: WintouchEnv, name: string): string {
+  const value = requiredVar(env, name);
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)) throw configError("invalid", name);
+  return value;
+}
+
+function optionalUuid(
+  env: WintouchEnv,
+  name: string,
+): string | null {
+  const raw = env[name];
+  const value =
+    typeof raw === "string"
+      ? raw.trim()
+      : "";
+
+  if (!value) return null;
+
+  if (
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      value,
+    )
+  ) {
+    throw configError("invalid", name);
+  }
+
+  return value;
+}
+
+function optionalProfile(
+  env: WintouchEnv,
+  typeName: string,
+  seriesName: string,
+): WintouchFiscalDocumentProfile | null {
+  const documentTypeId = optionalUuid(env, typeName);
+  const documentSerieId = optionalUuid(env, seriesName);
+
+  if (!documentTypeId && !documentSerieId) return null;
+  if (!documentTypeId || !documentSerieId) {
+    throw configError("invalid", `${typeName}/${seriesName}`);
+  }
+  return { documentTypeId, documentSerieId };
+}
+
+export function resolveWintouchFiscalConfig(env: WintouchEnv = process.env): WintouchFiscalConfig {
+  const saveModeRaw = requiredVar(env, "WINTOUCH_SAVE_MODE");
+  if (!/^\d+$/.test(saveModeRaw)) throw configError("invalid", "WINTOUCH_SAVE_MODE");
+  const saveMode = Number(saveModeRaw);
+  if (!Number.isInteger(saveMode) || saveMode < 0 || saveMode > 14) {
+    throw configError("invalid", "WINTOUCH_SAVE_MODE");
+  }
+
+  const vatRateRaw = requiredVar(env, "WINTOUCH_VAT_RATE");
+  const productId = requiredVar(env, "WINTOUCH_PRODUCT_ID");
+  const warehouseId = requiredVar(env, "WINTOUCH_WAREHOUSE_ID");
+  const vatRate = Number(vatRateRaw);
+  if (!Number.isFinite(vatRate) || vatRate < 0 || vatRate > 100) {
+    throw configError("invalid", "WINTOUCH_VAT_RATE");
+  }
+  return {
+    invoice: optionalProfile(
+      env,
+      "WINTOUCH_FT_DOCUMENT_TYPE_ID",
+      "WINTOUCH_FT_DOCUMENT_SERIE_ID",
+    ),
+
+    simplifiedInvoice: {
+      documentTypeId: requiredUuid(
+        env,
+        "WINTOUCH_FS_DOCUMENT_TYPE_ID",
+      ),
+      documentSerieId: requiredUuid(
+        env,
+        "WINTOUCH_FS_DOCUMENT_SERIE_ID",
+      ),
+    },
+
+    invoiceReceipt: {
+      documentTypeId: requiredUuid(
+        env,
+        "WINTOUCH_FR_DOCUMENT_TYPE_ID",
+      ),
+      documentSerieId: requiredUuid(
+        env,
+        "WINTOUCH_FR_DOCUMENT_SERIE_ID",
+      ),
+    },
+
+    sectorId: requiredUuid(env, "WINTOUCH_SECTOR_ID"),
+    workstationId: requiredUuid(env, "WINTOUCH_WORKSTATION_ID"),
+    paymentMethods: {
+      /*
+       * Legacy WINTOUCH_PAYMENT_METHOD_ID remains a safe fallback
+       * ONLY for bank transfer while environments are migrated.
+       */
+      bankTransfer:
+        optionalUuid(
+          env,
+          "WINTOUCH_PAYMENT_METHOD_BANK_TRANSFER_ID",
+        ) ??
+        optionalUuid(
+          env,
+          "WINTOUCH_PAYMENT_METHOD_ID",
+        ),
+
+      multibanco:
+        optionalUuid(
+          env,
+          "WINTOUCH_PAYMENT_METHOD_MULTIBANCO_ID",
+        ),
+
+      mbway:
+        optionalUuid(
+          env,
+          "WINTOUCH_PAYMENT_METHOD_MBWAY_ID",
+        ),
+
+      card:
+        optionalUuid(
+          env,
+          "WINTOUCH_PAYMENT_METHOD_CARD_ID",
+        ),
+    },
+
+    enterpriseId: requiredUuid(env, "WINTOUCH_ENTERPRISE_ID"),
+    currencyId: requiredUuid(env, "WINTOUCH_CURRENCY_ID"),
+    countryId: requiredUuid(env, "WINTOUCH_COUNTRY_ID"),
+    vatId: requiredUuid(env, "WINTOUCH_VAT_ID"),
+    vatRate,
+    productId,
+    warehouseId,
+
+    saveMode,
+  };
 }
 
 /**

@@ -12,7 +12,7 @@ import { probeWintouch, redactSecrets } from "./probe";
 import type { WintouchConfig } from "./config";
 
 const FAKE_KEY = "test-fake-wintouch-key-1111-DO-NOT-USE";
-const BASE = "https://tenant.example.com/api";
+const BASE = "https://tenant.example.com";
 
 function testConfig(): WintouchConfig {
   return { baseUrl: BASE, apiKey: FAKE_KEY };
@@ -39,10 +39,10 @@ describe("C.4 — wintouch probe: happy path", () => {
   it("reports ok with counts and key-only shapes (values never included)", async () => {
     const secretValue = "super-secret-entity-value-999";
     const fetchImpl = router({
-      "/Document_Types": { status: 200, payload: [{ Code: "FT", Description: "Fatura" }] },
-      "/payment_methods": { status: 200, payload: [{ Code: "MB", Name: "Multibanco" }] },
+      "/api/v1/document_types": { status: 200, payload: [{ Code: "FT", Description: "Fatura" }] },
+      "/api/v1/payment_methods": { status: 200, payload: [{ Code: "MB", Name: "Multibanco" }] },
       "/entities": { status: 200, payload: [{ EntityID: 7, Name: secretValue }] },
-      "/product_documents": { status: 200, payload: [] },
+      "/api/v1/product_documents": { status: 200, payload: [] },
     });
     const result = await probeWintouch({ config: testConfig(), fetchImpl });
 
@@ -102,10 +102,10 @@ describe("C.4 — wintouch probe: auth and error mapping", () => {
 
   it("stays authenticated when the key is accepted anywhere (mixed 200 + 403)", async () => {
     const fetchImpl = router({
-      "/Document_Types": { status: 200, payload: [] },
-      "/payment_methods": { status: 403, payload: { error: "forbidden" } },
+      "/api/v1/document_types": { status: 200, payload: [] },
+      "/api/v1/payment_methods": { status: 403, payload: { error: "forbidden" } },
       "/entities": { status: 200, payload: [] },
-      "/product_documents": { status: 200, payload: [] },
+      "/api/v1/product_documents": { status: 200, payload: [] },
     });
     const result = await probeWintouch({ config: testConfig(), fetchImpl });
     expect(result.ok).toBe(false);
@@ -115,10 +115,10 @@ describe("C.4 — wintouch probe: auth and error mapping", () => {
 
   it("maps 404 to not_found and other 4xx to client_error with sanitized excerpts", async () => {
     const fetchImpl = router({
-      "/Document_Types": { status: 404, payload: { error: "no such resource" } },
-      "/payment_methods": { status: 400, payload: { error: "bad filter syntax" } },
+      "/api/v1/document_types": { status: 404, payload: { error: "no such resource" } },
+      "/api/v1/payment_methods": { status: 400, payload: { error: "bad filter syntax" } },
       "/entities": { status: 200, payload: [] },
-      "/product_documents": { status: 200, payload: [] },
+      "/api/v1/product_documents": { status: 200, payload: [] },
     });
     const result = await probeWintouch({ config: testConfig(), fetchImpl });
     expect(result.checks.find((c) => c.name === "document_types")?.outcome).toBe("not_found");
@@ -170,13 +170,13 @@ describe("C.4 — wintouch probe: secrets never appear in output", () => {
 
   it("survives an API that echoes the key in values, keys and error bodies", async () => {
     const fetchImpl = router({
-      "/Document_Types": {
+      "/api/v1/document_types": {
         status: 200,
         payload: [{ Code: "FT", DebugEcho: FAKE_KEY, [FAKE_KEY]: "key-as-field-name" }],
       },
-      "/payment_methods": { status: 400, payload: { error: `rejected: ApiKey ${FAKE_KEY}` } },
+      "/api/v1/payment_methods": { status: 400, payload: { error: `rejected: ApiKey ${FAKE_KEY}` } },
       "/entities": { status: 200, payload: [] },
-      "/product_documents": { status: 200, payload: [] },
+      "/api/v1/product_documents": { status: 200, payload: [] },
     });
     const result = await probeWintouch({ config: testConfig(), fetchImpl });
     const serialized = JSON.stringify(result);

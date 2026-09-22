@@ -31,6 +31,8 @@ import { toEuros, decimalToCents } from "@/lib/money";
 import {
   orders,
   products,
+  productSuppliers,
+  suppliers,
   users,
   rmaRequests,
   paymentAttempts,
@@ -196,6 +198,7 @@ export interface DashboardData {
     stock: number;
     minStock: number;
     reservedStock: number;
+    availableStock: number;
   }>;
   recentOrders: RecentOrder[];
 }
@@ -285,6 +288,19 @@ export async function getDashboardData(): Promise<DashboardData> {
       .select({ c: sql<number>`count(*)::int` })
       .from(products)
       .where(eq(products.isActive, true));
+    // Sellable availability = local available stock + availability from ACTIVE suppliers.
+    // Keep this aligned with the storefront/admin availability semantics.
+    const stockAvailability = sql<number>`
+      GREATEST(products.stock - products.reserved_stock, 0)
+      + COALESCE((
+          SELECT SUM(GREATEST(COALESCE(ps.supplier_stock, 0) - ps.supplier_reserved_stock, 0))
+          FROM product_suppliers ps
+          INNER JOIN suppliers s ON s.id = ps.supplier_id
+          WHERE ps.product_id = products.id
+            AND s.is_active = true
+        ), 0)
+    `;
+
     const [lowStock] = await tx
       .select({ c: sql<number>`count(*)::int` })
       .from(products)
@@ -292,14 +308,21 @@ export async function getDashboardData(): Promise<DashboardData> {
         and(
           eq(products.isActive, true),
           eq(products.isService, false),
-          sql`${products.stock} <= ${products.minStock}`,
-          sql`${products.stock} > 0`
+          sql`${stockAvailability} > 0`,
+          sql`${stockAvailability} <= ${products.minStock}`
         )
       );
+
     const [outOfStock] = await tx
       .select({ c: sql<number>`count(*)::int` })
       .from(products)
-      .where(and(eq(products.isActive, true), eq(products.isService, false), sql`${products.stock} <= 0`));
+      .where(
+        and(
+          eq(products.isActive, true),
+          eq(products.isService, false),
+          sql`${stockAvailability} <= 0`
+        )
+      );
 
     // ── Customers ──
     const [customers] = await tx
@@ -552,16 +575,17 @@ export async function getDashboardData(): Promise<DashboardData> {
         stock: products.stock,
         minStock: products.minStock,
         reservedStock: products.reservedStock,
+        availableStock: stockAvailability,
       })
       .from(products)
       .where(
         and(
           eq(products.isActive, true),
           eq(products.isService, false),
-          sql`${products.stock} <= ${products.minStock}`
+          sql`${stockAvailability} <= ${products.minStock}`
         )
       )
-      .orderBy(products.stock)
+      .orderBy(stockAvailability, desc(products.id))
       .limit(10);
 
     // ── Recent orders (latest 10) ──
@@ -672,6 +696,7 @@ export async function getDashboardData(): Promise<DashboardData> {
         stock: p.stock,
         minStock: p.minStock,
         reservedStock: p.reservedStock,
+        availableStock: Number(p.availableStock),
       })),
       recentOrders,
     };

@@ -45,9 +45,25 @@ export interface WintouchRequestOptions {
   /** Optional query string (string values only). Unused by the C.4 probe. */
   readonly query?: Record<string, string>;
   readonly body?: unknown;
+  /** Optional UUID resource id appended to the allowlisted endpoint. */
+  readonly resourceId?: string;
+  /**
+   * Explicitly allowlisted entity lookup.
+   *
+   * Produces:
+   *   /entities/by_vat/<9-digit Portuguese NIF>
+   *
+   * Kept separate from resourceId so resourceId remains UUID-only.
+   */
+  readonly entityVatNumber?: string;
   readonly timeoutMs?: number;
   /** Injected transport for tests — defaults to global fetch. */
   readonly fetchImpl?: typeof fetch;
+  /**
+   * WINTOUCH enterprise context.
+   * Required for fiscal/company-scoped operations.
+   */
+  readonly enterpriseId?: string;
 }
 
 /** 401/403 are definitive auth rejections — never ambiguous, never retried. */
@@ -58,6 +74,38 @@ export function isAuthFailure(status: number): boolean {
 export async function wintouchRequest(options: WintouchRequestOptions): Promise<WintouchResponse> {
   const doFetch = options.fetchImpl ?? fetch;
   let url = wintouchUrl(options.config, options.endpoint);
+  if (
+    options.resourceId !== undefined &&
+    options.entityVatNumber !== undefined
+  ) {
+    throw new ProviderError("OPERATION_NOT_SUPPORTED", {
+      provider: WINTOUCH_PROVIDER_ID,
+      internalDetail: "resource id and entity VAT lookup are mutually exclusive",
+    });
+  }
+
+  if (options.resourceId !== undefined) {
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(options.resourceId)) {
+      throw new ProviderError("OPERATION_NOT_SUPPORTED", { provider: WINTOUCH_PROVIDER_ID, internalDetail: "invalid resource id" });
+    }
+    url += `/${options.resourceId}`;
+  }
+
+  if (options.entityVatNumber !== undefined) {
+    if (
+      options.endpoint !== "entities" ||
+      options.method !== "GET" ||
+      !/^\d{9}$/.test(options.entityVatNumber)
+    ) {
+      throw new ProviderError("OPERATION_NOT_SUPPORTED", {
+        provider: WINTOUCH_PROVIDER_ID,
+        internalDetail: "invalid entity VAT lookup",
+      });
+    }
+
+    url += `/by_vat/${options.entityVatNumber}`;
+  }
+
   if (options.query && Object.keys(options.query).length > 0) {
     url += `?${new URLSearchParams(options.query).toString()}`;
   }
@@ -71,8 +119,16 @@ export async function wintouchRequest(options: WintouchRequestOptions): Promise<
       method: options.method,
       headers: {
         Accept: "application/json",
+        // Wintouch API currently fails with HTTP 500 when runtimes such as
+        // Node/Undici send their default `Accept-Language: *`.
+        // Send an explicit valid language value. This also keeps the request
+        // deterministic across Node and Cloudflare Workers.
+        "Accept-Language": "pt-PT",
         ...(options.body !== undefined ? { "Content-Type": "application/json" } : {}),
         Authorization: `ApiKey ${options.config.apiKey}`,
+        ...(options.enterpriseId !== undefined
+          ? { "x-current-enterprise": options.enterpriseId }
+          : {}),
       },
       ...(options.body !== undefined ? { body: JSON.stringify(options.body) } : {}),
       signal: controller.signal,

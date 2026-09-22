@@ -872,9 +872,19 @@ export function parseAlsoStock(
     let supplierStock: number | null = null;
     if (rawQty === "") {
       error("supplierStock", rawQty, "INVALID_STOCK", "Stock inválido (inteiro >= 0 esperado)");
-    } else if (rawQty.trim() === "-1" || rawQty.trim() === "-1.0" || rawQty.trim() === "-1,0") {
+    } else if (
+      rawQty.trim() === "-1" ||
+      rawQty.trim() === "-1.0" ||
+      rawQty.trim() === "-1,0" ||
+      rawQty.trim() === "1410065407"
+    ) {
       supplierStock = null;
-      warning("supplierStock", rawQty, "AVAILABLE_NEXT_QUANTITY_UNKNOWN", "Quantidade desconhecida (-1) — stock de fornecedor não atualizado");
+      warning(
+        "supplierStock",
+        rawQty,
+        "AVAILABLE_NEXT_QUANTITY_UNKNOWN",
+        `Quantidade de stock desconhecida (${rawQty.trim()}) — stock de fornecedor não atualizado`
+      );
     } else {
       const parsed = parseInteger(rawQty);
       if (parsed.value === null) {

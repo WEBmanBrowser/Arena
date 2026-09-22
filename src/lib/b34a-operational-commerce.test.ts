@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { NextRequest } from "next/server";
 import { db } from "@/db";
-import { auditLogs, coupons, invoiceDocuments, orderItems, orderStatusHistory, orders, payments, products, settings, shippingClasses, stockMovements, users } from "@/db/schema";
+import { auditLogs, coupons, invoiceDocuments, orderItems, orderItemStockAllocations, orderStatusHistory, orders, payments, products, productSuppliers, settings, shippingClasses, stockMovements, suppliers, users } from "@/db/schema";
 import { and, eq, inArray, like, sql } from "drizzle-orm";
 import { calculateShippingForCart, ensureDefaultShippingConfiguration, updateFreeShippingSettings, ShippingRateError } from "@/lib/shipping-rates";
 import { ManualInvoicingError, recordManualInvoice } from "@/lib/manual-invoicing";
@@ -28,7 +28,11 @@ async function cleanupB34A() {
   }
   await db.delete(invoiceDocuments).where(eq(invoiceDocuments.provider, "manual"));
   await db.delete(auditLogs).where(like(auditLogs.action, "%invoice%"));
+  if (productIds.length) {
+    await db.delete(productSuppliers).where(inArray(productSuppliers.productId, productIds));
+  }
   await db.delete(products).where(like(products.sku, "B34A-%"));
+  await db.delete(suppliers).where(like(suppliers.name, "B34A Supplier%"));
   await db.delete(coupons).where(like(coupons.code, "B34A_%"));
   await db.delete(users).where(like(users.email, "b34a-%@test.local"));
   // Manual invoicing tests use `actorUserId: 1` — ensure a user with that
@@ -67,6 +71,30 @@ async function createProduct(suffix: string, shippingClassKey = "small", price =
   return p;
 }
 
+async function createSupplierStock(
+  productId: number,
+  suffix: string,
+  supplierStock: number,
+  options: { isActive?: boolean; reserved?: number; leadTimeDays?: number } = {},
+) {
+  const [supplier] = await db.insert(suppliers).values({
+    name: `B34A Supplier ${suffix}-${Date.now()}-${Math.floor(Math.random() * 10000)}`,
+    isActive: options.isActive ?? true,
+  }).returning();
+
+  const [link] = await db.insert(productSuppliers).values({
+    productId,
+    supplierId: supplier.id,
+    supplierSku: `B34A-SUP-${suffix}`,
+    supplierStock,
+    supplierReservedStock: options.reserved ?? 0,
+    leadTimeDays: options.leadTimeDays ?? 2,
+    isPreferred: false,
+  }).returning();
+
+  return { supplier, link };
+}
+
 async function createOrder(total = "127.90", status = "pending_payment", paymentStatus = "pending") {
   const [order] = await db.insert(orders).values({
     orderNumber: `B34A-ORD-${Date.now()}-${Math.floor(Math.random() * 10000)}`,
@@ -82,13 +110,24 @@ async function createOrder(total = "127.90", status = "pending_payment", payment
   return order;
 }
 
+let testRequestIpCounter = 1;
+
 function req(url: string, body: unknown) {
-  return new NextRequest(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  const octet3 = Math.floor(testRequestIpCounter / 250) % 250;
+  const octet4 = (testRequestIpCounter++ % 250) + 1;
+  return new NextRequest(url, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "cf-connecting-ip": `198.51.${octet3}.${octet4}`,
+    },
+    body: JSON.stringify(body),
+  });
 }
 
-async function createOrderViaRoute(productId: number, body: Record<string, unknown> = {}) {
+async function createOrderViaRoute(productId: number, body: Record<string, unknown> = {}, quantity = 1) {
   const res = await orderPOST(req("http://localhost/api/orders", {
-    items: [{ productId, quantity: 1, price: "0.01", shippingClass: "client-fake" }],
+    items: [{ productId, quantity, price: "0.01", shippingClass: "client-fake" }],
     deliveryType: "shipping",
     paymentMethod: "bank_transfer",
     billingAddress: {
@@ -229,6 +268,148 @@ describe("B.3.4A quote/order authority and snapshots", () => {
     expect(order.shipping).toBe("4.90");
     expect(order.shippingMethod).toBe("small");
     expect(order.vat).toBe("4.66");
+  });
+
+  it("creates a supplier-only stock allocation without reserving local physical stock", async () => {
+    const product = await createProduct("SUPPLIERONLY", "small", "20.00");
+    await db.update(products).set({ stock: 0, reservedStock: 0 }).where(eq(products.id, product.id));
+    const { link } = await createSupplierStock(product.id, "ONLY", 5);
+
+    const order = await createOrderViaRoute(product.id, {}, 2);
+
+    const [productAfter] = await db.select().from(products).where(eq(products.id, product.id));
+    expect(productAfter.stock).toBe(0);
+    expect(productAfter.reservedStock).toBe(0);
+
+    const [supplierAfter] = await db.select().from(productSuppliers).where(eq(productSuppliers.id, link.id));
+    expect(supplierAfter.supplierStock).toBe(5);
+    expect(supplierAfter.supplierReservedStock).toBe(2);
+
+    const [item] = await db.select().from(orderItems).where(eq(orderItems.orderId, order.id));
+    const allocations = await db.select().from(orderItemStockAllocations)
+      .where(eq(orderItemStockAllocations.orderItemId, item.id));
+
+    expect(allocations).toHaveLength(1);
+    expect(allocations[0].allocationType).toBe("supplier");
+    expect(allocations[0].productSupplierId).toBe(link.id);
+    expect(allocations[0].quantity).toBe(2);
+    expect(allocations[0].status).toBe("reserved");
+  });
+
+  it("allocates local stock first and supplier stock only for the remainder", async () => {
+    const product = await createProduct("LOCALTHENSUPPLIER", "small", "20.00");
+    await db.update(products).set({ stock: 2, reservedStock: 0 }).where(eq(products.id, product.id));
+    const { link } = await createSupplierStock(product.id, "REMAINDER", 10);
+
+    const order = await createOrderViaRoute(product.id, {}, 5);
+
+    const [productAfter] = await db.select().from(products).where(eq(products.id, product.id));
+    expect(productAfter.stock).toBe(2);
+    expect(productAfter.reservedStock).toBe(2);
+
+    const [supplierAfter] = await db.select().from(productSuppliers).where(eq(productSuppliers.id, link.id));
+    expect(supplierAfter.supplierStock).toBe(10);
+    expect(supplierAfter.supplierReservedStock).toBe(3);
+
+    const [item] = await db.select().from(orderItems).where(eq(orderItems.orderId, order.id));
+    const allocations = await db.select().from(orderItemStockAllocations)
+      .where(eq(orderItemStockAllocations.orderItemId, item.id));
+
+    expect(allocations).toHaveLength(2);
+
+    const local = allocations.find((row) => row.allocationType === "local");
+    const supplier = allocations.find((row) => row.allocationType === "supplier");
+
+    expect(local?.quantity).toBe(2);
+    expect(local?.productSupplierId).toBeNull();
+    expect(local?.status).toBe("reserved");
+
+    expect(supplier?.quantity).toBe(3);
+    expect(supplier?.productSupplierId).toBe(link.id);
+    expect(supplier?.status).toBe("reserved");
+  });
+
+  it("excludes inactive supplier stock from order availability", async () => {
+    const product = await createProduct("INACTIVESUPPLIER", "small", "20.00");
+    await db.update(products).set({ stock: 0, reservedStock: 0 }).where(eq(products.id, product.id));
+    const { link } = await createSupplierStock(product.id, "INACTIVE", 10, { isActive: false });
+
+    const res = await orderPOST(req("http://localhost/api/orders", {
+      items: [{ productId: product.id, quantity: 1, price: "0.01", shippingClass: "client-fake" }],
+      deliveryType: "shipping",
+      paymentMethod: "bank_transfer",
+      billingAddress: {
+        name: "B34A Guest",
+        address1: "Rua Teste 1",
+        city: "Esposende",
+        postalCode: "4740-000",
+        country: "Portugal",
+        phone: "912345678",
+      },
+      shippingAddress: {
+        name: "B34A Guest",
+        address1: "Rua Teste 1",
+        city: "Esposende",
+        postalCode: "4740-000",
+        country: "Portugal",
+        phone: "912345678",
+      },
+      guestEmail: `b34a-inactive-${Date.now()}@test.local`,
+      guestName: "B34A Guest",
+    }));
+
+    expect(res.status).toBe(400);
+    const data = await res.json();
+    expect(data.error).toContain("Stock insuficiente");
+
+    const [productAfter] = await db.select().from(products).where(eq(products.id, product.id));
+    const [supplierAfter] = await db.select().from(productSuppliers).where(eq(productSuppliers.id, link.id));
+
+    expect(productAfter.reservedStock).toBe(0);
+    expect(supplierAfter.supplierReservedStock).toBe(0);
+  });
+
+  it("rejects quantities above combined local and active supplier availability without partial reservations", async () => {
+    const product = await createProduct("COMBINEDLIMIT", "small", "20.00");
+    await db.update(products).set({ stock: 2, reservedStock: 0 }).where(eq(products.id, product.id));
+    const { link } = await createSupplierStock(product.id, "LIMIT", 3);
+
+    const res = await orderPOST(req("http://localhost/api/orders", {
+      items: [{ productId: product.id, quantity: 6, price: "0.01", shippingClass: "client-fake" }],
+      deliveryType: "shipping",
+      paymentMethod: "bank_transfer",
+      billingAddress: {
+        name: "B34A Guest",
+        address1: "Rua Teste 1",
+        city: "Esposende",
+        postalCode: "4740-000",
+        country: "Portugal",
+        phone: "912345678",
+      },
+      shippingAddress: {
+        name: "B34A Guest",
+        address1: "Rua Teste 1",
+        city: "Esposende",
+        postalCode: "4740-000",
+        country: "Portugal",
+        phone: "912345678",
+      },
+      guestEmail: `b34a-limit-${Date.now()}@test.local`,
+      guestName: "B34A Guest",
+    }));
+
+    expect(res.status).toBe(400);
+    const data = await res.json();
+    expect(data.error).toContain("Stock insuficiente");
+    expect(data.error).toContain("Disponível: 5");
+
+    const [productAfter] = await db.select().from(products).where(eq(products.id, product.id));
+    const [supplierAfter] = await db.select().from(productSuppliers).where(eq(productSuppliers.id, link.id));
+
+    expect(productAfter.stock).toBe(2);
+    expect(productAfter.reservedStock).toBe(0);
+    expect(supplierAfter.supplierStock).toBe(3);
+    expect(supplierAfter.supplierReservedStock).toBe(0);
   });
 
   it("recalculates order shipping after a stale quote and preserves historical snapshots", async () => {

@@ -362,9 +362,9 @@ describe("migration 0017 — snapshot parity (MEDIUM-1)", () => {
     const journal = JSON.parse(fs.readFileSync(path.join(DRIZZLE_DIR, "meta", "_journal.json"), "utf8")) as {
       entries: Array<{ idx: number; tag: string }>;
     };
-    const last = [...journal.entries].sort((a, b) => a.idx - b.idx).at(-1)!;
-    expect(last.idx).toBe(17);
-    expect(last.tag).toBe("0017_eupago_p0_ledger_integrity");
+    const migration0017 = journal.entries.find((entry) => entry.idx === 17);
+    expect(migration0017).toBeDefined();
+    expect(migration0017!.tag).toBe("0017_eupago_p0_ledger_integrity");
 
     const previous = JSON.parse(fs.readFileSync(path.join(DRIZZLE_DIR, "meta", "0016_snapshot.json"), "utf8")) as { id: string };
     expect(readSnapshot().prevId).toBe(previous.id);

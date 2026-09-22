@@ -31,7 +31,7 @@ describe("B.3.1 — provider registry: allowlists", () => {
   it("allowlists exactly the selected future providers", () => {
     expect([...PAYMENT_PROVIDERS]).toEqual(["eupago"]);
     expect([...SHIPPING_PROVIDERS]).toEqual(["mrw", "ctt"]);
-    expect([...INVOICE_PROVIDERS]).toEqual(["xd"]);
+    expect([...INVOICE_PROVIDERS]).toEqual(["wintouch"]);
   });
 
   it("resolves eupago as an external payment provider", () => {
@@ -54,19 +54,20 @@ describe("B.3.1 — provider registry: allowlists", () => {
     expect(ctt.supports("getTracking")).toBe(true);
   });
 
-  it("resolves xd as the invoice provider", () => {
-    const xd = getInvoiceProvider("xd");
-    expect(xd.id).toBe("xd");
-    expect(xd.kind).toBe("invoice");
-    expect(xd.supports("createInvoice")).toBe(true);
-    expect(xd.supports("createCreditNote")).toBe(true);
+  it("resolves wintouch as the invoice provider", () => {
+    const wintouch = getInvoiceProvider("wintouch");
+    expect(wintouch.id).toBe("wintouch");
+    expect(wintouch.kind).toBe("invoice");
+    expect(wintouch.supports("createInvoice")).toBe(true);
+    expect(wintouch.supports("getDocument")).toBe(true);
+    expect(wintouch.supports("createCreditNote")).toBe(false);
   });
 
   it("resolves any allowlisted provider through getProvider", () => {
     expect(getProvider("eupago").kind).toBe("payment");
     expect(getProvider("ctt").kind).toBe("shipping");
-    expect(getProvider("xd").kind).toBe("invoice");
-    expect(listProviders().map((p) => p.id).sort()).toEqual(["ctt", "eupago", "mrw", "xd"]);
+    expect(getProvider("wintouch").kind).toBe("invoice");
+    expect(listProviders().map((p) => p.id).sort()).toEqual(["ctt", "eupago", "mrw", "wintouch"]);
     expect(listProviders("shipping").map((p) => p.id)).toEqual(["mrw", "ctt"]);
   });
 });
@@ -97,7 +98,7 @@ describe("B.3.1 — provider registry: unsupported providers", () => {
     expect(isPaymentProviderId("bank_transfer")).toBe(false);
     expect(isShippingProviderId("ctt")).toBe(true);
     expect(isShippingProviderId("pickup")).toBe(false);
-    expect(isInvoiceProviderId("xd")).toBe(true);
+    expect(isInvoiceProviderId("wintouch")).toBe(true);
     expect(isInvoiceProviderId("xdsoftware")).toBe(false);
   });
 });
@@ -105,7 +106,8 @@ describe("B.3.1 — provider registry: unsupported providers", () => {
 describe("B.3.1 — provider registry: capabilities", () => {
   it("passes assertCapability for supported operations", () => {
     expect(() => assertCapability(getShippingProvider("mrw"), "createShipment")).not.toThrow();
-    expect(() => assertCapability(getInvoiceProvider("xd"), "createCreditNote")).not.toThrow();
+    expect(() => assertCapability(getInvoiceProvider("wintouch"), "createInvoice")).not.toThrow();
+    expect(() => assertCapability(getInvoiceProvider("wintouch"), "getDocument")).not.toThrow();
     expect(() => assertCapability(getPaymentProvider("eupago"), "refundPayment")).not.toThrow();
   });
 
@@ -113,7 +115,7 @@ describe("B.3.1 — provider registry: capabilities", () => {
     // CTT has no cancelShipment adapter capability in this foundation
     expectCode(() => assertCapability(getShippingProvider("ctt"), "cancelShipment"), "OPERATION_NOT_SUPPORTED");
     expectCode(() => assertCapability(getPaymentProvider("eupago"), "createShipment"), "OPERATION_NOT_SUPPORTED");
-    expectCode(() => assertCapability(getInvoiceProvider("xd"), "quote"), "OPERATION_NOT_SUPPORTED");
+    expectCode(() => assertCapability(getInvoiceProvider("wintouch"), "quote"), "OPERATION_NOT_SUPPORTED");
   });
 });
 
@@ -125,7 +127,7 @@ describe("B.3.1 — provider registry: no network", () => {
     getPaymentProvider("eupago");
     getShippingProvider("mrw");
     getShippingProvider("ctt");
-    getInvoiceProvider("xd");
+    getInvoiceProvider("wintouch");
     listProviders();
     expect(fetchSpy).not.toHaveBeenCalled();
   });

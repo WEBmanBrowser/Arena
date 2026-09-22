@@ -39,10 +39,10 @@ beforeEach(async () => {
 });
 
 describe("B.3.1 — invoicing: registry and adapters", () => {
-  it("accepts xd as the allowlisted invoice provider", async () => {
+  it("accepts wintouch as the allowlisted invoice provider", async () => {
     const order = await createTestOrder();
-    const doc = await createInvoiceDocument({ orderId: order.id, provider: "xd", documentType: "invoice" });
-    expect(doc.provider).toBe("xd");
+    const doc = await createInvoiceDocument({ orderId: order.id, provider: "wintouch", documentType: "invoice" });
+    expect(doc.provider).toBe("wintouch");
     expect(doc.status).toBe("pending");
   });
 
@@ -54,15 +54,15 @@ describe("B.3.1 — invoicing: registry and adapters", () => {
     expect(() => getInvoiceAdapter("moloni")).toThrow(ProviderError);
   });
 
-  it("makes no live XD calls in this phase", () => {
+  it("makes no live WINTOUCH calls in this phase", () => {
     try {
-      getInvoiceAdapter("xd", "createInvoice");
+      getInvoiceAdapter("wintouch", "createInvoice");
       throw new Error("should have thrown");
     } catch (e) {
       expect((e as ProviderError).code).toBe("PROVIDER_UNAVAILABLE");
     }
     try {
-      getInvoiceAdapter("xd", "quote");
+      getInvoiceAdapter("wintouch", "quote");
       throw new Error("should have thrown");
     } catch (e) {
       expect((e as ProviderError).code).toBe("OPERATION_NOT_SUPPORTED");
@@ -80,7 +80,7 @@ describe("B.3.1 — invoicing: registry and adapters", () => {
     expect(isInvoiceDocumentStatus("paid")).toBe(false);
 
     await expect(
-      createInvoiceDocument({ orderId: order.id, provider: "xd", documentType: "receipt" })
+      createInvoiceDocument({ orderId: order.id, provider: "wintouch", documentType: "receipt" })
     ).rejects.toMatchObject({ code: "OPERATION_NOT_SUPPORTED" });
   });
 });
@@ -88,37 +88,37 @@ describe("B.3.1 — invoicing: registry and adapters", () => {
 describe("B.3.1 — invoicing: document persistence", () => {
   it("stores an issued invoice with provider reference, number, series and issuedAt", async () => {
     const order = await createTestOrder();
-    const pending = await createInvoiceDocument({ orderId: order.id, provider: "xd", documentType: "invoice" });
+    const pending = await createInvoiceDocument({ orderId: order.id, provider: "wintouch", documentType: "invoice" });
     const issuedAt = new Date("2026-08-31T10:00:00.000Z");
 
     const issued = await markInvoiceDocumentIssued(pending.id, {
-      providerDocumentId: "XD-DOC-1",
+      providerDocumentId: "WT-DOC-1",
       documentNumber: "FT 2026/125",
       series: "2026",
       issuedAt,
-      documentReference: "xd/documents/XD-DOC-1",
+      documentReference: "wintouch/documents/WT-DOC-1",
     });
 
     expect(issued.status).toBe("issued");
-    expect(issued.providerDocumentId).toBe("XD-DOC-1");
+    expect(issued.providerDocumentId).toBe("WT-DOC-1");
     expect(issued.documentNumber).toBe("FT 2026/125");
     expect(issued.series).toBe("2026");
     expect(issued.issuedAt?.toISOString()).toBe(issuedAt.toISOString());
-    expect(issued.documentReference).toBe("xd/documents/XD-DOC-1");
+    expect(issued.documentReference).toBe("wintouch/documents/WT-DOC-1");
     expect(issued.orderId).toBe(order.id);
 
-    const found = await findInvoiceDocumentByProviderId("xd", "XD-DOC-1");
+    const found = await findInvoiceDocumentByProviderId("wintouch", "WT-DOC-1");
     expect(found!.id).toBe(issued.id);
   });
 
   it("stores credit notes alongside invoices for the same order", async () => {
     const order = await createTestOrder();
-    const invoice = await createInvoiceDocument({ orderId: order.id, provider: "xd", documentType: "invoice" });
-    await markInvoiceDocumentIssued(invoice.id, { providerDocumentId: "XD-FT-2", documentNumber: "FT 2026/126", series: "2026" });
+    const invoice = await createInvoiceDocument({ orderId: order.id, provider: "wintouch", documentType: "invoice" });
+    await markInvoiceDocumentIssued(invoice.id, { providerDocumentId: "WT-FT-2", documentNumber: "FT 2026/126", series: "2026" });
 
-    const creditNote = await createInvoiceDocument({ orderId: order.id, provider: "xd", documentType: "credit_note" });
+    const creditNote = await createInvoiceDocument({ orderId: order.id, provider: "wintouch", documentType: "credit_note" });
     const issuedCredit = await markInvoiceDocumentIssued(creditNote.id, {
-      providerDocumentId: "XD-NC-1",
+      providerDocumentId: "WT-NC-1",
       documentNumber: "NC 2026/7",
       series: "2026",
     });
@@ -133,16 +133,16 @@ describe("B.3.1 — invoicing: document persistence", () => {
   it("enforces database constraints", async () => {
     const order = await createTestOrder();
     await createInvoiceDocument({
-      orderId: order.id, provider: "xd", documentType: "invoice", providerDocumentId: "XD-UNIQUE",
+      orderId: order.id, provider: "wintouch", documentType: "invoice", providerDocumentId: "WT-UNIQUE",
     });
     await expect(
       createInvoiceDocument({
-        orderId: order.id, provider: "xd", documentType: "credit_note", providerDocumentId: "XD-UNIQUE",
+        orderId: order.id, provider: "wintouch", documentType: "credit_note", providerDocumentId: "WT-UNIQUE",
       })
     ).rejects.toThrow();
 
     await expect(
-      createInvoiceDocument({ orderId: 999_999_999, provider: "xd", documentType: "invoice" })
+      createInvoiceDocument({ orderId: 999_999_999, provider: "wintouch", documentType: "invoice" })
     ).rejects.toThrow();
   });
 
@@ -157,11 +157,11 @@ describe("B.3.1 — invoicing: document persistence", () => {
 describe("B.3.1 — invoicing: issued-document safety", () => {
   it("never rewrites an issued fiscal document", async () => {
     const order = await createTestOrder();
-    const doc = await createInvoiceDocument({ orderId: order.id, provider: "xd", documentType: "invoice" });
-    await markInvoiceDocumentIssued(doc.id, { providerDocumentId: "XD-FIX-1", documentNumber: "FT 2026/200", series: "2026" });
+    const doc = await createInvoiceDocument({ orderId: order.id, provider: "wintouch", documentType: "invoice" });
+    await markInvoiceDocumentIssued(doc.id, { providerDocumentId: "WT-FIX-1", documentNumber: "FT 2026/200", series: "2026" });
 
     await expect(
-      markInvoiceDocumentIssued(doc.id, { providerDocumentId: "XD-FIX-2", documentNumber: "FT 2026/999" })
+      markInvoiceDocumentIssued(doc.id, { providerDocumentId: "WT-FIX-2", documentNumber: "FT 2026/999" })
     ).rejects.toMatchObject({ code: "OPERATION_NOT_SUPPORTED" });
     await expect(markInvoiceDocumentFailed(doc.id)).rejects.toMatchObject({ code: "OPERATION_NOT_SUPPORTED" });
     await expect(cancelInvoiceDocument(doc.id)).rejects.toMatchObject({ code: "OPERATION_NOT_SUPPORTED" });
@@ -178,13 +178,13 @@ describe("B.3.1 — invoicing: issued-document safety", () => {
 
   it("allows failure and cancellation only while still pending", async () => {
     const order = await createTestOrder();
-    const failing = await createInvoiceDocument({ orderId: order.id, provider: "xd", documentType: "invoice" });
+    const failing = await createInvoiceDocument({ orderId: order.id, provider: "wintouch", documentType: "invoice" });
     expect((await markInvoiceDocumentFailed(failing.id)).status).toBe("failed");
 
-    const cancelling = await createInvoiceDocument({ orderId: order.id, provider: "xd", documentType: "invoice" });
+    const cancelling = await createInvoiceDocument({ orderId: order.id, provider: "wintouch", documentType: "invoice" });
     expect((await cancelInvoiceDocument(cancelling.id)).status).toBe("cancelled");
     await expect(
-      markInvoiceDocumentIssued(cancelling.id, { providerDocumentId: "XD-C", documentNumber: "FT 1" })
+      markInvoiceDocumentIssued(cancelling.id, { providerDocumentId: "WT-C", documentNumber: "FT 1" })
     ).rejects.toMatchObject({ code: "OPERATION_NOT_SUPPORTED" });
 
     // The rows still exist — cancellation is a state change, not a delete
@@ -193,8 +193,8 @@ describe("B.3.1 — invoicing: issued-document safety", () => {
 
   it("does not mutate the order when documents are issued", async () => {
     const order = await createTestOrder();
-    const doc = await createInvoiceDocument({ orderId: order.id, provider: "xd", documentType: "invoice" });
-    await markInvoiceDocumentIssued(doc.id, { providerDocumentId: "XD-NOORD", documentNumber: "FT 2026/300" });
+    const doc = await createInvoiceDocument({ orderId: order.id, provider: "wintouch", documentType: "invoice" });
+    await markInvoiceDocumentIssued(doc.id, { providerDocumentId: "WT-NOORD", documentNumber: "FT 2026/300" });
     const [reloaded] = await db.select().from(orders).where(eq(orders.id, order.id));
     expect(reloaded.status).toBe("paid");
   });
