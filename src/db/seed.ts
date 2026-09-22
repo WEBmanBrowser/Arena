@@ -470,11 +470,13 @@ async function seed() {
   const settingsData = [
     { key: "site_name", value: "MDTech Solutions", group: "general" },
     { key: "site_tagline", value: "Reparação Rápida. Soluções Completas.", group: "general" },
-    { key: "company_name", value: "Marco Duarte Tech Solutions, Unipessoal Lda.", group: "general" },
-    { key: "company_address", value: "Esposende, Portugal", group: "general" },
+    { key: "company_name", value: "Marco Duarte Tech Solutions Unipessoal Lda", group: "general" },
+    { key: "company_address", value: "Rua Sargento Álvaro Fernandes, n.º 7, 2.º B, 4740-567 Esposende", group: "general" },
     { key: "company_phone", value: "+351 917 801 898", group: "general" },
     { key: "company_email", value: "geral@mdtech.pt", group: "general" },
-    { key: "company_nif", value: "", group: "general" },
+    { key: "company_nif", value: "519445902", group: "general" },
+    { key: "instagram_url", value: "", group: "general" },
+    { key: "facebook_url", value: "", group: "general" },
     { key: "store_address", value: "Esposende, Braga, Portugal", group: "store" },
     { key: "store_hours", value: "Seg-Sex: 9:00-18:30 | Sáb: 9:00-13:00", group: "store" },
     { key: "store_pickup", value: "true", group: "store" },
@@ -496,11 +498,12 @@ async function seed() {
 
   // Legal Pages
   await db.insert(pages).values([
-    { title: "Política de Privacidade", slug: "politica-privacidade", content: "Conteúdo da política de privacidade a definir pela empresa.", isPublished: true },
-    { title: "Termos e Condições", slug: "termos-condicoes", content: "Conteúdo dos termos e condições a definir pela empresa.", isPublished: true },
-    { title: "Política de Cookies", slug: "politica-cookies", content: "Conteúdo da política de cookies a definir pela empresa.", isPublished: true },
-    { title: "Política de Devoluções", slug: "politica-devolucoes", content: "Conteúdo da política de devoluções a definir pela empresa.", isPublished: true },
-    { title: "Garantias", slug: "garantias", content: "Informações sobre garantias a definir pela empresa.", isPublished: true },
+    { title: "Política de Privacidade", slug: "politica-privacidade", content: "Consulte a Política de Privacidade publicada pela MDTech para informação sobre responsável pelo tratamento, finalidades, fundamentos jurídicos, conservação, destinatários e direitos RGPD.", isPublished: true },
+    { title: "Termos e Condições", slug: "termos-condicoes", content: "Os Termos e Condições da MDTech regulam a utilização da loja online e as compras celebradas com Marco Duarte Tech Solutions Unipessoal Lda, NIPC 519445902.", isPublished: true },
+    { title: "Política de Cookies", slug: "politica-cookies", content: "A MDTech utiliza cookies necessários ao funcionamento da loja. Cookies não essenciais dependem da escolha do utilizador quando legalmente exigido.", isPublished: true },
+    { title: "Política de Devoluções", slug: "politica-devolucoes", content: "Nas vendas à distância a consumidores aplica-se, em regra, o prazo legal de 14 dias para livre resolução, sem prejuízo das exceções previstas na lei.", isPublished: true },
+    { title: "Garantias", slug: "garantias", content: "Os consumidores beneficiam dos direitos legais de conformidade previstos no Decreto-Lei n.º 84/2021, sem prejuízo de garantias comerciais adicionais.", isPublished: true },
+    { title: "Resolução de Litígios", slug: "resolucao-litigios", content: "CIAB — Tribunal Arbitral de Consumo, Rua D. Afonso Henriques, 1, 4700-030 Braga — https://ciab.pt/. Livro de Reclamações Eletrónico: https://www.livroreclamacoes.pt/inicio/.", isPublished: true },
     { title: "Sobre Nós", slug: "sobre-nos", content: "A Marco Duarte Tech Solutions é uma empresa de informática sediada em Esposende, dedicada à venda de tecnologia, reparação e assistência técnica.", isPublished: true },
   ]).onConflictDoNothing();
 

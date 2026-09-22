@@ -47,7 +47,9 @@ export default function AdminSettingsPage() {
       { key: "company_address", label: "Morada" },
       { key: "company_phone", label: "Telefone" },
       { key: "company_email", label: "Email" },
-      { key: "company_nif", label: "NIF" },
+      { key: "company_nif", label: "NIF/NIPC" },
+      { key: "instagram_url", label: "Instagram" },
+      { key: "facebook_url", label: "Facebook" },
     ]},
     { title: "Loja", fields: [
       { key: "store_address", label: "Morada da Loja" },

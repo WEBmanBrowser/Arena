@@ -930,7 +930,7 @@ export default function CheckoutPage() {
                 <button onClick={() => setStep(3)} className="px-6 py-2 border rounded-lg text-sm text-slate-600 hover:bg-slate-50 transition">← Voltar</button>
                 <button onClick={handleSubmit} disabled={loading || !quote || !quote.allInStock}
                   className="px-6 py-2 bg-lime-600 hover:bg-lime-700 text-white text-sm rounded-lg font-bold transition disabled:opacity-50">
-                  {loading ? "A processar..." : `Confirmar Encomenda ${quote ? quote.total : "..."}€`}
+                  {loading ? "A processar..." : `Encomendar e pagar ${quote ? quote.total : "..."}€`}
                 </button>
               </div>
             </div>

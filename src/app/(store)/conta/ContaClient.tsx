@@ -88,7 +88,7 @@ export default function ContaClient() {
   const [addressList, setAddressList] = useState<Address[]>([]);
   const [addressLoading, setAddressLoading] = useState(false);
   const [loginForm, setLoginForm] = useState({ email: "", password: "" });
-  const [registerForm, setRegisterForm] = useState({ name: "", email: "", password: "", phone: "", nif: "" });
+  const [registerForm, setRegisterForm] = useState({ name: "", email: "", password: "", phone: "", nif: "", acceptTerms: false, acknowledgePrivacy: false, marketingConsent: false });
   const [authError, setAuthError] = useState("");
   const [rmaForm, setRmaForm] = useState({ type: "repair", description: "", orderId: "" });
   const [profileForm, setProfileForm] = useState({ name: "", phone: "", nif: "", company: "" });
@@ -316,6 +316,18 @@ export default function ContaClient() {
               <input type="password" placeholder="Password *" value={registerForm.password} onChange={e => setRegisterForm(f => ({ ...f, password: e.target.value }))} className="w-full border rounded-lg px-3 py-2 text-sm" required />
               <input placeholder="Telefone" value={registerForm.phone} onChange={e => setRegisterForm(f => ({ ...f, phone: e.target.value }))} className="w-full border rounded-lg px-3 py-2 text-sm" />
               <input placeholder="NIF" value={registerForm.nif} onChange={e => setRegisterForm(f => ({ ...f, nif: e.target.value }))} className="w-full border rounded-lg px-3 py-2 text-sm" />
+              <label className="flex items-start gap-2 text-xs text-slate-600">
+                <input type="checkbox" className="mt-0.5" checked={registerForm.acceptTerms} onChange={e => setRegisterForm(f => ({ ...f, acceptTerms: e.target.checked }))} required />
+                <span>Li e aceito os <Link href="/pagina/termos-condicoes" target="_blank" className="text-sky-600 underline">Termos e Condições</Link>.</span>
+              </label>
+              <label className="flex items-start gap-2 text-xs text-slate-600">
+                <input type="checkbox" className="mt-0.5" checked={registerForm.acknowledgePrivacy} onChange={e => setRegisterForm(f => ({ ...f, acknowledgePrivacy: e.target.checked }))} required />
+                <span>Declaro que tomei conhecimento da <Link href="/pagina/politica-privacidade" target="_blank" className="text-sky-600 underline">Política de Privacidade</Link>.</span>
+              </label>
+              <label className="flex items-start gap-2 text-xs text-slate-600">
+                <input type="checkbox" className="mt-0.5" checked={registerForm.marketingConsent} onChange={e => setRegisterForm(f => ({ ...f, marketingConsent: e.target.checked }))} />
+                <span>Quero receber novidades, campanhas e ofertas da MDTech por email. Esta opção é facultativa e pode ser retirada a qualquer momento.</span>
+              </label>
               <button type="submit" className="w-full py-2 bg-sky-600 hover:bg-sky-700 text-white rounded-lg text-sm font-medium transition">Criar Conta</button>
             </form>
           ) : (
