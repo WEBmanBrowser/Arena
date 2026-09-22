@@ -10,8 +10,9 @@ export default function Footer() {
             <div className="mb-4">
               <Logo height={44} />
             </div>
-            <p className="text-sm mb-3">Marco Duarte Tech Solutions, Unipessoal Lda.</p>
-            <p className="text-sm">📍 Esposende, Braga, Portugal</p>
+            <p className="text-sm mb-3">Marco Duarte Tech Solutions Unipessoal Lda</p>
+            <p className="text-sm">📍 Rua Sargento Álvaro Fernandes, n.º 7, 2.º B, 4740-567 Esposende</p>
+            <p className="text-sm">NIPC: 519 445 902</p>
             <p className="text-sm">📞 +351 917 801 898</p>
             <p className="text-sm">✉️ geral@mdtech.pt</p>
           </div>
@@ -47,12 +48,15 @@ export default function Footer() {
               <Link href="/pagina/politica-cookies" className="block text-sm hover:text-white transition">Política de Cookies</Link>
               <Link href="/pagina/politica-devolucoes" className="block text-sm hover:text-white transition">Devoluções</Link>
               <Link href="/pagina/garantias" className="block text-sm hover:text-white transition">Garantias</Link>
+              <Link href="/pagina/resolucao-litigios" className="block text-sm hover:text-white transition">Resolução de Litígios</Link>
+              <a href="https://www.livroreclamacoes.pt/inicio/" target="_blank" rel="noopener noreferrer" className="block text-sm hover:text-white transition">Livro de Reclamações</a>
+              <a href="https://ciab.pt/" target="_blank" rel="noopener noreferrer" className="block text-sm hover:text-white transition">CIAB — Tribunal Arbitral de Consumo</a>
             </div>
           </div>
         </div>
 
         <div className="border-t border-slate-800 mt-8 pt-6 flex flex-col sm:flex-row justify-between items-center gap-4">
-          <p className="text-xs">© {new Date().getFullYear()} Marco Duarte Tech Solutions, Unipessoal Lda. Todos os direitos reservados.</p>
+          <p className="text-xs">© {new Date().getFullYear()} Marco Duarte Tech Solutions Unipessoal Lda Todos os direitos reservados.</p>
           <p className="text-xs">Preços com IVA incluído à taxa legal em vigor.</p>
         </div>
       </div>

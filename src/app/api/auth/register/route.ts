@@ -14,9 +14,12 @@ export async function POST(req: NextRequest) {
   if (!ipLimit.allowed) return rateLimitResponse(ipLimit.retryAfterSeconds);
 
   try {
-    const { email, password, name, phone, nif } = await req.json();
+    const { email, password, name, phone, nif, acceptTerms, acknowledgePrivacy, marketingConsent } = await req.json();
     if (!email || !password || !name) {
       return NextResponse.json({ error: "Campos obrigatórios em falta" }, { status: 400 });
+    }
+    if (acceptTerms !== true || acknowledgePrivacy !== true) {
+      return NextResponse.json({ error: "É necessário aceitar os Termos e Condições e confirmar a leitura da Política de Privacidade" }, { status: 400 });
     }
     if (typeof password !== "string" || password.length < 8 || password.length > 128) {
       return NextResponse.json({ error: "A password deve ter entre 8 e 128 caracteres" }, { status: 400 });
@@ -26,7 +29,14 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Email já registado" }, { status: 409 });
     }
     const hashed = await hashPassword(password);
-    const [user] = await db.insert(users).values({ email, password: hashed, name, phone: phone || null, nif: nif || null, role: "customer" }).returning();
+    const acceptedAt = new Date();
+    const [user] = await db.insert(users).values({
+      email, password: hashed, name, phone: phone || null, nif: nif || null, role: "customer",
+      termsAcceptedAt: acceptedAt, termsVersion: "2026-09-22",
+      privacyAcknowledgedAt: acceptedAt, privacyVersion: "2026-09-22",
+      marketingConsentAt: marketingConsent === true ? acceptedAt : null,
+      marketingConsentVersion: marketingConsent === true ? "2026-09-22" : null,
+    }).returning();
     const token = createToken({ userId: user.id, role: user.role });
     const response = NextResponse.json({ user: { id: user.id, email: user.email, name: user.name, role: user.role } });
     response.cookies.set("auth_token", token, { httpOnly: true, secure: process.env.NODE_ENV === "production", sameSite: "lax", maxAge: 7 * 24 * 60 * 60, path: "/" });

@@ -20,7 +20,7 @@ export default async function PaginaPage({ params }: { params: Promise<{ slug: s
       </nav>
       <h1 className="text-2xl font-bold text-slate-800 mb-6">{page.title}</h1>
       <div className="prose prose-sm max-w-none text-slate-600">
-        <p>{page.content}</p>
+        <div className="whitespace-pre-line leading-7">{page.content}</div>
       </div>
     </div>
   );
