@@ -190,10 +190,12 @@ export default function AdminProductsPage() {
   // Stock status of the product currently being edited (server-authoritative values).
   const stockState = (() => {
     if (!editingProduct) return { available: 0, label: "—", tone: "text-slate-500", badge: "bg-slate-100 text-slate-600" };
-    const available = editingProduct.stock - editingProduct.reservedStock;
-    if (available <= 0) return { available, label: "Sem stock", tone: "text-red-600", badge: "bg-red-50 text-red-600" };
-    if (available <= editingProduct.minStock) return { available, label: "Stock baixo", tone: "text-amber-600", badge: "bg-amber-50 text-amber-700" };
-    return { available, label: "Disponível", tone: "text-green-600", badge: "bg-green-50 text-green-700" };
+    const localAvailable = editingProduct.localAvailableStock ?? Math.max(0, editingProduct.stock - editingProduct.reservedStock);
+    const supplierAvailable = editingProduct.supplierAvailableStock ?? 0;
+    const available = editingProduct.availableStock ?? (localAvailable + supplierAvailable);
+    if (available <= 0) return { available, localAvailable, supplierAvailable, label: "Sem stock", tone: "text-red-600", badge: "bg-red-50 text-red-600" };
+    if (localAvailable <= editingProduct.minStock && supplierAvailable <= 0) return { available, localAvailable, supplierAvailable, label: "Stock local baixo", tone: "text-amber-600", badge: "bg-amber-50 text-amber-700" };
+    return { available, localAvailable, supplierAvailable, label: supplierAvailable > 0 && localAvailable <= 0 ? "Disponível no fornecedor" : "Disponível", tone: "text-green-600", badge: "bg-green-50 text-green-700" };
   })();
 
   const u = (f: string, v: any) => setForm(o => ({ ...o, [f]: v }));
@@ -207,7 +209,7 @@ export default function AdminProductsPage() {
 
       {/* Filters */}
       <div className="flex flex-wrap gap-2 mb-4">
-        <input type="text" placeholder="Pesquisar..." value={search} onChange={e => { setSearch(e.target.value); setPage(1); }} className="border rounded-lg px-3 py-1.5 text-sm w-48" />
+        <input type="text" placeholder="Nome, SKU ou EAN..." value={search} onChange={e => { setSearch(e.target.value); setPage(1); }} className="border rounded-lg px-3 py-1.5 text-sm w-48" />
         <select value={brandFilter} onChange={e => { setBrandFilter(e.target.value); setPage(1); }} className="border rounded-lg px-2 py-1.5 text-sm">
           <option value="">Marca</option>{brands.map((b: any) => <option key={b.id} value={b.id}>{b.name}</option>)}
         </select>
@@ -349,10 +351,11 @@ export default function AdminProductsPage() {
                   {editingProduct ? (
                     <div className="border rounded-lg p-4 bg-slate-50">
                       <h4 className="text-sm font-medium text-slate-800 mb-3">Situação atual</h4>
-                      <div className="grid grid-cols-3 gap-3 mb-3">
-                        <div><p className="text-[11px] text-slate-500">Físico</p><p className="text-sm font-medium">{editingProduct.stock}</p></div>
-                        <div><p className="text-[11px] text-slate-500">Reservado</p><p className="text-sm font-medium text-amber-600">{editingProduct.reservedStock}</p></div>
-                        <div><p className="text-[11px] text-slate-500">Disponível</p><p className={`text-sm font-bold ${stockState.tone}`}>{stockState.available}</p></div>
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-3">
+                        <div><p className="text-[11px] text-slate-500">Físico MDTech</p><p className="text-sm font-medium">{editingProduct.stock}</p></div>
+                        <div><p className="text-[11px] text-slate-500">Reservado local</p><p className="text-sm font-medium text-amber-600">{editingProduct.reservedStock}</p></div>
+                        <div><p className="text-[11px] text-slate-500">Disponível fornecedor</p><p className="text-sm font-medium text-sky-600">{stockState.supplierAvailable}</p></div>
+                        <div><p className="text-[11px] text-slate-500">Disponível total</p><p className={`text-sm font-bold ${stockState.tone}`}>{stockState.available}</p></div>
                       </div>
                       <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${stockState.badge}`}>{stockState.label}</span>
                       <p className="text-[11px] text-slate-500 mt-3">
@@ -422,16 +425,19 @@ export default function AdminProductsPage() {
               <th className="text-left p-3 font-medium text-slate-600">Produto</th>
               <th className="text-left p-3 font-medium text-slate-600 hidden md:table-cell">SKU</th>
               <th className="text-right p-3 font-medium text-slate-600">Preço</th>
-              <th className="text-right p-3 font-medium text-slate-600">Stock</th>
-              <th className="text-right p-3 font-medium text-slate-600 hidden lg:table-cell">Reserv.</th>
-              <th className="text-right p-3 font-medium text-slate-600 hidden lg:table-cell">Disp.</th>
+              <th className="text-right p-3 font-medium text-slate-600">Físico</th>
+              <th className="text-right p-3 font-medium text-slate-600 hidden lg:table-cell">Reserv. local</th>
+              <th className="text-right p-3 font-medium text-slate-600 hidden lg:table-cell">Fornecedor</th>
+              <th className="text-right p-3 font-medium text-slate-600 hidden lg:table-cell">Disp. total</th>
               <th className="text-center p-3 font-medium text-slate-600">Estado</th>
               <th className="text-right p-3 font-medium text-slate-600">Ações</th>
             </tr>
           </thead>
           <tbody>
             {products.map((p: any) => {
-              const avail = p.stock - p.reservedStock;
+              const localAvailable = p.localAvailableStock ?? Math.max(0, p.stock - p.reservedStock);
+              const supplierAvailable = p.supplierAvailableStock ?? 0;
+              const totalAvailable = p.availableStock ?? (localAvailable + supplierAvailable);
               return (
                 <tr key={p.id} className="border-t hover:bg-slate-50">
                   <td className="p-3"><input type="checkbox" checked={selected.includes(p.id)} onChange={() => toggleSelect(p.id)} /></td>
@@ -440,7 +446,8 @@ export default function AdminProductsPage() {
                   <td className="p-3 text-right font-medium">{parseFloat(p.price).toFixed(2)}€</td>
                   <td className="p-3 text-right">{p.stock}</td>
                   <td className="p-3 text-right text-amber-600 hidden lg:table-cell">{p.reservedStock}</td>
-                  <td className={`p-3 text-right font-medium hidden lg:table-cell ${avail <= 0 ? "text-red-500" : avail <= p.minStock ? "text-amber-500" : "text-green-600"}`}>{avail}</td>
+                  <td className="p-3 text-right hidden lg:table-cell"><span className={supplierAvailable > 0 ? "font-medium text-sky-600" : "text-slate-400"}>{supplierAvailable}</span></td>
+                  <td className={`p-3 text-right font-medium hidden lg:table-cell ${totalAvailable <= 0 ? "text-red-500" : "text-green-600"}`}>{totalAvailable}</td>
                   <td className="p-3 text-center"><span className={`px-2 py-0.5 rounded text-xs ${p.isActive ? "bg-green-50 text-green-600" : "bg-red-50 text-red-500"}`}>{p.isActive ? "Ativo" : "Inativo"}</span></td>
                   <td className="p-3 text-right">
                     <button onClick={() => openEdit(p)} className="text-sky-600 hover:text-sky-800 mr-2 text-xs font-medium">Editar</button>

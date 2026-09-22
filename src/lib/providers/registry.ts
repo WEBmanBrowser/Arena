@@ -18,7 +18,7 @@ import { ProviderError } from "./errors";
 
 export const PAYMENT_PROVIDERS = ["eupago"] as const;
 export const SHIPPING_PROVIDERS = ["mrw", "ctt"] as const;
-export const INVOICE_PROVIDERS = ["xd"] as const;
+export const INVOICE_PROVIDERS = ["wintouch"] as const;
 
 export type PaymentProviderId = (typeof PAYMENT_PROVIDERS)[number];
 export type ShippingProviderId = (typeof SHIPPING_PROVIDERS)[number];
@@ -120,13 +120,11 @@ const CTT = describe<ShippingProviderId, ShippingCapability>("ctt", "shipping", 
   "getTracking",
 ]);
 
-/** XD Software — future fiscal document provider. */
-const XD = describe<InvoiceProviderId, InvoiceCapability>("xd", "invoice", "XD Software", [
+/** WINTOUCH Cloud — fiscal document provider. */
+const WINTOUCH = describe<InvoiceProviderId, InvoiceCapability>("wintouch", "invoice", "WINTOUCH Cloud", [
+  // Advertise only operations that the adapter actually implements.
   "createInvoice",
   "getDocument",
-  "createCreditNote",
-  "sendDocument",
-  "getStatus",
 ]);
 
 const PAYMENT_REGISTRY: Record<PaymentProviderId, ProviderDescriptor<PaymentProviderId, PaymentCapability>> = {
@@ -137,7 +135,7 @@ const SHIPPING_REGISTRY: Record<ShippingProviderId, ProviderDescriptor<ShippingP
   ctt: CTT,
 };
 const INVOICE_REGISTRY: Record<InvoiceProviderId, ProviderDescriptor<InvoiceProviderId, InvoiceCapability>> = {
-  xd: XD,
+  wintouch: WINTOUCH,
 };
 
 // ─── Lookup ───────────────────────────────────────────────
@@ -182,7 +180,7 @@ export function getProvider(id: string): ProviderDescriptor {
 }
 
 export function listProviders(kind?: ProviderKind): readonly ProviderDescriptor[] {
-  const all: ProviderDescriptor[] = [EUPAGO, MRW, CTT, XD];
+  const all: ProviderDescriptor[] = [EUPAGO, MRW, CTT, WINTOUCH];
   return kind ? all.filter((p) => p.kind === kind) : all;
 }
 

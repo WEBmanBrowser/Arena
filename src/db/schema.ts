@@ -397,20 +397,57 @@ export const productSuppliers = pgTable("product_suppliers", {
   availableNextQuantity: integer("available_next_quantity"),
   availabilityTimestamp: timestamp("availability_timestamp", { withTimezone: true }),
   lastSyncAt: timestamp("last_sync_at", { withTimezone: true }),
-  // ── C.3.4.4: stock do FORNECEDOR (ALSO), separado do stock físico ──
-  // products.stock é o stock físico MDTech e NUNCA é escrito pelo sync ALSO.
+  // ── Stock do FORNECEDOR, separado do stock físico ──
+  // products.stock é o stock físico MDTech e NUNCA é escrito pela sincronização de fornecedores.
   // NULL = desconhecido/nunca sincronizado; o sentinel -1 do feed significa
   // "não atualizar" e nunca limpa este valor.
   supplierStock: integer("supplier_stock"),
+  // Quantidade do stock do fornecedor reservada por encomendas ativas.
+  // Separada do stock reportado pelo fornecedor e do stock físico MDTech.
+  supplierReservedStock: integer("supplier_reserved_stock").notNull().default(0),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
 }, (t) => [
   check("ps_available_next_quantity_non_negative", sql`${t.availableNextQuantity} IS NULL OR ${t.availableNextQuantity} >= 0`),
   check("ps_supplier_stock_non_negative", sql`${t.supplierStock} IS NULL OR ${t.supplierStock} >= 0`),
+  check("ps_supplier_reserved_stock_non_negative", sql`${t.supplierReservedStock} >= 0`),
   index("ps_product_idx").on(t.productId),
   index("ps_supplier_idx").on(t.supplierId),
   uniqueIndex("ps_product_supplier_unique").on(t.productId, t.supplierId),
   uniqueIndex("ps_preferred_unique").on(t.productId).where(sql`is_preferred = true`),
+]);
+
+// ─── ORDER ITEM STOCK ALLOCATIONS ────────────────────────
+// Regista de onde é satisfeita cada quantidade de uma linha da encomenda.
+// Uma linha pode ser dividida entre stock físico MDTech e um ou mais
+// fornecedores, sem expor a identidade do fornecedor ao cliente.
+export const orderItemStockAllocations = pgTable("order_item_stock_allocations", {
+  id: serial("id").primaryKey(),
+  orderItemId: integer("order_item_id").notNull().references(() => orderItems.id, { onDelete: "cascade" }),
+  allocationType: varchar("allocation_type", { length: 20 }).notNull(),
+  productSupplierId: integer("product_supplier_id").references(() => productSuppliers.id),
+  quantity: integer("quantity").notNull(),
+  // reserved = quantidade bloqueada enquanto aguarda pagamento
+  // committed = pagamento confirmado; origem do stock fica preservada
+  // released = reserva libertada sem consumo
+  // fulfilled = encomenda concluída; reserva do fornecedor já libertada
+  status: varchar("status", { length: 20 }).notNull().default("reserved"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+}, (t) => [
+  index("oisa_order_item_idx").on(t.orderItemId),
+  index("oisa_product_supplier_idx").on(t.productSupplierId),
+  uniqueIndex("oisa_local_unique").on(t.orderItemId)
+    .where(sql`allocation_type = 'local'`),
+  uniqueIndex("oisa_supplier_unique").on(t.orderItemId, t.productSupplierId)
+    .where(sql`allocation_type = 'supplier'`),
+  check("oisa_quantity_positive", sql`${t.quantity} > 0`),
+  check("oisa_status_valid", sql`${t.status} IN ('reserved','committed','released','fulfilled')`),
+  check("oisa_allocation_type_valid", sql`${t.allocationType} IN ('local','supplier')`),
+  check(
+    "oisa_supplier_link_valid",
+    sql`(${t.allocationType} = 'local' AND ${t.productSupplierId} IS NULL) OR (${t.allocationType} = 'supplier' AND ${t.productSupplierId} IS NOT NULL)`
+  ),
 ]);
 
 // ─── C.1: PRICING RULES (automatic pricing engine) ───────
@@ -647,7 +684,7 @@ export type RmaStatus = (typeof RMA_STATUSES)[number];
 // B.3.1 — INTEGRATION FOUNDATIONS
 //
 // Durable persistence required by future external providers
-// (Eupago payments, MRW/CTT shipping, XD Software invoicing).
+// (Eupago payments, MRW/CTT shipping, WINTOUCH Cloud invoicing).
 //
 // NOT persisted here, by design:
 //  • provider registry/allowlist + capabilities → TypeScript
@@ -807,12 +844,12 @@ export const shipments = pgTable("shipments", {
 
 // ─── B.3.1: INVOICE DOCUMENTS (fiscal provider reference) ─
 // The shop does NOT issue certified Portuguese fiscal documents itself.
-// XD Software remains the fiscal provider; this table only stores
+// WINTOUCH Cloud is the fiscal provider; this table only stores
 // synchronization/reference metadata for issued documents.
 export const invoiceDocuments = pgTable("invoice_documents", {
   id: serial("id").primaryKey(),
   orderId: integer("order_id").notNull().references(() => orders.id),
-  /** Allowlisted invoice provider: xd */
+  /** Allowlisted invoice provider: wintouch (manual legacy rows may also exist). */
   provider: varchar("provider", { length: 50 }).notNull(),
   /** invoice | credit_note */
   documentType: varchar("document_type", { length: 50 }).notNull(),

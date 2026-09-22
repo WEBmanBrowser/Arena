@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/db";
-import { products, orderItems, shippingClasses } from "@/db/schema";
-import { eq, desc, asc, ilike, and, or, sql, ne } from "drizzle-orm";
+import { products, orderItems, shippingClasses, productSuppliers, suppliers } from "@/db/schema";
+import { eq, desc, asc, and, sql, ne, inArray } from "drizzle-orm";
 import { getCurrentUser, isStaff, isManager } from "@/lib/auth";
 import { slugify } from "@/lib/utils";
 import { createAuditLog } from "@/lib/audit";
@@ -65,8 +65,45 @@ export async function GET(req: NextRequest) {
   await ensureDefaultShippingConfiguration();
   const [countResult] = await db.select({ count: sql<number>`count(*)` }).from(products).where(where);
   const items = await db.select().from(products).where(where).orderBy(orderBy).limit(limit).offset(offset);
+
+  // Keep physical MDTech stock separate from supplier stock.
+  // Availability from all ACTIVE suppliers is aggregated for the admin view.
+  const productIds = items.map((item) => item.id);
+  const supplierAvailability = productIds.length
+    ? await db
+        .select({
+          productId: productSuppliers.productId,
+          available: sql<number>`COALESCE(SUM(GREATEST(COALESCE(${productSuppliers.supplierStock}, 0) - ${productSuppliers.supplierReservedStock}, 0)), 0)`,
+          reserved: sql<number>`COALESCE(SUM(${productSuppliers.supplierReservedStock}), 0)`,
+        })
+        .from(productSuppliers)
+        .innerJoin(suppliers, eq(suppliers.id, productSuppliers.supplierId))
+        .where(and(eq(suppliers.isActive, true), inArray(productSuppliers.productId, productIds)))
+        .groupBy(productSuppliers.productId)
+    : [];
+
+  const supplierByProduct = new Map(
+    supplierAvailability.map((row) => [
+      row.productId,
+      { available: Number(row.available), reserved: Number(row.reserved) },
+    ]),
+  );
+
+  const enrichedItems = items.map((item) => {
+    const localAvailableStock = Math.max(0, item.stock - item.reservedStock);
+    const supplier = supplierByProduct.get(item.id) ?? { available: 0, reserved: 0 };
+    return {
+      ...item,
+      localAvailableStock,
+      supplierAvailableStock: supplier.available,
+      supplierReservedStock: supplier.reserved,
+      availableStock: localAvailableStock + supplier.available,
+      stockSource: localAvailableStock > 0 ? "local" : supplier.available > 0 ? "supplier" : "none",
+    };
+  });
+
   const classes = await db.select().from(shippingClasses).orderBy(shippingClasses.priority, shippingClasses.displayName);
-  return NextResponse.json({ products: items, shippingClasses: classes, total: Number(countResult.count), page, pages: Math.ceil(Number(countResult.count) / limit), limit });
+  return NextResponse.json({ products: enrichedItems, shippingClasses: classes, total: Number(countResult.count), page, pages: Math.ceil(Number(countResult.count) / limit), limit });
 }
 
 export async function POST(req: NextRequest) {

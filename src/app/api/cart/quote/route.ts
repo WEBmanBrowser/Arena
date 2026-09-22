@@ -4,6 +4,7 @@ import { products, coupons } from "@/db/schema";
 import { eq, and } from "drizzle-orm";
 import { toCents, toEuros, calcVatFromGross, lineTotal } from "@/lib/money";
 import { calculateShippingForCart, ShippingRateError } from "@/lib/shipping-rates";
+import { getSupplierAvailabilityByProductIds } from "@/lib/supplier-stock";
 
 /**
  * POST /api/cart/quote
@@ -34,6 +35,9 @@ export async function POST(req: NextRequest) {
       inStock: boolean;
       availableStock: number;
       isService: boolean;
+      localAvailableStock: number;
+      supplierAvailableStock: number;
+      stockSource: "service" | "local" | "supplier" | "none";
       priceChanged: boolean;
     }> = [];
 
@@ -59,7 +63,10 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ error: `Produto indisponível: ${product.name}`, code: "PRODUCT_UNAVAILABLE", productId }, { status: 400 });
       }
 
-      const available = product.stock - product.reservedStock;
+      const localAvailable = Math.max(0, product.stock - product.reservedStock);
+      const supplierAvailability = await getSupplierAvailabilityByProductIds(db, [product.id]);
+      const supplierAvailable = supplierAvailability.get(product.id) ?? 0;
+      const available = localAvailable + supplierAvailable;
       const inStock = product.isService || available >= quantity;
       const unitPriceCents = toCents(product.price);
       const vatRate = parseFloat(product.vatRate);
@@ -87,6 +94,9 @@ export async function POST(req: NextRequest) {
         inStock,
         availableStock: product.isService ? 999 : available,
         isService: product.isService,
+        localAvailableStock: product.isService ? 999 : localAvailable,
+        supplierAvailableStock: product.isService ? 0 : supplierAvailable,
+        stockSource: product.isService ? "service" : localAvailable > 0 ? "local" : supplierAvailable > 0 ? "supplier" : "none",
         priceChanged,
       });
     }

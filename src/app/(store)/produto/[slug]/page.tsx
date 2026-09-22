@@ -57,6 +57,9 @@ export default function ProdutoPage() {
   const comparePrice = product.comparePrice ? parseFloat(product.comparePrice) : null;
   const discount = comparePrice ? Math.round((1 - price / comparePrice) * 100) : 0;
   const available = product.availableStock ?? product.stock;
+  const localAvailable = product.localAvailableStock ?? product.stock;
+  const supplierAvailable = product.supplierAvailableStock ?? 0;
+  const supplierOnly = !product.isService && localAvailable <= 0 && supplierAvailable > 0;
   const inStock = available > 0 || product.isService;
 
   const addToCart = () => {
@@ -169,11 +172,15 @@ export default function ProdutoPage() {
             <div className="flex items-center gap-2 mb-2">
               <span className={`w-2 h-2 rounded-full ${inStock ? "bg-green-500 animate-pulse-dot" : "bg-red-500"}`}></span>
               <span className={`text-sm font-medium ${inStock ? "text-green-600" : "text-red-500"}`}>
-                {inStock ? (product.isService ? "Serviço Disponível" : "Em Stock") : (product.allowPreorder ? "Pré-encomenda" : "Esgotado")}
+                {product.isService
+                  ? "Serviço Disponível"
+                  : supplierOnly
+                    ? "Disponível no fornecedor · Entrega estimada em 2 dias úteis"
+                    : inStock ? "Em Stock" : (product.allowPreorder ? "Pré-encomenda" : "Esgotado")}
               </span>
             </div>
-            {!product.isService && available > 0 && available <= 5 && (
-              <p className="text-xs text-amber-600">Apenas {available} unidades disponíveis</p>
+            {!product.isService && !supplierOnly && localAvailable > 0 && localAvailable <= 5 && (
+              <p className="text-xs text-amber-600">Apenas {localAvailable} unidades disponíveis</p>
             )}
             {product.storeStock > 0 && (
               <p className="text-xs text-slate-500 mt-1">📍 Disponível para levantamento na loja de Esposende</p>

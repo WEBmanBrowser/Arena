@@ -3,7 +3,7 @@
  * Used by BOTH product listing and bulk pricing to guarantee consistency.
  */
 import { products } from "@/db/schema";
-import { eq, and, ilike, sql, gte, lte, type SQL } from "drizzle-orm";
+import { eq, and, or, ilike, sql, gte, lte, type SQL } from "drizzle-orm";
 
 export interface AdminProductFilters {
   q?: string;
@@ -19,7 +19,14 @@ export interface AdminProductFilters {
 /** Build WHERE conditions from admin filters. Returns undefined if no filters. */
 export function buildAdminProductConditions(f: AdminProductFilters): SQL | undefined {
   const conds: SQL[] = [];
-  if (f.q) conds.push(ilike(products.name, `%${f.q}%`));
+  const q = f.q?.trim();
+  if (q) {
+    conds.push(or(
+      ilike(products.name, `%${q}%`),
+      ilike(products.sku, `%${q}%`),
+      ilike(products.ean, `%${q}%`),
+    )!);
+  }
   if (f.brandId !== undefined) conds.push(eq(products.brandId, f.brandId));
   if (f.categoryId !== undefined) conds.push(eq(products.categoryId, f.categoryId));
   if (f.isActive === true) conds.push(eq(products.isActive, true));

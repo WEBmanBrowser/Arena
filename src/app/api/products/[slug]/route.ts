@@ -3,6 +3,7 @@ import { db } from "@/db";
 import { products, brands, categories } from "@/db/schema";
 import { eq, and, ne, sql } from "drizzle-orm";
 import { publicProductSelect, publicProductListSelect, getPublicProductImages, getPrimaryImageUrls, sanitizeForPublic } from "@/lib/public-products";
+import { getSupplierAvailabilityByProductIds } from "@/lib/supplier-stock";
 
 export async function GET(_req: NextRequest, { params }: { params: Promise<{ slug: string }> }) {
   try {
@@ -11,8 +12,17 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ slu
     const [raw] = await db.select(publicProductSelect).from(products).where(and(eq(products.slug, slug), eq(products.isActive, true))).limit(1);
     if (!raw) return NextResponse.json({ error: "Produto não encontrado" }, { status: 404 });
 
-    // Sanitize: remove reservedStock, add availableStock
-    const product = sanitizeForPublic(raw);
+    // Sanitize public product and add generic local/supplier availability.
+    const supplierAvailability = await getSupplierAvailabilityByProductIds(db, [raw.id]);
+    const localAvailableStock = Math.max(0, raw.stock - raw.reservedStock);
+    const supplierAvailableStock = supplierAvailability.get(raw.id) ?? 0;
+    const product = {
+      ...sanitizeForPublic(raw),
+      localAvailableStock,
+      supplierAvailableStock,
+      availableStock: raw.isService ? 999 : localAvailableStock + supplierAvailableStock,
+      stockSource: raw.isService ? "service" : localAvailableStock > 0 ? "local" : supplierAvailableStock > 0 ? "supplier" : "none",
+    };
 
     let brand = null;
     if (product.brandId) {
@@ -44,11 +54,23 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ slu
           .where(and(eq(products.categoryId, product.categoryId), ne(products.id, raw.id), eq(products.isActive, true)))
           .limit(4)
       : [];
-    const relImgMap = await getPrimaryImageUrls(related.map(r => r.id));
-    const enrichedRelated = related.map(r => ({
-      ...sanitizeForPublic(r),
-      primaryImageUrl: relImgMap[r.id] || r.images?.[0] || null,
-    }));
+    const relatedIds = related.map(r => r.id);
+    const [relImgMap, relatedSupplierAvailability] = await Promise.all([
+      getPrimaryImageUrls(relatedIds),
+      getSupplierAvailabilityByProductIds(db, relatedIds),
+    ]);
+    const enrichedRelated = related.map(r => {
+      const local = Math.max(0, r.stock - r.reservedStock);
+      const supplier = relatedSupplierAvailability.get(r.id) ?? 0;
+      return {
+        ...sanitizeForPublic(r),
+        localAvailableStock: local,
+        supplierAvailableStock: supplier,
+        availableStock: r.isService ? 999 : local + supplier,
+        stockSource: r.isService ? "service" : local > 0 ? "local" : supplier > 0 ? "supplier" : "none",
+        primaryImageUrl: relImgMap[r.id] || r.images?.[0] || null,
+      };
+    });
 
     // Increment view count (fire and forget)
     db.update(products).set({ viewCount: sql`${products.viewCount} + 1` }).where(eq(products.id, raw.id)).catch(() => {});

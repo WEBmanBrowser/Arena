@@ -5,12 +5,13 @@
  */
 
 import { db } from "@/db";
-import { orders, orderItems, products, orderStatusHistory, stockMovements, payments, coupons, paymentAttempts, ORDER_TRANSITIONS } from "@/db/schema";
-import { eq, sql, and, lte, asc, desc } from "drizzle-orm";
+import { orders, orderItems, products, productSuppliers, orderItemStockAllocations, orderStatusHistory, stockMovements, payments, coupons, paymentAttempts, ORDER_TRANSITIONS } from "@/db/schema";
+import { eq, sql, and, lte, asc, desc, inArray } from "drizzle-orm";
 import { createAuditLog, createAuditLogTx } from "@/lib/audit";
 import { sendEmail, orderPaidEmail, orderCancelledEmail, orderExpiredEmail, getOrderCustomerEmail } from "@/lib/email";
+import { runPostPaymentEffects } from "@/lib/services/post-payment-coordinator";
 import { enqueueEmail, dispatchEmailNotification } from "@/lib/email-outbox";
-import { lockProductsAscending, type DbOrTx } from "@/lib/stock-locks";
+import { lockProductsAscending, lockActiveProductSuppliersAscending, type DbOrTx } from "@/lib/stock-locks";
 
 // ─── CONFIRM PAYMENT ──────────────────────────────────────
 //
@@ -284,45 +285,60 @@ export async function confirmOrderPaymentInTx(
   const items = await tx.select().from(orderItems).where(eq(orderItems.orderId, orderId));
   const stockItems = items.filter((item) => item.productId);
   const locked = await lockProductsAscending(tx, stockItems.map((item) => item.productId!));
+  await lockActiveProductSuppliersAscending(tx, stockItems.map((item) => item.productId!));
+  const allocations = stockItems.length > 0
+    ? await tx.select().from(orderItemStockAllocations).where(inArray(orderItemStockAllocations.orderItemId, stockItems.map((item) => item.id)))
+    : [];
 
   for (const item of stockItems) {
     const prod = locked.get(item.productId!);
     if (!prod || prod.isService) continue;
 
-    const [updated] = await tx
-      .update(products)
-      .set({
-        stock: sql`${products.stock} - ${item.quantity}`,
-        reservedStock: sql`${products.reservedStock} - ${item.quantity}`,
-        soldCount: sql`${products.soldCount} + ${item.quantity}`,
-        updatedAt: new Date(),
-      })
-      .where(
-        and(
+    const itemAllocations = allocations.filter((allocation) => allocation.orderItemId === item.id && allocation.status === "reserved");
+    // Legacy orders created before allocation tracking are treated exactly as before.
+    const localQuantity = itemAllocations.length === 0
+      ? item.quantity
+      : itemAllocations.filter((allocation) => allocation.allocationType === "local").reduce((sum, allocation) => sum + allocation.quantity, 0);
+
+    if (localQuantity > 0) {
+      const [updated] = await tx
+        .update(products)
+        .set({
+          stock: sql`${products.stock} - ${localQuantity}`,
+          reservedStock: sql`${products.reservedStock} - ${localQuantity}`,
+          updatedAt: new Date(),
+        })
+        .where(and(
           eq(products.id, item.productId!),
-          sql`${products.stock} >= ${item.quantity}`,
-          sql`${products.reservedStock} >= ${item.quantity}`
-        )
-      )
-      .returning();
+          sql`${products.stock} >= ${localQuantity}`,
+          sql`${products.reservedStock} >= ${localQuantity}`
+        ))
+        .returning();
+      if (!updated) throw new Error("VALIDATION:INVENTORY_INCONSISTENCY — stock ou reserva local insuficiente para confirmação");
 
-    if (!updated) throw new Error("VALIDATION:INVENTORY_INCONSISTENCY — stock ou reserva insuficiente para confirmação");
+      await tx.insert(stockMovements).values({
+        productId: item.productId!, type: "sale", quantity: -localQuantity,
+        stockBefore: prod.stock, stockAfter: prod.stock - localQuantity,
+        reservedBefore: prod.reservedStock, reservedAfter: prod.reservedStock - localQuantity,
+        reason: `Pagamento confirmado #${order.orderNumber}`,
+        referenceType: "order", referenceId: orderId, userId: actorId,
+      });
+    }
 
-    await tx.insert(stockMovements).values({
-      productId: item.productId!,
-      type: "sale",
-      quantity: -item.quantity,
-      // Locked values (M1): the audit trail must reflect the state the
-      // invariant was actually evaluated against.
-      stockBefore: prod.stock,
-      stockAfter: prod.stock - item.quantity,
-      reservedBefore: prod.reservedStock,
-      reservedAfter: prod.reservedStock - item.quantity,
-      reason: `Pagamento confirmado #${order.orderNumber}`,
-      referenceType: "order",
-      referenceId: orderId,
-      userId: actorId,
-    });
+    // soldCount represents units sold, independently of whether they came from
+    // local physical stock or an external supplier.
+    await tx.update(products).set({
+      soldCount: sql`${products.soldCount} + ${item.quantity}`,
+      updatedAt: new Date(),
+    }).where(eq(products.id, item.productId!));
+  }
+
+  if (allocations.length > 0) {
+    await tx.update(orderItemStockAllocations).set({ status: "committed", updatedAt: new Date() })
+      .where(and(
+        inArray(orderItemStockAllocations.orderItemId, stockItems.map((item) => item.id)),
+        eq(orderItemStockAllocations.status, "reserved")
+      ));
   }
 
   await tx.insert(orderStatusHistory).values({
@@ -392,6 +408,10 @@ export async function confirmOrderPayment(
       await dispatchEmailNotification(result.notificationId);
     }
 
+    if (result.changed) {
+      await runPostPaymentEffects({ orderId, actorId, source: options.source ?? "manual" });
+    }
+
     return { success: true, changed: result.changed };
   } catch (e) {
     return { success: false, changed: false, error: (e instanceof Error ? e.message : "Erro").replace("VALIDATION:", "") };
@@ -425,6 +445,12 @@ export async function cancelOrder(orderId: number, actorId: number | null, reaso
           await tx.update(coupons).set({ usedCount: sql`${coupons.usedCount} - 1` })
             .where(and(eq(coupons.code, order.couponCode), sql`${coupons.usedCount} > 0`));
         }
+      }
+      else {
+        // Paid/processing/ready-for-pickup cancellations do not restock local
+        // physical inventory (existing behaviour), but must release any
+        // supplier quantity that was still held for this order.
+        await releaseCommittedSupplierReservations(tx as any, orderId, "released");
       }
 
       await tx.update(payments).set({ status: "cancelled", updatedAt: new Date() }).where(and(eq(payments.orderId, orderId), eq(payments.status, "pending")));
@@ -487,23 +513,82 @@ export async function releaseExpiredReservations(): Promise<{ expired: number }>
 async function releaseOrderReservations(tx: any, orderId: number, orderNumber: string, actorId: number | null) {
   const items = await tx.select().from(orderItems).where(eq(orderItems.orderId, orderId));
   const stockItems = items.filter((item: { productId: number | null }) => item.productId);
-
-  // M1 — same deterministic ascending product lock order as the confirmation
-  // and reservation paths, with the before/after values read UNDER the lock.
   const locked = await lockProductsAscending(tx, stockItems.map((item: { productId: number | null }) => item.productId!));
+  await lockActiveProductSuppliersAscending(tx, stockItems.map((item: { productId: number | null }) => item.productId!));
+  const allocations = stockItems.length > 0
+    ? await tx.select().from(orderItemStockAllocations).where(inArray(orderItemStockAllocations.orderItemId, stockItems.map((item: { id: number }) => item.id)))
+    : [];
 
   for (const item of stockItems) {
     const prod = locked.get(item.productId);
     if (!prod || prod.isService) continue;
-    const [updated] = await tx.update(products).set({ reservedStock: sql`${products.reservedStock} - ${item.quantity}`, updatedAt: new Date() })
-      .where(and(eq(products.id, item.productId), sql`${products.reservedStock} >= ${item.quantity}`)).returning();
-    if (!updated) throw new Error("VALIDATION:INVENTORY_INCONSISTENCY — reserva insuficiente para libertação");
-    await tx.insert(stockMovements).values({
-      productId: item.productId, type: "reservation_released", quantity: item.quantity,
-      stockBefore: prod.stock, stockAfter: prod.stock,
-      reservedBefore: prod.reservedStock, reservedAfter: prod.reservedStock - item.quantity,
-      reason: `Libertação #${orderNumber}`, referenceType: "order", referenceId: orderId, userId: actorId,
-    });
+    const itemAllocations = allocations.filter((allocation: typeof orderItemStockAllocations.$inferSelect) => allocation.orderItemId === item.id && allocation.status === "reserved");
+    const localQuantity = itemAllocations.length === 0
+      ? item.quantity
+      : itemAllocations.filter((allocation: typeof orderItemStockAllocations.$inferSelect) => allocation.allocationType === "local").reduce((sum: number, allocation: typeof orderItemStockAllocations.$inferSelect) => sum + allocation.quantity, 0);
+
+    if (localQuantity > 0) {
+      const [updated] = await tx.update(products).set({ reservedStock: sql`${products.reservedStock} - ${localQuantity}`, updatedAt: new Date() })
+        .where(and(eq(products.id, item.productId), sql`${products.reservedStock} >= ${localQuantity}`)).returning();
+      if (!updated) throw new Error("VALIDATION:INVENTORY_INCONSISTENCY — reserva local insuficiente para libertação");
+      await tx.insert(stockMovements).values({
+        productId: item.productId, type: "reservation_released", quantity: localQuantity,
+        stockBefore: prod.stock, stockAfter: prod.stock,
+        reservedBefore: prod.reservedStock, reservedAfter: prod.reservedStock - localQuantity,
+        reason: `Libertação #${orderNumber}`, referenceType: "order", referenceId: orderId, userId: actorId,
+      });
+    }
+  }
+
+  for (const allocation of allocations.filter((row: typeof orderItemStockAllocations.$inferSelect) => row.allocationType === "supplier" && row.status === "reserved")) {
+    if (allocation.productSupplierId == null) throw new Error("VALIDATION:INVENTORY_INCONSISTENCY — alocação de fornecedor sem fornecedor");
+    const [updated] = await tx.update(productSuppliers).set({
+      supplierReservedStock: sql`${productSuppliers.supplierReservedStock} - ${allocation.quantity}`,
+      updatedAt: new Date(),
+    }).where(and(
+      eq(productSuppliers.id, allocation.productSupplierId),
+      sql`${productSuppliers.supplierReservedStock} >= ${allocation.quantity}`
+    )).returning({ id: productSuppliers.id });
+    if (!updated) throw new Error("VALIDATION:INVENTORY_INCONSISTENCY — reserva de fornecedor insuficiente para libertação");
+  }
+
+  if (allocations.length > 0) {
+    await tx.update(orderItemStockAllocations).set({ status: "released", updatedAt: new Date() })
+      .where(and(
+        inArray(orderItemStockAllocations.orderItemId, stockItems.map((item: { id: number }) => item.id)),
+        eq(orderItemStockAllocations.status, "reserved")
+      ));
+  }
+}
+
+async function releaseCommittedSupplierReservations(tx: any, orderId: number, finalStatus: "released" | "fulfilled") {
+  const items = await tx.select({ id: orderItems.id, productId: orderItems.productId }).from(orderItems).where(eq(orderItems.orderId, orderId));
+  const itemIds = items.map((item: { id: number }) => item.id);
+  if (itemIds.length === 0) return;
+
+  await lockProductsAscending(tx, items.flatMap((item: { productId: number | null }) => item.productId ? [item.productId] : []));
+  await lockActiveProductSuppliersAscending(tx, items.flatMap((item: { productId: number | null }) => item.productId ? [item.productId] : []));
+  const allocations = await tx.select().from(orderItemStockAllocations).where(and(
+    inArray(orderItemStockAllocations.orderItemId, itemIds),
+    eq(orderItemStockAllocations.allocationType, "supplier"),
+    eq(orderItemStockAllocations.status, "committed")
+  ));
+
+  for (const allocation of allocations) {
+    if (allocation.productSupplierId == null) throw new Error("VALIDATION:INVENTORY_INCONSISTENCY — alocação de fornecedor sem fornecedor");
+    const [updated] = await tx.update(productSuppliers).set({
+      supplierReservedStock: sql`${productSuppliers.supplierReservedStock} - ${allocation.quantity}`,
+      updatedAt: new Date(),
+    }).where(and(
+      eq(productSuppliers.id, allocation.productSupplierId),
+      sql`${productSuppliers.supplierReservedStock} >= ${allocation.quantity}`
+    )).returning({ id: productSuppliers.id });
+    if (!updated) throw new Error("VALIDATION:INVENTORY_INCONSISTENCY — reserva de fornecedor insuficiente");
+  }
+
+  if (allocations.length > 0) {
+    await tx.update(orderItemStockAllocations).set({ status: finalStatus, updatedAt: new Date() })
+      .where(inArray(orderItemStockAllocations.id, allocations.map((allocation: { id: number }) => allocation.id)));
   }
 }
 
@@ -530,6 +615,10 @@ export async function transitionOrderStatus(orderId: number, newStatus: string, 
       }
       if (newStatus === "shipped" && order.deliveryType !== "shipping") {
         throw new Error(`VALIDATION:Transição inválida para tipo de entrega ${order.deliveryType}: apenas encomendas com envio ao domicílio podem ser expedidas`);
+      }
+
+      if (newStatus === "delivered") {
+        await releaseCommittedSupplierReservations(tx as any, orderId, "fulfilled");
       }
 
       await tx.update(orders).set({ status: newStatus, updatedAt: new Date() }).where(eq(orders.id, orderId));

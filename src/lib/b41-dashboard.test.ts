@@ -175,17 +175,26 @@ describe("B.4.1 dashboard read model", () => {
     expect(d.kpis.outOfStockProducts).toBeGreaterThanOrEqual(1);
     expect(d.kpis.lowStockProducts).toBeGreaterThanOrEqual(1);
 
-    // Low-stock list includes the out-of-stock + low items, worst first.
+    // The list is a global Top 10 of the most critical products.
+    // Other pre-existing products may legitimately displace products
+    // created by this test, so membership of "-low" is not guaranteed.
     const skus = d.lowStockProducts.map((p) => p.sku);
-    expect(skus.some((s) => s?.endsWith("-oos"))).toBe(true);
-    expect(skus.some((s) => s?.endsWith("-low"))).toBe(true);
+
+    expect(d.lowStockProducts.length).toBeLessThanOrEqual(10);
+
     // Services and inactive products never appear.
     expect(skus.some((s) => s?.endsWith("-svc"))).toBe(false);
     expect(skus.some((s) => s?.endsWith("-inactive-oos"))).toBe(false);
-    // Sorted ascending by stock.
-    const stocks = d.lowStockProducts.map((p) => p.stock);
-    const sorted = [...stocks].sort((a, b) => a - b);
-    expect(stocks).toEqual(sorted);
+
+    // Every returned product is at or below its configured low-stock threshold.
+    for (const p of d.lowStockProducts) {
+      expect(p.availableStock).toBeLessThanOrEqual(p.minStock);
+    }
+
+    // Sorted ascending by sellable availability (local + active suppliers).
+    const available = d.lowStockProducts.map((p) => Number(p.availableStock));
+    const sorted = [...available].sort((a, b) => a - b);
+    expect(available).toEqual(sorted);
   });
 
   it("counts customers and open RMAs", async () => {

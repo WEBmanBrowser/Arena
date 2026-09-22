@@ -24,8 +24,8 @@
  */
 
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
-import { products } from "@/db/schema";
-import { asc, eq, inArray } from "drizzle-orm";
+import { products, productSuppliers, suppliers } from "@/db/schema";
+import { and, asc, eq, inArray } from "drizzle-orm";
 
 /** Minimal structural type accepted from either `db` or a `tx` handle. */
 export type DbOrTx = NodePgDatabase | Parameters<Parameters<NodePgDatabase["transaction"]>[0]>[0];
@@ -72,4 +72,63 @@ export async function lockProduct(tx: DbOrTx, productId: number): Promise<Produc
     .for("update")
     .limit(1);
   return row ?? null;
+}
+
+
+export type ProductSupplierStockRow = {
+  id: number;
+  productId: number;
+  supplierId: number;
+  supplierStock: number | null;
+  supplierReservedStock: number;
+  leadTimeDays: number | null;
+};
+
+/**
+ * Bloqueia, em ordem determinística, as associações produto-fornecedor ativas
+ * que podem fornecer stock aos produtos indicados.
+ *
+ * A disponibilidade do fornecedor é sempre:
+ * supplierStock - supplierReservedStock
+ *
+ * `isPreferred` não participa nesta seleção: é uma preferência comercial de
+ * custo/preço, não uma preferência de stock.
+ */
+export async function lockActiveProductSuppliersAscending(
+  tx: DbOrTx,
+  productIds: readonly number[]
+): Promise<Map<number, ProductSupplierStockRow[]>> {
+  const unique = [...new Set(productIds.filter((id) => Number.isInteger(id) && id > 0))]
+    .sort((a, b) => a - b);
+
+  const byProduct = new Map<number, ProductSupplierStockRow[]>();
+  if (unique.length === 0) return byProduct;
+
+  const rows = await tx
+    .select({
+      id: productSuppliers.id,
+      productId: productSuppliers.productId,
+      supplierId: productSuppliers.supplierId,
+      supplierStock: productSuppliers.supplierStock,
+      supplierReservedStock: productSuppliers.supplierReservedStock,
+      leadTimeDays: productSuppliers.leadTimeDays,
+    })
+    .from(productSuppliers)
+    .where(and(
+      inArray(productSuppliers.productId, unique),
+      inArray(
+        productSuppliers.supplierId,
+        tx.select({ id: suppliers.id }).from(suppliers).where(eq(suppliers.isActive, true))
+      )
+    ))
+    .orderBy(asc(productSuppliers.id))
+    .for("update");
+
+  for (const row of rows) {
+    const list = byProduct.get(row.productId) ?? [];
+    list.push(row);
+    byProduct.set(row.productId, list);
+  }
+
+  return byProduct;
 }

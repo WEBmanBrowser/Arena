@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/db";
-import { orders, orderItems, products, orderStatusHistory, stockMovements, coupons, payments } from "@/db/schema";
+import { orders, orderItems, products, productSuppliers, orderItemStockAllocations, orderStatusHistory, stockMovements, coupons, payments } from "@/db/schema";
 import { eq, desc, sql, and } from "drizzle-orm";
 import { getCurrentUser } from "@/lib/auth";
 import { generateOrderNumber } from "@/lib/utils";
@@ -8,7 +8,7 @@ import { toCents, toEuros, calcVatFromGross, lineTotal as calcLineTotal, allocat
 import { sendEmail, orderCreatedEmail } from "@/lib/email";
 import { calculateShippingForCart, ShippingRateError } from "@/lib/shipping-rates";
 import { checkRateLimit, clientIp, rateLimitResponse } from "@/lib/rate-limit";
-import { lockProductsAscending } from "@/lib/stock-locks";
+import { lockProductsAscending, lockActiveProductSuppliersAscending } from "@/lib/stock-locks";
 import { checkoutOrderSchema } from "@/lib/checkout-order-schema";
 import { createEupagoPayment } from "@/lib/services/eupago-payment-service";
 
@@ -95,7 +95,13 @@ export async function POST(req: NextRequest) {
     }
 
     const result = await db.transaction(async (tx) => {
-      // ── 1. Validate products ────────────────────────────────
+      // ── 1. Validate products + stock under deterministic locks ──
+      // Lock local product rows first, then supplier-stock rows. Every stock
+      // writer follows this same order to avoid deadlocks and overselling.
+      const requestedProductIds = items.map((item) => item.productId);
+      const lockedProducts = await lockProductsAscending(tx, requestedProductIds);
+      const lockedSuppliers = await lockActiveProductSuppliersAscending(tx, requestedProductIds);
+
       let subtotalCents = 0;
       const orderLines: Array<{
         product: typeof products.$inferSelect;
@@ -109,10 +115,14 @@ export async function POST(req: NextRequest) {
 
       for (const item of items) {
         const { productId, quantity } = item;
-        const [product] = await tx.select().from(products)
-          .where(and(eq(products.id, productId), eq(products.isActive, true))).limit(1);
-        if (!product) throw new Error(`VALIDATION:Produto não encontrado: ${productId}`);
-        const available = product.stock - product.reservedStock;
+        const product = lockedProducts.get(productId);
+        if (!product || !product.isActive) throw new Error(`VALIDATION:Produto não encontrado: ${productId}`);
+        const localAvailable = Math.max(0, product.stock - product.reservedStock);
+        const supplierAvailable = (lockedSuppliers.get(productId) ?? []).reduce(
+          (sum, row) => sum + Math.max(0, (row.supplierStock ?? 0) - row.supplierReservedStock),
+          0
+        );
+        const available = localAvailable + supplierAvailable;
         if (!product.isService && available < quantity) {
           throw new Error(`VALIDATION:Stock insuficiente para ${product.name}. Disponível: ${available}`);
         }
@@ -218,12 +228,7 @@ export async function POST(req: NextRequest) {
 
       // ── 6. Create order items with full financial snapshot ──
       //
-      // M1 — deterministic lock order: every product row this order touches is
-      // locked in ascending id order BEFORE the reservation loop, so concurrent
-      // checkouts touching the same products can never deadlock each other (nor
-      // deadlock against the payment-confirmation / release paths, which use the
-      // same helper). Behaviour is otherwise unchanged.
-      const lockedProducts = await lockProductsAscending(tx, orderLines.map((line) => line.product.id));
+      // Product and supplier rows were already locked during validation above.
 
       for (let i = 0; i < orderLines.length; i++) {
         const line = orderLines[i];
@@ -231,7 +236,7 @@ export async function POST(req: NextRequest) {
         const effectiveGross = line.lineTotalCents - lineDisc;
         const { netCents, vatCents } = calcVatFromGross(effectiveGross, line.vatRate);
 
-        await tx.insert(orderItems).values({
+        const [orderItem] = await tx.insert(orderItems).values({
           orderId: order.id,
           productId: line.product.id,
           productName: line.product.name,
@@ -243,28 +248,66 @@ export async function POST(req: NextRequest) {
           vatAmount: toEuros(vatCents),
           discountAmount: toEuros(lineDisc),
           lineTotalGross: toEuros(effectiveGross),
-        });
+        }).returning({ id: orderItems.id });
 
-        // Reserve stock
         if (!line.product.isService) {
-          const [updated] = await tx.update(products).set({
-            reservedStock: sql`${products.reservedStock} + ${line.quantity}`,
-            updatedAt: new Date(),
-          }).where(and(
-            eq(products.id, line.product.id),
-            sql`${products.stock} - ${products.reservedStock} >= ${line.quantity}`
-          )).returning();
-          if (!updated) throw new Error(`VALIDATION:Stock insuficiente para ${line.product.name} (concorrência)`);
+          const lockedProduct = lockedProducts.get(line.product.id)!;
+          const localAvailable = Math.max(0, lockedProduct.stock - lockedProduct.reservedStock);
+          const localQuantity = Math.min(line.quantity, localAvailable);
+          let remaining = line.quantity - localQuantity;
 
-          // M1 — before/after values come from the LOCKED row, so the audit
-          // trail matches the state the availability invariant was evaluated on.
-          const lockedProduct = lockedProducts.get(line.product.id) ?? line.product;
-          await tx.insert(stockMovements).values({
-            productId: line.product.id, type: "reservation_created", quantity: line.quantity,
-            stockBefore: lockedProduct.stock, stockAfter: lockedProduct.stock,
-            reservedBefore: lockedProduct.reservedStock, reservedAfter: lockedProduct.reservedStock + line.quantity,
-            reason: `Reserva #${orderNumber}`, referenceType: "order", referenceId: order.id, userId: user?.id ?? null,
-          });
+          if (localQuantity > 0) {
+            const [updated] = await tx.update(products).set({
+              reservedStock: sql`${products.reservedStock} + ${localQuantity}`,
+              updatedAt: new Date(),
+            }).where(and(
+              eq(products.id, line.product.id),
+              sql`${products.stock} - ${products.reservedStock} >= ${localQuantity}`
+            )).returning();
+            if (!updated) throw new Error(`VALIDATION:Stock local insuficiente para ${line.product.name} (concorrência)`);
+
+            await tx.insert(orderItemStockAllocations).values({
+              orderItemId: orderItem.id,
+              allocationType: "local",
+              productSupplierId: null,
+              quantity: localQuantity,
+              status: "reserved",
+            });
+
+            await tx.insert(stockMovements).values({
+              productId: line.product.id, type: "reservation_created", quantity: localQuantity,
+              stockBefore: lockedProduct.stock, stockAfter: lockedProduct.stock,
+              reservedBefore: lockedProduct.reservedStock, reservedAfter: lockedProduct.reservedStock + localQuantity,
+              reason: `Reserva #${orderNumber}`, referenceType: "order", referenceId: order.id, userId: user?.id ?? null,
+            });
+          }
+
+          for (const supplierRow of lockedSuppliers.get(line.product.id) ?? []) {
+            if (remaining <= 0) break;
+            const supplierAvailable = Math.max(0, (supplierRow.supplierStock ?? 0) - supplierRow.supplierReservedStock);
+            const supplierQuantity = Math.min(remaining, supplierAvailable);
+            if (supplierQuantity <= 0) continue;
+
+            const [updated] = await tx.update(productSuppliers).set({
+              supplierReservedStock: sql`${productSuppliers.supplierReservedStock} + ${supplierQuantity}`,
+              updatedAt: new Date(),
+            }).where(and(
+              eq(productSuppliers.id, supplierRow.id),
+              sql`coalesce(${productSuppliers.supplierStock}, 0) - ${productSuppliers.supplierReservedStock} >= ${supplierQuantity}`
+            )).returning({ id: productSuppliers.id });
+            if (!updated) throw new Error(`VALIDATION:Stock de fornecedor insuficiente para ${line.product.name} (concorrência)`);
+
+            await tx.insert(orderItemStockAllocations).values({
+              orderItemId: orderItem.id,
+              allocationType: "supplier",
+              productSupplierId: supplierRow.id,
+              quantity: supplierQuantity,
+              status: "reserved",
+            });
+            remaining -= supplierQuantity;
+          }
+
+          if (remaining > 0) throw new Error(`VALIDATION:Stock insuficiente para ${line.product.name} (concorrência)`);
         }
       }
 

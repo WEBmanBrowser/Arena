@@ -22,7 +22,7 @@ import {
 } from "./config";
 
 const FAKE_KEY = "test-fake-wintouch-key-0000-DO-NOT-USE";
-const BASE = "https://tenant.example.com/api";
+const BASE = "https://tenant.example.com";
 
 function testConfig(): WintouchConfig {
   return { baseUrl: BASE, apiKey: FAKE_KEY };
@@ -54,7 +54,7 @@ describe("C.4 — wintouch config: fail-closed resolution", () => {
       WINTOUCH_API_KEY: FAKE_KEY,
     });
     // Trailing slashes are stripped during normalization.
-    expect(config).toEqual({ baseUrl: BASE, apiKey: FAKE_KEY });
+    expect(config).toEqual({ baseUrl: `${BASE}/api`, apiKey: FAKE_KEY });
   });
 
   it("throws when the base URL is missing", () => {
@@ -102,8 +102,8 @@ describe("C.4 — wintouch config: fail-closed resolution", () => {
 
 describe("C.4 — wintouch config: base URL validation (SSRF safety)", () => {
   it("accepts https origins with a path prefix", () => {
-    expect(normalizeBaseUrl("https://tenant.example.com/api")).toBe(BASE);
-    expect(normalizeBaseUrl("https://tenant.example.com/api///")).toBe(BASE);
+    expect(normalizeBaseUrl("https://tenant.example.com/api")).toBe(`${BASE}/api`);
+    expect(normalizeBaseUrl("https://tenant.example.com/api///")).toBe(`${BASE}/api`);
     expect(normalizeBaseUrl("https://host.example:8443/deep/prefix")).toBe("https://host.example:8443/deep/prefix");
   });
 
@@ -141,10 +141,10 @@ describe("C.4 — wintouch config: base URL validation (SSRF safety)", () => {
 describe("C.4 — wintouch config: endpoint allowlist", () => {
   it("builds allowlisted absolute URLs", () => {
     const config = testConfig();
-    expect(wintouchUrl(config, "documentTypes")).toBe(`${BASE}/Document_Types`);
-    expect(wintouchUrl(config, "paymentMethods")).toBe(`${BASE}/payment_methods`);
-    expect(wintouchUrl(config, "entities")).toBe(`${BASE}/entities`);
-    expect(wintouchUrl(config, "productDocuments")).toBe(`${BASE}/product_documents`);
+    expect(wintouchUrl(config, "documentTypes")).toBe(`${BASE}/api/v1/document_types`);
+    expect(wintouchUrl(config, "paymentMethods")).toBe(`${BASE}/api/v1/payment_methods`);
+    expect(wintouchUrl(config, "entities")).toBe(`${BASE}/api/v1/entities`);
+    expect(wintouchUrl(config, "productDocuments")).toBe(`${BASE}/api/v1/product_documents`);
   });
 
   it("rejects non-allowlisted endpoints at runtime", () => {
@@ -165,9 +165,10 @@ describe("C.4 — wintouch transport: auth header and request shape", () => {
 
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     const [{ url, init }] = seen as Array<{ url: string; init: { headers: Record<string, string> } }>;
-    expect(url).toBe(`${BASE}/entities`);
+    expect(url).toBe(`${BASE}/api/v1/entities`);
     expect(url).not.toContain(FAKE_KEY);
     expect(init.headers["Authorization"]).toBe(`ApiKey ${FAKE_KEY}`);
+    expect(init.headers["Accept-Language"]).toBe("pt-PT");
     expect(init.headers["Accept"]).toBe("application/json");
     expect(init.headers["Content-Type"]).toBeUndefined();
   });
@@ -198,7 +199,7 @@ describe("C.4 — wintouch transport: auth header and request shape", () => {
         return jsonResponse(200, []);
       }) as typeof fetch,
     });
-    expect(capturedUrl).toBe(`${BASE}/entities?code=A+B&top=10`);
+    expect(capturedUrl).toBe(`${BASE}/api/v1/entities?code=A+B&top=10`);
   });
 
   it("exposes the default timeout", () => {
@@ -277,5 +278,146 @@ describe("C.4 — wintouch transport: status mapping (definitive vs ambiguous)",
       })) as typeof fetch;
     const res = await wintouchRequest({ ...baseOptions(), timeoutMs: 5, fetchImpl: hanging });
     expect(res).toEqual({ kind: "ambiguous", reason: "timeout" });
+  });
+});
+
+describe("WINTOUCH entity VAT transport safety", () => {
+  it("builds the allowlisted by_vat entity lookup", async () => {
+    let requestedUrl = "";
+
+    const fetchImpl: typeof fetch = async (
+      input,
+      init,
+    ) => {
+      requestedUrl = String(input);
+
+      expect(init?.method).toBe("GET");
+
+      return new Response(
+        JSON.stringify({
+          ID: "11111111-1111-4111-8111-111111111111",
+          VATNumber: "123456789",
+        }),
+        {
+          status: 200,
+          headers: {
+            "Content-Type": "application/json",
+          },
+        },
+      );
+    };
+
+    const config = {
+      baseUrl: "https://api.example.test",
+      apiKey: "secret-test-key",
+    };
+
+    const result = await wintouchRequest({
+      config,
+      endpoint: "entities",
+      method: "GET",
+      entityVatNumber: "123456789",
+      enterpriseId:
+        "22222222-2222-4222-8222-222222222222",
+      fetchImpl,
+    });
+
+    expect(result.kind).toBe("ok");
+
+    expect(requestedUrl).toBe(
+      "https://api.example.test/api/v1/entities/by_vat/123456789",
+    );
+  });
+
+  it("rejects malformed VAT lookup before transport", async () => {
+    let called = false;
+
+    const fetchImpl: typeof fetch = async () => {
+      called = true;
+
+      return new Response(
+        JSON.stringify({}),
+        { status: 200 },
+      );
+    };
+
+    const config = {
+      baseUrl: "https://api.example.test",
+      apiKey: "secret-test-key",
+    };
+
+    await expect(
+      wintouchRequest({
+        config,
+        endpoint: "entities",
+        method: "GET",
+        entityVatNumber: "../123",
+        fetchImpl,
+      }),
+    ).rejects.toBeDefined();
+
+    expect(called).toBe(false);
+  });
+
+  it("does not allow by_vat on another endpoint", async () => {
+    let called = false;
+
+    const fetchImpl: typeof fetch = async () => {
+      called = true;
+
+      return new Response(
+        JSON.stringify({}),
+        { status: 200 },
+      );
+    };
+
+    const config = {
+      baseUrl: "https://api.example.test",
+      apiKey: "secret-test-key",
+    };
+
+    await expect(
+      wintouchRequest({
+        config,
+        endpoint: "productDocuments",
+        method: "GET",
+        entityVatNumber: "123456789",
+        fetchImpl,
+      }),
+    ).rejects.toBeDefined();
+
+    expect(called).toBe(false);
+  });
+
+  it("does not allow resourceId and VAT lookup together", async () => {
+    let called = false;
+
+    const fetchImpl: typeof fetch = async () => {
+      called = true;
+
+      return new Response(
+        JSON.stringify({}),
+        { status: 200 },
+      );
+    };
+
+    const config = {
+      baseUrl: "https://api.example.test",
+      apiKey: "secret-test-key",
+    };
+
+    await expect(
+      wintouchRequest({
+        config,
+        endpoint: "entities",
+        method: "GET",
+        resourceId:
+          "11111111-1111-4111-8111-111111111111",
+        entityVatNumber: "123456789",
+        fetchImpl,
+      }),
+    ).rejects.toBeDefined();
+
+    expect(called).toBe(false);
   });
 });

@@ -36,6 +36,8 @@ type PreviewLine = {
   costBefore: string | null;
   stock: number | null;
   stockBefore: number | null;
+  supplierStock?: number | null;
+  supplierStockBefore?: number | null;
   productId: number | null;
   productSku: string | null;
   productName: string | null;
@@ -751,10 +753,10 @@ export default function SupplierImportPanel({ openImportId = null }: { openImpor
                       )}
                     </td>
                     <td className="p-2">
-                      {l.stock ?? "—"}
-                      {l.stockBefore !== null && l.stockBefore !== l.stock && (
-                        <span className="text-slate-400"> ← {l.stockBefore}</span>
-                      )}
+                      {preview.format === "also_stock" ? (l.supplierStock ?? "—") : (l.stock ?? "—")}
+                      {preview.format === "also_stock"
+                        ? (l.supplierStockBefore != null && l.supplierStockBefore !== l.supplierStock && <span className="text-slate-400"> ← {l.supplierStockBefore}</span>)
+                        : (l.stockBefore !== null && l.stockBefore !== l.stock && <span className="text-slate-400"> ← {l.stockBefore}</span>)}
                     </td>
                     <td className="p-2 whitespace-nowrap">
                       {eur(l.currentPrice)}

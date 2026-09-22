@@ -1,11 +1,11 @@
 /**
  * B.3.1 — Invoice provider contract + fiscal document reference persistence.
  *
- * XD Software ("xd") is the future fiscal document provider. This shop does
+ * WINTOUCH Cloud ("wintouch") is the fiscal document provider. This shop does
  * NOT issue certified Portuguese fiscal documents itself: the rows stored here
- * are synchronization/reference metadata for documents issued by XD.
+ * are synchronization/reference metadata for documents issued by WINTOUCH.
  *
- * NO live XD calls, NO invented endpoints, NO invented payload formats.
+ * Provider calls are isolated behind the adapter; fiscal references remain immutable.
  *
  * FISCAL SAFETY: there is deliberately no delete/destroy function for issued
  * documents. An issued fiscal reference can only be superseded (credit note)
@@ -38,18 +38,50 @@ export function isInvoiceDocumentStatus(value: string): value is InvoiceDocument
 
 export interface InvoiceLineInput {
   description: string;
+  sku?: string | null;
   quantity: number;
   /** Integer cents, EUR. */
   unitPriceCents: number;
   vatRate: string;
 }
 
+export type WintouchFiscalDocumentKind =
+  | "invoice"
+  | "simplified_invoice"
+  | "invoice_receipt";
+
 export interface CreateInvoiceRequest {
   orderId: number;
   documentType: InvoiceDocumentType;
+
+  /**
+   * Fiscal document actually requested from WINTOUCH.
+   *
+   * invoice            = FT
+   * simplified_invoice = FS
+   * invoice_receipt    = FATREC (Fatura/Recibo)
+   */
+  fiscalDocumentKind?: WintouchFiscalDocumentKind;
+
+  /**
+   * Original checkout payment method.
+   * WINTOUCH mapping is resolved server-side and fails closed.
+   */
+  paymentMethod?: string | null;
+
   lines: InvoiceLineInput[];
   customerName: string;
   customerNif?: string | null;
+  /**
+   * Provider-side WINTOUCH entity resolved before fiscal creation.
+   * Never inferred by the adapter and never substituted with another client.
+   */
+  customerProviderEntityId?: string | null;
+  customerEmail?: string | null;
+  billingAddress?: { address1?: string | null; address2?: string | null; postalCode?: string | null; city?: string | null; country?: string | null } | null;
+  externalReference?: string | null;
+  /** Exact order total expected to be represented by the fiscal payload. */
+  expectedTotalCents?: number;
 }
 
 export interface InvoiceProviderResult {
@@ -61,7 +93,7 @@ export interface InvoiceProviderResult {
   documentReference?: string | null;
 }
 
-/** Contract every future invoice adapter (XD, …) implements. */
+/** Contract implemented by fiscal document adapters. */
 export interface InvoiceProviderAdapter {
   readonly provider: InvoiceProviderId;
   createInvoice(request: CreateInvoiceRequest): Promise<InvoiceProviderResult>;

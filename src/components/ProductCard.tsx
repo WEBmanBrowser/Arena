@@ -12,6 +12,9 @@ interface Product {
   primaryImageUrl?: string | null;
   stock: number;
   availableStock?: number;
+  localAvailableStock?: number;
+  supplierAvailableStock?: number;
+  stockSource?: "service" | "local" | "supplier" | "none";
   allowPreorder?: boolean;
   isService?: boolean;
   attributes?: Record<string, string> | null;
@@ -23,6 +26,9 @@ export default function ProductCard({ product }: { product: Product }) {
   const comparePrice = product.comparePrice ? parseFloat(product.comparePrice) : null;
   const discount = comparePrice ? Math.round((1 - price / comparePrice) * 100) : 0;
   const available = product.availableStock ?? product.stock;
+  const localAvailable = product.localAvailableStock ?? product.stock;
+  const supplierAvailable = product.supplierAvailableStock ?? 0;
+  const supplierOnly = !product.isService && localAvailable <= 0 && supplierAvailable > 0;
   const inStock = available > 0 || product.isService;
 
   // Image priority: primaryImageUrl → legacy images[0] → emoji placeholder
@@ -67,7 +73,13 @@ export default function ProductCard({ product }: { product: Product }) {
           </div>
           <div className="flex items-center justify-between">
             <span className={`text-xs font-medium ${inStock ? "text-green-600" : "text-red-500"}`}>
-              {inStock ? (product.isService ? "Disponível" : (available <= 5 ? `Últimas ${available} un.` : "Em stock")) : "Esgotado"}
+              {product.isService
+                ? "Disponível"
+                : supplierOnly
+                  ? "Disponível no fornecedor · Entrega estimada em 2 dias úteis"
+                  : inStock
+                    ? (localAvailable <= 5 ? `Últimas ${localAvailable} un.` : "Em stock")
+                    : "Esgotado"}
             </span>
             {product.storeStock && product.storeStock > 0 ? (
               <span className="text-[10px] text-slate-400">📍 Loja</span>

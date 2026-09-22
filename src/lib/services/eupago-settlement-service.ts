@@ -57,6 +57,7 @@ import {
 } from "@/lib/services/financial-anomalies";
 import { dispatchEmailNotification } from "@/lib/email-outbox";
 import { assertEupagoLedgerReady } from "@/lib/services/eupago-ledger-service";
+import { runPostPaymentEffects } from "@/lib/services/post-payment-coordinator";
 import type { DbOrTx } from "@/lib/stock-locks";
 
 export type SettlementOutcome =
@@ -140,6 +141,8 @@ interface SettlementStepResult {
   readonly code?: string;
   /** Outbox row to dispatch AFTER the transaction commits. */
   readonly notificationId?: number | null;
+  /** Paid order whose post-commit effects must run; INTERNAL only. */
+  readonly postCommitOrderId?: number | null;
   /**
    * F-1 (Cycle 4) — INTERNAL marker, never part of `ProcessWebhookResult`.
    *
@@ -477,6 +480,10 @@ async function findCandidateAttemptTx(tx: DbOrTx, event: NormalizedEupagoEvent) 
     // ── POST-COMMIT ONLY (no HTTP inside the transaction) ──
     if (committed.notificationId != null) {
       await dispatchEmailNotification(committed.notificationId);
+    }
+
+    if (committed.postCommitOrderId != null) {
+      await runPostPaymentEffects({ orderId: committed.postCommitOrderId, actorId: null, source: "provider_webhook" });
     }
 
     return { outcome: committed.outcome, code: committed.code, trid: event.trid };
@@ -991,7 +998,11 @@ async function settlePaymentEvent(tx: DbOrTx, event: NormalizedEupagoEvent): Pro
     },
   });
 
-  return { outcome: "payment_confirmed", notificationId: confirmation.notificationId };
+  return {
+    outcome: "payment_confirmed",
+    notificationId: confirmation.notificationId,
+    postCommitOrderId: confirmation.changed ? claimedAttempt.orderId : null,
+  };
 }
 
 /**

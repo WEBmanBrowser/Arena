@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/db";
 import { products, categories, brands } from "@/db/schema";
+import { getSupplierAvailabilityByProductIds } from "@/lib/supplier-stock";
 import { eq, and, ilike, gte, lte, desc, asc, sql, or } from "drizzle-orm";
 import { publicProductListSelect, getPrimaryImageUrls, sanitizeForPublic } from "@/lib/public-products";
 import { getCategoryAndDescendantIds } from "@/lib/category-descendants";
@@ -50,7 +51,16 @@ export async function GET(req: NextRequest) {
     if (maxPrice) conditions.push(lte(products.price, maxPrice));
     if (featured === "true") conditions.push(eq(products.isFeatured, true));
     if (service === "true") conditions.push(eq(products.isService, true));
-    if (inStock === "true") conditions.push(sql`${products.stock} - ${products.reservedStock} > 0`);
+    if (inStock === "true") conditions.push(sql`(
+      ${products.stock} - ${products.reservedStock} > 0
+      OR EXISTS (
+        SELECT 1 FROM product_suppliers ps
+        JOIN suppliers s ON s.id = ps.supplier_id
+        WHERE ps.product_id = ${products.id}
+          AND s.is_active = true
+          AND greatest(coalesce(ps.supplier_stock, 0) - ps.supplier_reserved_stock, 0) > 0
+      )
+    )`);
 
     let orderBy;
     switch (sort) {
@@ -71,11 +81,24 @@ export async function GET(req: NextRequest) {
       .offset(offset);
 
     // Batch-load primary images (no N+1) + sanitize (remove reservedStock, add availableStock)
-    const imgMap = await getPrimaryImageUrls(items.map(i => i.id));
-    const enriched = items.map(i => ({
-      ...sanitizeForPublic(i),
-      primaryImageUrl: imgMap[i.id] || i.images?.[0] || null,
-    }));
+    const productIds = items.map(i => i.id);
+    const [imgMap, supplierAvailability] = await Promise.all([
+      getPrimaryImageUrls(productIds),
+      getSupplierAvailabilityByProductIds(db, productIds),
+    ]);
+    const enriched = items.map(i => {
+      const base = sanitizeForPublic(i);
+      const localAvailableStock = Math.max(0, i.stock - i.reservedStock);
+      const supplierAvailableStock = supplierAvailability.get(i.id) ?? 0;
+      return {
+        ...base,
+        localAvailableStock,
+        supplierAvailableStock,
+        availableStock: i.isService ? 999 : localAvailableStock + supplierAvailableStock,
+        stockSource: i.isService ? "service" : localAvailableStock > 0 ? "local" : supplierAvailableStock > 0 ? "supplier" : "none",
+        primaryImageUrl: imgMap[i.id] || i.images?.[0] || null,
+      };
+    });
 
     return NextResponse.json({ products: enriched, total, page, pages: Math.ceil(total / limit) });
   } catch (e) {
