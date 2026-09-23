@@ -160,7 +160,7 @@ export default function ProdutosClient() {
           </div>
 
           {loading ? (
-            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
+            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-5 gap-3">
               {Array.from({ length: 8 }).map((_, i) => (
                 <div key={i} className="bg-white rounded-xl border border-slate-200 animate-pulse">
                   <div className="aspect-square bg-slate-100"></div>
@@ -179,7 +179,7 @@ export default function ProdutosClient() {
             </div>
           ) : (
             <>
-              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
+              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-5 gap-3">
                 {products.map((p: any) => (
                   <ProductCard key={p.id} product={p} />
                 ))}

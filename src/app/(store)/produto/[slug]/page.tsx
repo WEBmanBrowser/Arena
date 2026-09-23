@@ -257,6 +257,16 @@ export default function ProdutoPage() {
         </div>
       )}
 
+      {/* GPSR / product safety information */}
+      {!product.isService && (product.gpsrManufacturerName || product.gpsrResponsibleName || product.gpsrSafetyInformation || product.gpsrProductType) && (
+        <div className="mb-12"><h2 className="text-lg font-bold text-slate-800 mb-4">Segurança e conformidade do produto</h2><div className="bg-white rounded-xl border divide-y text-sm">
+          {product.gpsrProductType && <div className="p-4"><p className="text-xs font-semibold uppercase text-slate-500 mb-1">Identificação</p><p className="text-slate-700">{product.gpsrProductType}{product.ean ? ` · EAN ${product.ean}` : product.sku ? ` · SKU ${product.sku}` : ""}</p></div>}
+          {product.gpsrManufacturerName && <div className="p-4"><p className="text-xs font-semibold uppercase text-slate-500 mb-1">Fabricante</p><p className="font-medium text-slate-800">{product.gpsrManufacturerName}</p>{product.gpsrManufacturerAddress && <p className="text-slate-600 whitespace-pre-line">{product.gpsrManufacturerAddress}</p>}{product.gpsrManufacturerEmail && <p><a className="text-sky-600 hover:underline" href={`mailto:${product.gpsrManufacturerEmail}`}>{product.gpsrManufacturerEmail}</a></p>}</div>}
+          {product.gpsrResponsibleName && <div className="p-4"><p className="text-xs font-semibold uppercase text-slate-500 mb-1">Pessoa responsável na UE</p><p className="font-medium text-slate-800">{product.gpsrResponsibleName}</p>{product.gpsrResponsibleAddress && <p className="text-slate-600 whitespace-pre-line">{product.gpsrResponsibleAddress}</p>}{product.gpsrResponsibleEmail && <p><a className="text-sky-600 hover:underline" href={`mailto:${product.gpsrResponsibleEmail}`}>{product.gpsrResponsibleEmail}</a></p>}</div>}
+          {product.gpsrSafetyInformation && <div className="p-4"><p className="text-xs font-semibold uppercase text-slate-500 mb-1">Avisos e informação de segurança</p><p className="text-slate-700 whitespace-pre-line">{product.gpsrSafetyInformation}</p></div>}
+        </div></div>
+      )}
+
       {/* Related */}
       {related.length > 0 && (
         <div className="mb-12">

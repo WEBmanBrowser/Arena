@@ -50,8 +50,8 @@ export default function ProductCard({ product }: { product: Product }) {
   };
 
   return (
-    <Link href={`/produto/${product.slug}`} className="group bg-white rounded-xl border border-slate-200 hover:border-sky-300 hover:shadow-lg transition-all duration-200 flex flex-col overflow-hidden">
-      <div className="relative aspect-square bg-slate-50 flex items-center justify-center p-4 overflow-hidden">
+    <Link href={`/produto/${product.slug}`} className="group bg-white rounded-lg border border-slate-200 hover:border-sky-300 hover:shadow-md transition-all duration-200 flex flex-col overflow-hidden">
+      <div className="relative h-32 sm:h-36 xl:h-40 bg-slate-50 flex items-center justify-center p-2.5 overflow-hidden">
         {discount > 0 && (
           <span className="absolute top-2 left-2 bg-red-500 text-white text-xs font-bold px-2 py-0.5 rounded z-10">-{discount}%</span>
         )}
@@ -64,11 +64,11 @@ export default function ProductCard({ product }: { product: Product }) {
           </span>
         )}
       </div>
-      <div className="p-4 flex flex-col flex-1">
-        <h3 className="text-sm font-medium text-slate-800 line-clamp-2 mb-2 group-hover:text-sky-600 transition leading-snug">{product.name}</h3>
+      <div className="p-3 flex flex-col flex-1">
+        <h3 className="text-[13px] font-medium text-slate-800 line-clamp-2 mb-1.5 group-hover:text-sky-600 transition leading-snug">{product.name}</h3>
         <div className="mt-auto">
           <div className="flex items-baseline gap-2 mb-2">
-            <span className="text-lg font-bold text-slate-900">{price.toFixed(2)}€</span>
+            <span className="text-base font-bold text-slate-900">{price.toFixed(2)}€</span>
             {comparePrice && <span className="text-sm text-slate-400 line-through">{comparePrice.toFixed(2)}€</span>}
           </div>
           <div className="flex items-center justify-between">
@@ -87,7 +87,7 @@ export default function ProductCard({ product }: { product: Product }) {
           </div>
           {inStock && (
             <button onClick={addToCart}
-              className="w-full mt-3 py-2 bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold rounded-lg transition">
+              className="w-full mt-2 py-1.5 bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold rounded-lg transition">
               Adicionar ao Carrinho
             </button>
           )}

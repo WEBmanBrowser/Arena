@@ -162,6 +162,13 @@
       "when": 1790373600000,
       "tag": "0022_loyalty_checkout_s33_3",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1790460000000,
+      "tag": "0023_gpsr_product_safety_s34",
+      "breakpoints": true
     }
   ]
 }

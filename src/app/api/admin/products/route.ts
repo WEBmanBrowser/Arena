@@ -148,6 +148,10 @@ export async function POST(req: NextRequest) {
       isActive: d.isActive !== false, isFeatured: !!d.isFeatured, isService: !!d.isService, allowPreorder: !!d.allowPreorder,
       shippingClassId,
       metaTitle: d.metaTitle || null, metaDescription: d.metaDescription || null,
+      gpsrProductType: d.gpsrProductType?.trim() || null, gpsrManufacturerName: d.gpsrManufacturerName?.trim() || null,
+      gpsrManufacturerAddress: d.gpsrManufacturerAddress?.trim() || null, gpsrManufacturerEmail: d.gpsrManufacturerEmail?.trim() || null,
+      gpsrResponsibleName: d.gpsrResponsibleName?.trim() || null, gpsrResponsibleAddress: d.gpsrResponsibleAddress?.trim() || null,
+      gpsrResponsibleEmail: d.gpsrResponsibleEmail?.trim() || null, gpsrSafetyInformation: d.gpsrSafetyInformation?.trim() || null,
     }).returning();
 
     await createAuditLog({ userId: user.id, action: "product.created", entity: "product", entityId: product.id, details: { sku: product.sku } });
@@ -229,6 +233,9 @@ export async function PUT(req: NextRequest) {
   if (newShippingClassId !== undefined) updateData.shippingClassId = newShippingClassId;
   if (d.metaTitle !== undefined) updateData.metaTitle = d.metaTitle;
   if (d.metaDescription !== undefined) updateData.metaDescription = d.metaDescription;
+  for (const key of ["gpsrProductType","gpsrManufacturerName","gpsrManufacturerAddress","gpsrManufacturerEmail","gpsrResponsibleName","gpsrResponsibleAddress","gpsrResponsibleEmail","gpsrSafetyInformation"] as const) {
+    if (d[key] !== undefined) updateData[key] = d[key]?.trim() || null;
+  }
   updateData.updatedAt = new Date();
 
   // C.1: a manual price edit implies the operator owns this price from now on,

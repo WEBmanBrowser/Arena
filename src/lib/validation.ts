@@ -71,6 +71,14 @@ export const createProductSchema = z.object({
   shippingClassId: z.number().int().min(1).nullable().optional(),
   metaTitle: z.string().nullable().optional(),
   metaDescription: z.string().nullable().optional(),
+  gpsrProductType: z.string().max(255).nullable().optional(),
+  gpsrManufacturerName: z.string().max(255).nullable().optional(),
+  gpsrManufacturerAddress: z.string().max(2000).nullable().optional(),
+  gpsrManufacturerEmail: z.string().email().max(320).nullable().optional().or(z.literal("")),
+  gpsrResponsibleName: z.string().max(255).nullable().optional(),
+  gpsrResponsibleAddress: z.string().max(2000).nullable().optional(),
+  gpsrResponsibleEmail: z.string().email().max(320).nullable().optional().or(z.literal("")),
+  gpsrSafetyInformation: z.string().max(10000).nullable().optional(),
   slug: z.string().optional(),
 });
 
@@ -96,6 +104,14 @@ export const updateProductSchema = z.object({
   slug: z.string().optional(),
   metaTitle: z.string().nullable().optional(),
   metaDescription: z.string().nullable().optional(),
+  gpsrProductType: z.string().max(255).nullable().optional(),
+  gpsrManufacturerName: z.string().max(255).nullable().optional(),
+  gpsrManufacturerAddress: z.string().max(2000).nullable().optional(),
+  gpsrManufacturerEmail: z.string().email().max(320).nullable().optional().or(z.literal("")),
+  gpsrResponsibleName: z.string().max(255).nullable().optional(),
+  gpsrResponsibleAddress: z.string().max(2000).nullable().optional(),
+  gpsrResponsibleEmail: z.string().email().max(320).nullable().optional().or(z.literal("")),
+  gpsrSafetyInformation: z.string().max(10000).nullable().optional(),
 });
 
 // ─── SUPPLIERS ─────────────────────────────────────────────

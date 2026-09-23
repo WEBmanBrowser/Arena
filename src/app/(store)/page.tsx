@@ -112,7 +112,7 @@ export default async function HomePage() {
               <h2 className="text-xl font-bold text-slate-800">⭐ Destaques</h2>
               <Link href="/produtos?featured=true" className="text-sm text-sky-600 hover:text-sky-700 font-medium">Ver todos →</Link>
             </div>
-            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
+            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3">
               {featuredProducts.map((p) => (
                 <ProductCard key={p.id} product={p as any} />
               ))}
@@ -140,7 +140,7 @@ export default async function HomePage() {
               <h2 className="text-xl font-bold text-slate-800">🆕 Novidades</h2>
               <Link href="/produtos" className="text-sm text-sky-600 hover:text-sky-700 font-medium">Ver todos →</Link>
             </div>
-            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
+            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3">
               {latestProducts.map((p) => (
                 <ProductCard key={p.id} product={p as any} />
               ))}

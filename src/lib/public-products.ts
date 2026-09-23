@@ -31,6 +31,10 @@ export const publicProductSelect = {
   vatRate: products.vatRate,
   metaTitle: products.metaTitle,
   metaDescription: products.metaDescription,
+  gpsrProductType: products.gpsrProductType, gpsrManufacturerName: products.gpsrManufacturerName,
+  gpsrManufacturerAddress: products.gpsrManufacturerAddress, gpsrManufacturerEmail: products.gpsrManufacturerEmail,
+  gpsrResponsibleName: products.gpsrResponsibleName, gpsrResponsibleAddress: products.gpsrResponsibleAddress,
+  gpsrResponsibleEmail: products.gpsrResponsibleEmail, gpsrSafetyInformation: products.gpsrSafetyInformation,
 } as const;
 
 /** List select — fewer fields for performance */

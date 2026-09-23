@@ -10,6 +10,7 @@ const TABS = [
   { id: "precos" as const, label: "Preços", requiresSaved: false },
   { id: "stock" as const, label: "Stock", requiresSaved: false },
   { id: "conteudo" as const, label: "Conteúdo", requiresSaved: false },
+  { id: "gpsr" as const, label: "Segurança / GPSR", requiresSaved: false },
   { id: "imagens" as const, label: "Imagens", requiresSaved: true },
   { id: "fornecedores" as const, label: "Fornecedores", requiresSaved: true },
 ];
@@ -51,7 +52,7 @@ export default function AdminProductsPage() {
   const [editingProduct, setEditingProduct] = useState<any>(null);
   const [showForm, setShowForm] = useState(false);
   const [showBulkPrice, setShowBulkPrice] = useState(false);
-  const [tab, setTab] = useState<"geral" | "precos" | "stock" | "conteudo" | "imagens" | "fornecedores">("geral");
+  const [tab, setTab] = useState<"geral" | "precos" | "stock" | "conteudo" | "gpsr" | "imagens" | "fornecedores">("geral");
   const [saving, setSaving] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [categories, setCategories] = useState<any[]>([]);
@@ -65,6 +66,7 @@ export default function AdminProductsPage() {
     minStock: "0", categoryId: "", brandId: "", shortDescription: "", description: "",
     isActive: true, isFeatured: false, isService: false, allowPreorder: false,
     attributes: "{}", tags: "[]", vatRate: "23.00", shippingClassId: "",
+    gpsrProductType: "", gpsrManufacturerName: "", gpsrManufacturerAddress: "", gpsrManufacturerEmail: "", gpsrResponsibleName: "", gpsrResponsibleAddress: "", gpsrResponsibleEmail: "", gpsrSafetyInformation: "",
   });
 
   /**
@@ -143,13 +145,13 @@ export default function AdminProductsPage() {
 
   const openNew = () => {
     setEditingProduct(null);
-    setForm({ name: "", sku: "", ean: "", price: "", comparePrice: "", costPrice: "", stock: "0", minStock: "0", categoryId: "", brandId: "", shortDescription: "", description: "", isActive: true, isFeatured: false, isService: false, allowPreorder: false, attributes: "{}", tags: "[]", vatRate: "23.00", shippingClassId: "" });
+    setForm({ name: "", sku: "", ean: "", price: "", comparePrice: "", costPrice: "", stock: "0", minStock: "0", categoryId: "", brandId: "", shortDescription: "", description: "", isActive: true, isFeatured: false, isService: false, allowPreorder: false, attributes: "{}", tags: "[]", vatRate: "23.00", shippingClassId: "", gpsrProductType: "", gpsrManufacturerName: "", gpsrManufacturerAddress: "", gpsrManufacturerEmail: "", gpsrResponsibleName: "", gpsrResponsibleAddress: "", gpsrResponsibleEmail: "", gpsrSafetyInformation: "" });
     setShowForm(true); setError(""); setTab("geral");
   };
 
   const openEdit = (p: any) => {
     setEditingProduct(p);
-    setForm({ name: p.name, sku: p.sku || "", ean: p.ean || "", price: p.price, comparePrice: p.comparePrice || "", costPrice: p.costPrice || "", stock: String(p.stock), minStock: String(p.minStock), categoryId: p.categoryId ? String(p.categoryId) : "", brandId: p.brandId ? String(p.brandId) : "", shortDescription: p.shortDescription || "", description: p.description || "", isActive: p.isActive, isFeatured: p.isFeatured, isService: p.isService, allowPreorder: p.allowPreorder, attributes: JSON.stringify(p.attributes || {}), tags: JSON.stringify(p.tags || []), vatRate: p.vatRate || "23.00", shippingClassId: p.shippingClassId ? String(p.shippingClassId) : "" });
+    setForm({ name: p.name, sku: p.sku || "", ean: p.ean || "", price: p.price, comparePrice: p.comparePrice || "", costPrice: p.costPrice || "", stock: String(p.stock), minStock: String(p.minStock), categoryId: p.categoryId ? String(p.categoryId) : "", brandId: p.brandId ? String(p.brandId) : "", shortDescription: p.shortDescription || "", description: p.description || "", isActive: p.isActive, isFeatured: p.isFeatured, isService: p.isService, allowPreorder: p.allowPreorder, attributes: JSON.stringify(p.attributes || {}), tags: JSON.stringify(p.tags || []), vatRate: p.vatRate || "23.00", shippingClassId: p.shippingClassId ? String(p.shippingClassId) : "", gpsrProductType: p.gpsrProductType || "", gpsrManufacturerName: p.gpsrManufacturerName || "", gpsrManufacturerAddress: p.gpsrManufacturerAddress || "", gpsrManufacturerEmail: p.gpsrManufacturerEmail || "", gpsrResponsibleName: p.gpsrResponsibleName || "", gpsrResponsibleAddress: p.gpsrResponsibleAddress || "", gpsrResponsibleEmail: p.gpsrResponsibleEmail || "", gpsrSafetyInformation: p.gpsrSafetyInformation || "" });
     setShowForm(true); setError(""); setTab("geral");
   };
 
@@ -376,6 +378,17 @@ export default function AdminProductsPage() {
                 <div className="space-y-3">
                   <div><label className="text-xs text-slate-500">Descrição curta</label><input value={form.shortDescription} onChange={e => u("shortDescription", e.target.value)} className="w-full border rounded px-3 py-1.5 text-sm" /></div>
                   <div><label className="text-xs text-slate-500">Descrição completa</label><textarea value={form.description} onChange={e => u("description", e.target.value)} className="w-full border rounded px-3 py-1.5 text-sm" rows={10} /></div>
+                </div>
+              )}
+
+              {/* ─── SEGURANÇA / GPSR ─── */}
+              {tab === "gpsr" && (
+                <div className="space-y-5">
+                  <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">Informação pública de segurança/conformidade. Não é preenchida automaticamente a partir do fornecedor.</div>
+                  <div><label className="text-xs text-slate-500">Tipo / identificação do produto</label><input value={form.gpsrProductType} onChange={e => u("gpsrProductType", e.target.value)} className="w-full border rounded px-3 py-1.5 text-sm" placeholder="Ex.: computador portátil, rato sem fios…" /></div>
+                  <div className="border rounded-lg p-4 space-y-3"><h4 className="text-sm font-semibold text-slate-800">Fabricante</h4><input value={form.gpsrManufacturerName} onChange={e => u("gpsrManufacturerName", e.target.value)} className="w-full border rounded px-3 py-1.5 text-sm" placeholder="Nome / denominação comercial / marca registada" /><textarea value={form.gpsrManufacturerAddress} onChange={e => u("gpsrManufacturerAddress", e.target.value)} className="w-full border rounded px-3 py-1.5 text-sm" rows={2} placeholder="Endereço postal" /><input type="email" value={form.gpsrManufacturerEmail} onChange={e => u("gpsrManufacturerEmail", e.target.value)} className="w-full border rounded px-3 py-1.5 text-sm" placeholder="Endereço eletrónico (email)" /></div>
+                  <div className="border rounded-lg p-4 space-y-3"><h4 className="text-sm font-semibold text-slate-800">Pessoa responsável na UE <span className="font-normal text-slate-400">(quando aplicável)</span></h4><input value={form.gpsrResponsibleName} onChange={e => u("gpsrResponsibleName", e.target.value)} className="w-full border rounded px-3 py-1.5 text-sm" placeholder="Nome" /><textarea value={form.gpsrResponsibleAddress} onChange={e => u("gpsrResponsibleAddress", e.target.value)} className="w-full border rounded px-3 py-1.5 text-sm" rows={2} placeholder="Endereço postal" /><input type="email" value={form.gpsrResponsibleEmail} onChange={e => u("gpsrResponsibleEmail", e.target.value)} className="w-full border rounded px-3 py-1.5 text-sm" placeholder="Endereço eletrónico (email)" /></div>
+                  <div><label className="text-xs text-slate-500">Avisos e informação de segurança</label><textarea value={form.gpsrSafetyInformation} onChange={e => u("gpsrSafetyInformation", e.target.value)} className="w-full border rounded px-3 py-1.5 text-sm" rows={6} placeholder="Avisos/informação de segurança aplicáveis, em português." /></div>
                 </div>
               )}
 

@@ -126,6 +126,15 @@ export const products = pgTable("products", {
   shippingClassId: integer("shipping_class_id").references(() => shippingClasses.id),
   metaTitle: varchar("meta_title", { length: 255 }),
   metaDescription: text("meta_description"),
+  // S34 GPSR — public distance-sale safety/compliance data. Supplier data is not authoritative here.
+  gpsrProductType: varchar("gpsr_product_type", { length: 255 }),
+  gpsrManufacturerName: varchar("gpsr_manufacturer_name", { length: 255 }),
+  gpsrManufacturerAddress: text("gpsr_manufacturer_address"),
+  gpsrManufacturerEmail: varchar("gpsr_manufacturer_email", { length: 320 }),
+  gpsrResponsibleName: varchar("gpsr_responsible_name", { length: 255 }),
+  gpsrResponsibleAddress: text("gpsr_responsible_address"),
+  gpsrResponsibleEmail: varchar("gpsr_responsible_email", { length: 320 }),
+  gpsrSafetyInformation: text("gpsr_safety_information"),
   viewCount: integer("view_count").notNull().default(0),
   soldCount: integer("sold_count").notNull().default(0),
   // ── C.1: automatic pricing engine ──
