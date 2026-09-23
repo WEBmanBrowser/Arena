@@ -1,6 +1,6 @@
 import { db } from "@/db";
 import { loyaltyPointMovements, loyaltyVouchers, orders, users } from "@/db/schema";
-import { and, eq, sql } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import { LOYALTY_POINTS_PER_REDEMPTION_EURO, redemptionValueCents } from "@/lib/services/loyalty-service";
 
 const VOUCHER_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
@@ -64,7 +64,7 @@ export async function createLoyaltyVoucher(userId: number, points: number, actor
 }
 
 export async function listLoyaltyVouchers(userId: number) {
-  return db.select().from(loyaltyVouchers).where(eq(loyaltyVouchers.userId, userId));
+  return db.select().from(loyaltyVouchers).where(eq(loyaltyVouchers.userId, userId)).orderBy(desc(loyaltyVouchers.createdAt), desc(loyaltyVouchers.id));
 }
 
 export async function reserveLoyaltyVoucher(code: string, userId: number, orderId: number) {

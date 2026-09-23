@@ -1,6 +1,6 @@
 import { db } from "@/db";
 import { loyaltyPointMovements, orders, payments, refundAttempts } from "@/db/schema";
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { decimalToCents } from "@/lib/money";
 
 export const LOYALTY_POINTS_PER_EURO = 1;
@@ -78,4 +78,23 @@ export async function getLoyaltySummary(userId: number): Promise<LoyaltySummary>
     redeemedPoints: Number(row?.redeemed ?? 0),
     reversedPoints: Number(row?.reversed ?? 0),
   };
+}
+
+
+export async function listLoyaltyMovements(userId: number, limit = 50) {
+  const safeLimit = Math.max(1, Math.min(100, Math.trunc(limit)));
+  return db.select({
+    id: loyaltyPointMovements.id,
+    orderId: loyaltyPointMovements.orderId,
+    orderNumber: orders.orderNumber,
+    type: loyaltyPointMovements.type,
+    pointsDelta: loyaltyPointMovements.pointsDelta,
+    eligibleAmountCents: loyaltyPointMovements.eligibleAmountCents,
+    reason: loyaltyPointMovements.reason,
+    createdAt: loyaltyPointMovements.createdAt,
+  }).from(loyaltyPointMovements)
+    .leftJoin(orders, eq(loyaltyPointMovements.orderId, orders.id))
+    .where(eq(loyaltyPointMovements.userId, userId))
+    .orderBy(desc(loyaltyPointMovements.createdAt), desc(loyaltyPointMovements.id))
+    .limit(safeLimit);
 }

@@ -24,6 +24,15 @@ interface OrderSummary {
   deliveryType: string;
 }
 
+
+interface LoyaltyData {
+  summary: { balancePoints: number; redemptionValueCents: number; earnedPoints: number; redeemedPoints: number; reversedPoints: number };
+  movements: Array<{ id: number; orderId: number | null; orderNumber: string | null; type: string; pointsDelta: number; eligibleAmountCents: number | null; reason: string | null; createdAt: string }>;
+  vouchers: Array<{ id: number; code: string; points: number; valueCents: number; status: string; reservedOrderId: number | null; usedOrderId: number | null; createdAt: string; usedAt: string | null }>;
+}
+
+const EMPTY_LOYALTY: LoyaltyData = { summary: { balancePoints: 0, redemptionValueCents: 0, earnedPoints: 0, redeemedPoints: 0, reversedPoints: 0 }, movements: [], vouchers: [] };
+
 interface Address {
   id: number;
   label: string | null;
@@ -106,6 +115,11 @@ export default function ContaClient() {
   const [disableMsg, setDisableMsg] = useState({ type: "" as "success" | "error" | "", text: "" });
   const [anonymizeForm, setAnonymizeForm] = useState({ currentPassword: "", confirmAnonymize: false });
   const [anonymizeMsg, setAnonymizeMsg] = useState({ type: "" as "success" | "error" | "", text: "" });
+  const [loyalty, setLoyalty] = useState<LoyaltyData>(EMPTY_LOYALTY);
+  const [loyaltyLoading, setLoyaltyLoading] = useState(false);
+  const [voucherPoints, setVoucherPoints] = useState(100);
+  const [voucherCreating, setVoucherCreating] = useState(false);
+  const [loyaltyMsg, setLoyaltyMsg] = useState({ type: "" as "success" | "error" | "", text: "" });
 
   const loadOrders = useCallback(async (page = 1) => {
     setOrdersLoading(true);
@@ -118,6 +132,16 @@ export default function ContaClient() {
       }
     } catch { /* ignore */ }
     setOrdersLoading(false);
+  }, []);
+
+  const loadLoyalty = useCallback(async () => {
+    setLoyaltyLoading(true);
+    try {
+      const res = await fetch("/api/account/loyalty");
+      const data = await res.json();
+      if (res.ok) setLoyalty(data);
+    } catch { /* ignore */ }
+    setLoyaltyLoading(false);
   }, []);
 
   const loadAddresses = useCallback(async () => {
@@ -141,8 +165,9 @@ export default function ContaClient() {
       fetch("/api/wishlist").then(r => r.json()).then(d => setWishlist(d.wishlist || []));
       fetch("/api/rma").then(r => r.json()).then(d => setRmaList(d.rmaRequests || []));
       loadAddresses();
+      loadLoyalty();
     });
-  }, [user, loadOrders, loadAddresses]);
+  }, [user, loadOrders, loadAddresses, loadLoyalty]);
 
   useEffect(() => {
     if (!user) return;
@@ -241,6 +266,7 @@ export default function ContaClient() {
       setAddressForm({ label: "", name: "", address1: "", address2: "", city: "", postalCode: "", phone: "", setDefaultBilling: false, setDefaultShipping: false });
       setAddressEditing(null);
       loadAddresses();
+      loadLoyalty();
     }
   };
 
@@ -295,6 +321,25 @@ export default function ContaClient() {
       const data = await res.json();
       if (res.ok) setOrderDetail(data);
     } catch { /* ignore */ }
+  };
+
+  const handleCreateVoucher = async () => {
+    setLoyaltyMsg({ type: "", text: "" });
+    if (!Number.isInteger(voucherPoints) || voucherPoints < 100 || voucherPoints % 100 !== 0) {
+      setLoyaltyMsg({ type: "error", text: "Escolha um múltiplo de 100 pontos." }); return;
+    }
+    if (voucherPoints > loyalty.summary.balancePoints) {
+      setLoyaltyMsg({ type: "error", text: "Saldo de pontos insuficiente." }); return;
+    }
+    if (!confirm(`Converter ${voucherPoints} pontos num vale de ${(voucherPoints / 100).toFixed(2)} €? Os pontos serão debitados imediatamente.`)) return;
+    setVoucherCreating(true);
+    try {
+      const res = await fetch("/api/account/loyalty/vouchers", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ points: voucherPoints }) });
+      const data = await res.json();
+      if (!res.ok) setLoyaltyMsg({ type: "error", text: data.error || "Erro ao gerar vale." });
+      else { setLoyaltyMsg({ type: "success", text: `Vale ${data.voucher.code} criado com sucesso.` }); await loadLoyalty(); }
+    } catch { setLoyaltyMsg({ type: "error", text: "Erro de comunicação ao gerar vale." }); }
+    setVoucherCreating(false);
   };
 
   // ─── Auth pages (not logged in) ────────────────────────
@@ -354,6 +399,7 @@ export default function ContaClient() {
   const tabs = [
     { id: "overview", label: "Visão Geral", icon: "📊" },
     { id: "orders", label: "Encomendas", icon: "📦" },
+    { id: "loyalty", label: "Pontos e Vales", icon: "🎁" },
     { id: "profile", label: "Perfil", icon: "👤" },
     { id: "addresses", label: "Moradas", icon: "📍" },
     { id: "wishlist", label: "Favoritos", icon: "❤️" },
@@ -389,11 +435,12 @@ export default function ContaClient() {
           {tab === "overview" && (
             <div className="space-y-4 animate-fade-in">
               <h2 className="text-xl font-bold text-slate-800">Olá, {user.name}!</h2>
-              <div className="grid sm:grid-cols-4 gap-4">
+              <div className="grid sm:grid-cols-2 lg:grid-cols-5 gap-4">
                 <div className="bg-white border rounded-xl p-4 text-center"><p className="text-2xl font-bold text-sky-600">{ordersPagination.total}</p><p className="text-xs text-slate-500">Encomendas</p></div>
                 <div className="bg-white border rounded-xl p-4 text-center"><p className="text-2xl font-bold text-red-500">{wishlist.length}</p><p className="text-xs text-slate-500">Favoritos</p></div>
                 <div className="bg-white border rounded-xl p-4 text-center"><p className="text-2xl font-bold text-amber-500">{rmaList.length}</p><p className="text-xs text-slate-500">Pedidos RMA</p></div>
                 <div className="bg-white border rounded-xl p-4 text-center"><p className="text-2xl font-bold text-slate-500">{addressList.length}</p><p className="text-xs text-slate-500">Moradas</p></div>
+                <Link href="/conta?tab=loyalty" className="bg-white border rounded-xl p-4 text-center hover:border-sky-300 transition"><p className="text-2xl font-bold text-emerald-600">{loyalty.summary.balancePoints}</p><p className="text-xs text-slate-500">Pontos · {(loyalty.summary.redemptionValueCents / 100).toFixed(2)} €</p></Link>
               </div>
               {orders.slice(0, 3).map(o => (
                 <div key={o.id} className="bg-white border rounded-xl p-4 flex justify-between items-center text-sm">
@@ -682,6 +729,27 @@ export default function ContaClient() {
 
                 </>
               )}
+            </div>
+          )}
+
+          {/* ─── LOYALTY ─── */}
+          {tab === "loyalty" && (
+            <div className="animate-fade-in space-y-5">
+              <div><h2 className="text-xl font-bold text-slate-800">Pontos e Vales</h2><p className="text-sm text-slate-500 mt-1">Cada 1 € elegível pago vale 1 ponto. Cada 100 pontos podem ser convertidos em 1 €.</p></div>
+              {loyaltyLoading ? <p className="text-slate-500">A carregar...</p> : <>
+                <div className="grid sm:grid-cols-3 gap-4">
+                  <div className="bg-white border rounded-xl p-5"><p className="text-xs text-slate-500">Saldo disponível</p><p className="text-3xl font-bold text-emerald-600 mt-1">{loyalty.summary.balancePoints}</p><p className="text-sm text-slate-500">pontos · {(loyalty.summary.redemptionValueCents / 100).toFixed(2)} €</p></div>
+                  <div className="bg-white border rounded-xl p-5"><p className="text-xs text-slate-500">Pontos ganhos</p><p className="text-2xl font-bold text-sky-600 mt-1">{loyalty.summary.earnedPoints}</p></div>
+                  <div className="bg-white border rounded-xl p-5"><p className="text-xs text-slate-500">Pontos utilizados</p><p className="text-2xl font-bold text-slate-700 mt-1">{loyalty.summary.redeemedPoints}</p></div>
+                </div>
+                <div className="bg-white border rounded-xl p-5">
+                  <h3 className="font-semibold text-slate-800">Gerar novo vale</h3><p className="text-xs text-slate-500 mt-1 mb-4">Os pontos são debitados quando o vale é criado. O vale é de utilização única.</p>
+                  <div className="flex flex-wrap items-end gap-3"><label className="text-sm"><span className="block text-xs font-medium text-slate-600 mb-1">Pontos a converter</span><input type="number" min={100} step={100} value={voucherPoints} onChange={e => setVoucherPoints(Number(e.target.value))} className="border rounded-lg px-3 py-2 w-40" /></label><div className="text-sm text-slate-600 pb-2">= {(Number.isFinite(voucherPoints) ? voucherPoints / 100 : 0).toFixed(2)} €</div><button onClick={handleCreateVoucher} disabled={voucherCreating || voucherPoints > loyalty.summary.balancePoints || voucherPoints < 100} className="px-4 py-2 bg-sky-600 hover:bg-sky-700 text-white text-sm font-medium rounded-lg disabled:opacity-50">{voucherCreating ? "A gerar..." : "Gerar vale"}</button></div>
+                  {loyaltyMsg.text && <p className={`text-sm mt-3 ${loyaltyMsg.type === "success" ? "text-green-600" : "text-red-500"}`}>{loyaltyMsg.text}</p>}
+                </div>
+                <div><h3 className="font-semibold text-slate-800 mb-3">Os meus vales</h3>{loyalty.vouchers.length === 0 ? <p className="text-sm text-slate-500">Ainda não criou vales.</p> : <div className="space-y-3">{loyalty.vouchers.map(v => { const labels: Record<string,string> = { active: "Ativo", reserved: "Reservado", used: "Utilizado", cancelled: "Cancelado" }; return <div key={v.id} className="bg-white border rounded-xl p-4 flex flex-wrap justify-between gap-3"><div><p className="font-mono font-bold text-slate-800">{v.code}</p><p className="text-xs text-slate-500">Criado em {fmtDate(v.createdAt)} · {v.points} pontos</p></div><div className="text-right"><p className="font-bold text-sky-600">{(v.valueCents / 100).toFixed(2)} €</p><span className={`text-xs px-2 py-0.5 rounded-full ${v.status === "active" ? "bg-green-50 text-green-700" : v.status === "used" ? "bg-slate-100 text-slate-600" : "bg-amber-50 text-amber-700"}`}>{labels[v.status] || v.status}</span></div></div>; })}</div>}</div>
+                <div><h3 className="font-semibold text-slate-800 mb-3">Histórico de pontos</h3>{loyalty.movements.length === 0 ? <p className="text-sm text-slate-500">Ainda não existem movimentos.</p> : <div className="bg-white border rounded-xl divide-y">{loyalty.movements.map(m => <div key={m.id} className="p-4 flex justify-between gap-4"><div><p className="text-sm font-medium text-slate-700">{m.reason || ({ earn: "Pontos ganhos", redeem: "Pontos convertidos", reverse: "Reversão de pontos", adjustment: "Ajuste de pontos" } as Record<string,string>)[m.type] || m.type}</p><p className="text-xs text-slate-400">{fmtDate(m.createdAt)}{m.orderNumber ? ` · Encomenda #${m.orderNumber}` : ""}</p></div><span className={`font-bold ${m.pointsDelta > 0 ? "text-green-600" : "text-red-500"}`}>{m.pointsDelta > 0 ? "+" : ""}{m.pointsDelta}</span></div>)}</div>}</div>
+              </>}
             </div>
           )}
 
