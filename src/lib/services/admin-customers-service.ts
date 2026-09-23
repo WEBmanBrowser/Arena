@@ -24,10 +24,10 @@
  *   Monetary values are INTEGER CENTS in the service API.
  */
 import { db } from "@/db";
-import { addresses, customerNotes, invoiceDocuments, orders, orderItems, users, wishlists, rmaRequests, refundAttempts, shipments, RMA_STATUSES } from "@/db/schema";
+import { addresses, customerNotes, invoiceDocuments, loyaltyPointReservations, loyaltyVouchers, orders, orderItems, payments, users, wishlists, rmaRequests, refundAttempts, shipments, RMA_STATUSES } from "@/db/schema";
 import { and, asc, desc, eq, gte, ilike, inArray, lte, or, sql, type SQLWrapper, type SQL } from "drizzle-orm";
 import { createAuditLog } from "@/lib/audit";
-import { getLoyaltySummary, type LoyaltySummary } from "@/lib/services/loyalty-service";
+import { getLoyaltySummary, listLoyaltyMovements, type LoyaltySummary } from "@/lib/services/loyalty-service";
 
 export const ADMIN_CUSTOMER_PAGE_SIZE_DEFAULT = 25;
 export const ADMIN_CUSTOMER_PAGE_SIZE_MAX = 100;
@@ -92,9 +92,11 @@ export type CustomerStatistics = {
 };
 export type AdminCustomerAddressRow = typeof addresses.$inferSelect;
 export type AdminCustomerOrderRow = {
-  id: number; orderNumber: string; createdAt: Date; total: string;
+  id: number; orderNumber: string; createdAt: Date; subtotal: string; total: string; discount: string;
+  couponDiscount: string; loyaltyDiscount: string; loyaltyType: string | null; loyaltyPoints: number | null;
   status: string; paymentStatus: string; deliveryType: string;
   paymentMethod: string | null; shippingMethod: string | null; trackingNumber: string | null; notes: string | null;
+  paymentProvider: string | null; paymentAmount: string | null; paymentPaidAt: Date | null;
   invoiceNumber: string | null; invoiceStatus: string | null; carrier: string | null; shipmentStatus: string | null;
   refundedCents: number; itemCount: number;
 };
@@ -117,6 +119,9 @@ export type AdminCustomerDetail = {
   rmaSummary: { total: number; open: number; resolved: number };
   wishlistCount: number;
   loyalty: LoyaltySummary;
+  loyaltyMovements: Awaited<ReturnType<typeof listLoyaltyMovements>>;
+  loyaltyVouchers: Array<{ id: number; code: string; points: number; valueCents: number; status: string; reservedOrderId: number | null; reservedOrderNumber: string | null; usedOrderId: number | null; usedOrderNumber: string | null; createdAt: Date; updatedAt: Date; }>;
+  loyaltyPointReservations: Array<{ id: number; orderId: number; orderNumber: string | null; points: number; valueCents: number; status: string; reservedAt: Date; consumedAt: Date | null; releasedAt: Date | null; }>;
   rmaRequests: Array<{ id: number; orderId: number | null; type: string; status: string; reason: string | null; description: string; resolution: string | null; createdAt: Date; updatedAt: Date; }>;
 };
 
@@ -315,7 +320,8 @@ export async function getAdminCustomerDetail(customerId: number, ordersPage = 1,
   const [oc] = await db.select({ count: sql<number>`count(*)::int` }).from(orders).where(eq(orders.userId, customerId));
   const orderTotal = Number(oc?.count ?? 0);
   const baseOrderRows = await db.select({
-    id: orders.id, orderNumber: orders.orderNumber, createdAt: orders.createdAt, total: orders.total,
+    id: orders.id, orderNumber: orders.orderNumber, createdAt: orders.createdAt, subtotal: orders.subtotal, total: orders.total, discount: orders.discount,
+    couponDiscount: orders.couponDiscount, loyaltyDiscount: orders.loyaltyDiscount, loyaltyType: orders.loyaltyType, loyaltyPoints: orders.loyaltyPoints,
     status: orders.status, paymentStatus: orders.paymentStatus, deliveryType: orders.deliveryType,
     paymentMethod: orders.paymentMethod, shippingMethod: orders.shippingMethod, trackingNumber: orders.trackingNumber, notes: orders.notes,
   }).from(orders).where(eq(orders.userId, customerId))
@@ -323,7 +329,7 @@ export async function getAdminCustomerDetail(customerId: number, ordersPage = 1,
     .limit(ps).offset((p - 1) * ps);
 
   const orderIds = baseOrderRows.map(o => o.id);
-  const [invoiceRows, shipmentRows, refundRows, itemRows] = orderIds.length ? await Promise.all([
+  const [invoiceRows, shipmentRows, refundRows, itemRows, paymentRows] = orderIds.length ? await Promise.all([
     db.select({ orderId: invoiceDocuments.orderId, documentNumber: invoiceDocuments.documentNumber, status: invoiceDocuments.status, createdAt: invoiceDocuments.createdAt })
       .from(invoiceDocuments).where(and(inArray(invoiceDocuments.orderId, orderIds), eq(invoiceDocuments.documentType, "invoice"))).orderBy(desc(invoiceDocuments.createdAt)),
     db.select({ orderId: shipments.orderId, provider: shipments.provider, status: shipments.status, trackingNumber: shipments.trackingNumber, createdAt: shipments.createdAt })
@@ -332,15 +338,22 @@ export async function getAdminCustomerDetail(customerId: number, ordersPage = 1,
       .from(refundAttempts).where(and(inArray(refundAttempts.orderId, orderIds), eq(refundAttempts.status, "succeeded"))).groupBy(refundAttempts.orderId),
     db.select({ orderId: orderItems.orderId, itemCount: sql<number>`COALESCE(SUM(${orderItems.quantity}), 0)::int` })
       .from(orderItems).where(inArray(orderItems.orderId, orderIds)).groupBy(orderItems.orderId),
-  ]) : [[], [], [], []];
+    db.select({ orderId: payments.orderId, provider: payments.provider, amount: payments.amount, paidAt: payments.paidAt, createdAt: payments.createdAt })
+      .from(payments).where(inArray(payments.orderId, orderIds)).orderBy(desc(payments.paidAt), desc(payments.createdAt), desc(payments.id)),
+  ]) : [[], [], [], [], []];
   const firstInvoice = new Map<number, typeof invoiceRows[number]>();
   for (const row of invoiceRows) if (!firstInvoice.has(row.orderId)) firstInvoice.set(row.orderId, row);
   const firstShipment = new Map<number, typeof shipmentRows[number]>();
   for (const row of shipmentRows) if (!firstShipment.has(row.orderId)) firstShipment.set(row.orderId, row);
   const refundsByOrder = new Map(refundRows.map(r => [r.orderId, Number(r.refundedCents ?? 0)]));
   const itemsByOrder = new Map(itemRows.map(r => [r.orderId, Number(r.itemCount ?? 0)]));
+  const firstPayment = new Map<number, typeof paymentRows[number]>();
+  for (const row of paymentRows) if (!firstPayment.has(row.orderId)) firstPayment.set(row.orderId, row);
   const orderRows: AdminCustomerOrderRow[] = baseOrderRows.map(o => ({
     ...o,
+    paymentProvider: firstPayment.get(o.id)?.provider ?? null,
+    paymentAmount: firstPayment.get(o.id)?.amount ?? null,
+    paymentPaidAt: firstPayment.get(o.id)?.paidAt ?? null,
     invoiceNumber: firstInvoice.get(o.id)?.documentNumber ?? null,
     invoiceStatus: firstInvoice.get(o.id)?.status ?? null,
     carrier: firstShipment.get(o.id)?.provider ?? null,
@@ -350,7 +363,18 @@ export async function getAdminCustomerDetail(customerId: number, ordersPage = 1,
     itemCount: itemsByOrder.get(o.id) ?? 0,
   }));
 
-  const loyalty = await getLoyaltySummary(customerId);
+  const [loyalty, loyaltyMovements, voucherRows, pointReservationRows] = await Promise.all([
+    getLoyaltySummary(customerId),
+    listLoyaltyMovements(customerId, 50),
+    db.select().from(loyaltyVouchers).where(eq(loyaltyVouchers.userId, customerId)).orderBy(desc(loyaltyVouchers.createdAt), desc(loyaltyVouchers.id)),
+    db.select({ id: loyaltyPointReservations.id, orderId: loyaltyPointReservations.orderId, orderNumber: orders.orderNumber, points: loyaltyPointReservations.points, valueCents: loyaltyPointReservations.valueCents, status: loyaltyPointReservations.status, reservedAt: loyaltyPointReservations.reservedAt, consumedAt: loyaltyPointReservations.consumedAt, releasedAt: loyaltyPointReservations.releasedAt })
+      .from(loyaltyPointReservations).leftJoin(orders, eq(loyaltyPointReservations.orderId, orders.id)).where(eq(loyaltyPointReservations.userId, customerId)).orderBy(desc(loyaltyPointReservations.createdAt), desc(loyaltyPointReservations.id)),
+  ]);
+  const voucherOrderIds = [...new Set(voucherRows.flatMap(v => [v.reservedOrderId, v.usedOrderId]).filter((id): id is number => id !== null))];
+  const voucherOrders = voucherOrderIds.length ? await db.select({ id: orders.id, orderNumber: orders.orderNumber }).from(orders).where(inArray(orders.id, voucherOrderIds)) : [];
+  const voucherOrderNumber = new Map(voucherOrders.map(o => [o.id, o.orderNumber]));
+  const customerVouchers = voucherRows.map(v => ({ ...v, reservedOrderNumber: v.reservedOrderId ? voucherOrderNumber.get(v.reservedOrderId) ?? null : null, usedOrderNumber: v.usedOrderId ? voucherOrderNumber.get(v.usedOrderId) ?? null : null }));
+
   const customerRmas = await db.select({
     id: rmaRequests.id, orderId: rmaRequests.orderId, type: rmaRequests.type, status: rmaRequests.status, reason: rmaRequests.reason,
     description: rmaRequests.description, resolution: rmaRequests.resolution, createdAt: rmaRequests.createdAt, updatedAt: rmaRequests.updatedAt,
@@ -396,6 +420,9 @@ export async function getAdminCustomerDetail(customerId: number, ordersPage = 1,
     },
     wishlistCount: Number(wl?.count ?? 0),
     loyalty,
+    loyaltyMovements,
+    loyaltyVouchers: customerVouchers,
+    loyaltyPointReservations: pointReservationRows,
     rmaRequests: customerRmas,
   };
 }

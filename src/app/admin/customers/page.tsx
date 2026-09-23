@@ -1,6 +1,7 @@
 "use client";
 import { useCallback, useEffect, useState } from "react";
 import type { AdminCustomerListRow, AdminCustomerListPagination, AdminCustomerDetail } from "@/lib/services/admin-customers-service";
+import Customer360Detail from "./Customer360Detail";
 
 const STATUS_OPTIONS = [
   { value: "all", label: "Todos" },
@@ -214,143 +215,8 @@ export default function AdminCustomersPage() {
       {detailLoading && <p className="mt-6 text-sm text-slate-500">A carregar detalhe...</p>}
 
       {detail && !detailLoading && (
-        <div className="mt-6 bg-white border rounded-xl p-6">
-          <div className="flex justify-between mb-4">
-            <h3 className="font-bold text-slate-800">Cliente: {detail.customer.name}</h3>
-            <button onClick={() => setDetail(null)} className="text-slate-400 hover:text-slate-600">Fechar</button>
-          </div>
-
-          <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-            <div className="bg-slate-50 rounded-lg p-3 text-center">
-              <p className="text-2xl font-bold text-sky-600">{detail.statistics.totalOrders}</p>
-              <p className="text-xs text-slate-500">Encomendas</p>
-            </div>
-            <div className="bg-slate-50 rounded-lg p-3 text-center">
-              <p className="text-2xl font-bold text-green-600">{fmtCents(detail.statistics.totalSpentCents)}</p>
-              <p className="text-xs text-slate-500">Total gasto</p>
-            </div>
-            <div className="bg-slate-50 rounded-lg p-3 text-center">
-              <p className="text-2xl font-bold text-amber-600">{fmtCents(detail.statistics.averageOrderValueCents)}</p>
-              <p className="text-xs text-slate-500">Ticket médio</p>
-            </div>
-            <div className="bg-slate-50 rounded-lg p-3 text-center">
-              <p className="text-2xl font-bold text-slate-600">{fmtDate(detail.statistics.lastOrderDate)}</p>
-              <p className="text-xs text-slate-500">Última encomenda</p>
-            </div>
-          </div>
-
-          <div className="grid md:grid-cols-2 gap-6 text-sm">
-            <section>
-              <h4 className="font-semibold mb-2">Dados do cliente</h4>
-              <p><strong>Email:</strong> {detail.customer.email}</p>
-              <p><strong>Telefone:</strong> {detail.customer.phone || "—"}</p>
-              <p><strong>NIF:</strong> {detail.customer.nif || "—"}</p>
-              <p><strong>Empresa:</strong> {detail.customer.company || "—"}</p>
-              <p><strong>Registo:</strong> {fmtDate(detail.customer.createdAt)}</p>
-              <p><strong>Estado:</strong> <span className={`px-2 py-0.5 rounded text-xs font-medium ${detail.customer.isActive ? "bg-green-50 text-green-700" : "bg-red-50 text-red-700"}`}>{detail.customer.isActive ? "Ativo" : "Desativado"}</span></p>
-            </section>
-
-            <section>
-              <h4 className="font-semibold mb-2">Fidelização / RMA / Wishlist</h4>
-              <p><strong>Saldo:</strong> {detail.loyalty.balancePoints} pontos ({fmtCents(detail.loyalty.redemptionValueCents)})</p>
-              <p><strong>Ganhos:</strong> {detail.loyalty.earnedPoints} · <strong>Revertidos:</strong> {detail.loyalty.reversedPoints}</p>
-              <p><strong>Pedidos RMA:</strong> {detail.rmaSummary.total} (abertos: {detail.rmaSummary.open})</p>
-              <p><strong>Produtos na wishlist:</strong> {detail.wishlistCount}</p>
-            </section>
-          </div>
-
-          <section className="mt-6">
-            <h4 className="font-semibold mb-2 text-sm">Moradas ({detail.addresses.length})</h4>
-            {detail.addresses.length === 0 ? <p className="text-xs text-slate-400">Sem moradas registadas.</p> : (
-              <div className="grid sm:grid-cols-2 gap-3">
-                {detail.addresses.map(a => (
-                  <div key={a.id} className="border rounded-lg p-3 text-xs">
-                    {a.label && <p className="font-semibold text-slate-700 mb-1">{a.label}</p>}
-                    <p>{a.name}</p>
-                    <p>{a.address1}{a.address2 ? `, ${a.address2}` : ""}</p>
-                    <p>{a.postalCode} {a.city}</p>
-                    <p>{a.country}</p>
-                    {a.phone && <p>Tel: {a.phone}</p>}
-                    <div className="mt-1 flex gap-2">
-                      {a.isDefaultBilling && <span className="bg-blue-50 text-blue-700 px-1.5 py-0.5 rounded text-[10px]">Faturação padrão</span>}
-                      {a.isDefaultShipping && <span className="bg-green-50 text-green-700 px-1.5 py-0.5 rounded text-[10px]">Envio padrão</span>}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </section>
-
-          <section className="mt-6">
-            <h4 className="font-semibold mb-2 text-sm">Encomendas ({detail.ordersPaginated.pagination.total})</h4>
-            {detail.ordersPaginated.orders.length === 0 ? <p className="text-xs text-slate-400">Sem encomendas.</p> : (
-              <>
-                <table className="w-full text-xs">
-                  <thead className="bg-slate-50">
-                    <tr>
-                      <th className="text-left p-2">N.º</th><th className="text-left p-2">Data</th>
-                      <th className="text-right p-2">Total</th><th className="text-center p-2">Estado</th>
-                      <th className="text-center p-2">Pagamento</th><th className="text-left p-2 hidden lg:table-cell">Fatura</th>
-                      <th className="text-left p-2 hidden xl:table-cell">Transporte</th><th className="text-center p-2 hidden md:table-cell">Entrega</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {detail.ordersPaginated.orders.map(o => (
-                      <tr key={o.id} className="border-t">
-                        <td className="p-2 font-medium">#{o.orderNumber}</td>
-                        <td className="p-2">{fmtDate(o.createdAt)}</td>
-                        <td className="p-2 text-right">{parseFloat(o.total).toFixed(2)}€</td>
-                        <td className="p-2 text-center">{o.status}</td>
-                        <td className="p-2 text-center">{o.paymentStatus}{o.paymentMethod ? ` · ${o.paymentMethod}` : ""}</td>
-                        <td className="p-2 hidden lg:table-cell">{o.invoiceNumber || "—"}</td>
-                        <td className="p-2 hidden xl:table-cell">{o.carrier || o.shippingMethod || "—"}{o.trackingNumber ? ` · ${o.trackingNumber}` : ""}</td>
-                        <td className="p-2 text-center hidden md:table-cell">{o.deliveryType === "pickup" ? "📍 Loja" : "🚚 Envio"}{o.refundedCents > 0 ? ` · reemb. ${fmtCents(o.refundedCents)}` : ""}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-                {detail.ordersPaginated.pagination.totalPages > 1 && (
-                  <p className="text-xs text-slate-400 mt-2">Página {detail.ordersPaginated.pagination.page} de {detail.ordersPaginated.pagination.totalPages} — {detail.ordersPaginated.pagination.total} total</p>
-                )}
-              </>
-            )}
-          </section>
-
-          <section className="mt-6">
-            <h4 className="font-semibold mb-2 text-sm">Notas internas ({detail.notes.length})</h4>
-            <div className="flex gap-2 mb-3">
-              <input value={noteText} onChange={e => setNoteText(e.target.value)} maxLength={5000} placeholder="Nova nota..." className="border rounded px-3 py-1.5 text-xs flex-1" />
-              <button onClick={addNote} disabled={saving || !noteText.trim()} className="px-3 py-1.5 bg-sky-600 text-white rounded text-xs disabled:opacity-50">Adicionar</button>
-            </div>
-            {detail.notes.length === 0 ? <p className="text-xs text-slate-400">Sem notas.</p> : detail.notes.map(n => (
-              <div key={n.id} className="border-t py-2 text-xs flex justify-between items-start">
-                <div className="flex-1">
-                  <p className="text-slate-700">{n.note}</p>
-                  <p className="text-slate-400 mt-0.5">{n.authorName || n.authorEmail || "Sistema"} · {fmtDate(n.createdAt)}{n.updatedAt ? ` (editado ${fmtDate(n.updatedAt)})` : ""}</p>
-                </div>
-                <button onClick={() => deleteNote(n.id)} disabled={saving} className="text-red-400 hover:text-red-600 text-xs ml-2 disabled:opacity-50">Apagar</button>
-              </div>
-            ))}
-          </section>
-
-          <section className="mt-6">
-            <h4 className="font-semibold mb-2 text-sm">Conta</h4>
-            <p className="text-xs text-slate-500 mb-3">
-              {detail.customer.isActive
-                ? "Desativar a conta impede o login mas preserva todos os dados históricos (encomendas, RMA, etc.)."
-                : "Reativar a conta permite ao cliente fazer login novamente. Password inalterada."}
-            </p>
-            {detail.customer.isActive ? (
-              <button onClick={() => toggleStatus("disable")} disabled={saving} className="px-4 py-2 bg-red-500 text-white rounded text-xs font-medium hover:bg-red-600 disabled:opacity-50">
-                Desativar conta
-              </button>
-            ) : (
-              <button onClick={() => toggleStatus("reactivate")} disabled={saving} className="px-4 py-2 bg-green-600 text-white rounded text-xs font-medium hover:bg-green-700 disabled:opacity-50">
-                Reativar conta
-              </button>
-            )}
-          </section>
-        </div>
+        <Customer360Detail detail={detail} saving={saving} noteText={noteText} setNoteText={setNoteText}
+          onClose={() => setDetail(null)} onAddNote={addNote} onDeleteNote={deleteNote} onToggleStatus={toggleStatus} />
       )}
     </div>
   );
