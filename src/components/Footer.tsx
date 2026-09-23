@@ -1,5 +1,9 @@
+import Image from "next/image";
 import Link from "next/link";
 import Logo from "@/components/Logo";
+
+const ANYDESK_DOWNLOAD_URL = "https://anydesk.com/pt/downloads/windows";
+const LIVRO_RECLAMACOES_URL = "https://www.livroreclamacoes.pt/inicio/";
 
 export default function Footer() {
   return (
@@ -30,12 +34,28 @@ export default function Footer() {
           </div>
 
           <div>
-            <h3 className="text-white font-semibold mb-4 text-sm">CONTA</h3>
+            <h3 className="text-white font-semibold mb-4 text-sm">CONTA E SUPORTE</h3>
             <div className="space-y-2">
               <Link href="/conta" className="block text-sm hover:text-white transition">A Minha Conta</Link>
               <Link href="/conta?tab=orders" className="block text-sm hover:text-white transition">Encomendas</Link>
               <Link href="/conta?tab=wishlist" className="block text-sm hover:text-white transition">Favoritos</Link>
               <Link href="/conta?tab=rma" className="block text-sm hover:text-white transition">RMA / Assistência</Link>
+            </div>
+
+            <div className="mt-5">
+              <a
+                href={ANYDESK_DOWNLOAD_URL}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-2 rounded-lg bg-sky-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2 focus:ring-offset-slate-900"
+                aria-label="Acesso Remoto — descarregar AnyDesk numa nova janela"
+              >
+                <span aria-hidden="true">🖥️</span>
+                Acesso Remoto
+              </a>
+              <p className="mt-2 max-w-xs text-xs leading-relaxed text-slate-500">
+                Descarregue o AnyDesk e forneça o ID apenas quando estiver em contacto com a MDTech Solutions.
+              </p>
             </div>
           </div>
 
@@ -49,9 +69,25 @@ export default function Footer() {
               <Link href="/pagina/politica-devolucoes" className="block text-sm hover:text-white transition">Devoluções</Link>
               <Link href="/pagina/garantias" className="block text-sm hover:text-white transition">Garantias</Link>
               <Link href="/pagina/resolucao-litigios" className="block text-sm hover:text-white transition">Resolução de Litígios</Link>
-              <a href="https://www.livroreclamacoes.pt/inicio/" target="_blank" rel="noopener noreferrer" className="block text-sm hover:text-white transition">Livro de Reclamações</a>
+              <a href={LIVRO_RECLAMACOES_URL} target="_blank" rel="noopener noreferrer" className="block text-sm hover:text-white transition">Livro de Reclamações</a>
               <a href="https://ciab.pt/" target="_blank" rel="noopener noreferrer" className="block text-sm hover:text-white transition">CIAB — Tribunal Arbitral de Consumo</a>
             </div>
+
+            <a
+              href={LIVRO_RECLAMACOES_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="mt-5 inline-block rounded focus:outline-none focus:ring-2 focus:ring-white focus:ring-offset-2 focus:ring-offset-slate-900"
+              aria-label="Livro de Reclamações Eletrónico — abrir portal oficial numa nova janela"
+            >
+              <Image
+                src="/legal/livro-reclamacoes-eletronico.png"
+                alt="Livro de Reclamações"
+                width={140}
+                height={58}
+                className="h-[58px] w-[140px]"
+              />
+            </a>
           </div>
         </div>
 
