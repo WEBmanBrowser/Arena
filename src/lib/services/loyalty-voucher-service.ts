@@ -1,6 +1,7 @@
 import { db } from "@/db";
 import { loyaltyPointMovements, loyaltyVouchers, orders, users } from "@/db/schema";
 import { and, desc, eq, sql } from "drizzle-orm";
+import type { DbOrTx } from "@/lib/stock-locks";
 import { LOYALTY_POINTS_PER_REDEMPTION_EURO, redemptionValueCents } from "@/lib/services/loyalty-service";
 
 const VOUCHER_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
@@ -65,6 +66,23 @@ export async function createLoyaltyVoucher(userId: number, points: number, actor
 
 export async function listLoyaltyVouchers(userId: number) {
   return db.select().from(loyaltyVouchers).where(eq(loyaltyVouchers.userId, userId)).orderBy(desc(loyaltyVouchers.createdAt), desc(loyaltyVouchers.id));
+}
+
+
+export async function getCheckoutVoucherTx(tx: DbOrTx, code: string, userId: number) {
+  const normalized = code.trim().toUpperCase();
+  await tx.execute(sql`SELECT id FROM loyalty_vouchers WHERE code = ${normalized} FOR UPDATE`);
+  const [voucher] = await tx.select().from(loyaltyVouchers).where(eq(loyaltyVouchers.code, normalized)).limit(1);
+  if (!voucher || voucher.userId !== userId) throw new Error("VALIDATION:Vale inválido");
+  if (voucher.status !== "active") throw new Error("VALIDATION:Vale indisponível ou já utilizado");
+  return voucher;
+}
+
+export async function reserveCheckoutVoucherTx(tx: DbOrTx, voucherId: number, userId: number, orderId: number) {
+  const [updated] = await tx.update(loyaltyVouchers).set({ status: "reserved", reservedOrderId: orderId, reservedAt: new Date(), updatedAt: new Date() })
+    .where(and(eq(loyaltyVouchers.id, voucherId), eq(loyaltyVouchers.userId, userId), eq(loyaltyVouchers.status, "active"))).returning();
+  if (!updated) throw new Error("VALIDATION:Vale indisponível (concorrência)");
+  return updated;
 }
 
 export async function reserveLoyaltyVoucher(code: string, userId: number, orderId: number) {

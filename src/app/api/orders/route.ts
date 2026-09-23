@@ -11,6 +11,8 @@ import { checkRateLimit, clientIp, rateLimitResponse } from "@/lib/rate-limit";
 import { lockProductsAscending, lockActiveProductSuppliersAscending } from "@/lib/stock-locks";
 import { checkoutOrderSchema } from "@/lib/checkout-order-schema";
 import { createEupagoPayment } from "@/lib/services/eupago-payment-service";
+import { getCheckoutVoucherTx, reserveCheckoutVoucherTx } from "@/lib/services/loyalty-voucher-service";
+import { getAvailableLoyaltyPointsTx, reserveLoyaltyPointsForOrderTx } from "@/lib/services/loyalty-point-reservation-service";
 
 /**
  * B.5.4 — POST /api/orders abuse protection (existing Postgres rate-limit
@@ -56,7 +58,7 @@ export async function POST(req: NextRequest) {
     }
 
     const { items, billingAddress, shippingAddress, paymentMethod, shippingMethod,
-            deliveryType, couponCode, nif, companyName, guestEmail, guestName, guestPhone, notes } = parsedBody.data;
+            deliveryType, couponCode, loyaltyVoucherCode, loyaltyPoints, nif, companyName, guestEmail, guestName, guestPhone, notes } = parsedBody.data;
 
     const user = rateLimitedUser;
 
@@ -173,11 +175,38 @@ export async function POST(req: NextRequest) {
         couponId = coupon.id;
       }
 
-      // ── 3. Allocate discount per line ───────────────────────
-      const lineDiscounts = allocateDiscount(orderLines.map(l => ({ lineTotalCents: l.lineTotalCents })), discountCents);
+      // ── 3. Loyalty — voucher OR direct points ───────────────
+      let loyaltyDiscountCents = 0;
+      let loyaltyType: "voucher" | "points" | null = null;
+      let loyaltyPointsApplied: number | null = null;
+      let checkoutVoucher: Awaited<ReturnType<typeof getCheckoutVoucherTx>> | null = null;
+      const afterCouponCents = subtotalCents - discountCents;
 
-      // ── 4. Calculate totals ─────────────────────────────────
-      const afterDiscountCents = subtotalCents - discountCents;
+      if (loyaltyVoucherCode || loyaltyPoints) {
+        if (!user) throw new Error("VALIDATION:Inicie sessão para utilizar pontos ou vales");
+        if (loyaltyVoucherCode && loyaltyPoints) throw new Error("VALIDATION:Escolha um vale ou pontos, não ambos");
+        if (loyaltyVoucherCode) {
+          checkoutVoucher = await getCheckoutVoucherTx(tx, loyaltyVoucherCode, user.id);
+          if (checkoutVoucher.valueCents > afterCouponCents) throw new Error("VALIDATION:O valor do vale é superior ao valor dos produtos após cupão");
+          loyaltyDiscountCents = checkoutVoucher.valueCents;
+          loyaltyType = "voucher";
+          loyaltyPointsApplied = checkoutVoucher.points;
+        } else if (loyaltyPoints) {
+          if (loyaltyPoints > afterCouponCents) throw new Error("VALIDATION:Os pontos selecionados excedem o valor dos produtos após cupão");
+          const available = await getAvailableLoyaltyPointsTx(tx, user.id, true);
+          if (available < loyaltyPoints) throw new Error("VALIDATION:Saldo de pontos insuficiente");
+          loyaltyDiscountCents = loyaltyPoints;
+          loyaltyType = "points";
+          loyaltyPointsApplied = loyaltyPoints;
+        }
+      }
+
+      const totalDiscountCents = discountCents + loyaltyDiscountCents;
+      // ── 4. Allocate all merchandise discounts per line ──────
+      const lineDiscounts = allocateDiscount(orderLines.map(l => ({ lineTotalCents: l.lineTotalCents })), totalDiscountCents);
+
+      // ── 5. Calculate totals ─────────────────────────────────
+      const afterDiscountCents = subtotalCents - totalDiscountCents;
       const delivery = deliveryType === "pickup" ? "pickup" : "shipping";
       const shippingQuote = await calculateShippingForCart({
         items: orderLines.map((line) => ({ productId: line.product.id, quantity: line.quantity })),
@@ -210,7 +239,11 @@ export async function POST(req: NextRequest) {
         status: "pending_payment",
         subtotal: toEuros(subtotalCents),
         shipping: toEuros(shippingCents),
-        discount: toEuros(discountCents),
+        discount: toEuros(totalDiscountCents),
+        couponDiscount: toEuros(discountCents),
+        loyaltyDiscount: toEuros(loyaltyDiscountCents),
+        loyaltyType,
+        loyaltyPoints: loyaltyPointsApplied,
         vat: toEuros(totalVatCents),
         total: toEuros(totalCents),
         paymentMethod,
@@ -225,6 +258,9 @@ export async function POST(req: NextRequest) {
         notes: notes || null,
         reservationExpiresAt: new Date(Date.now() + reservationMs),
       }).returning();
+
+      if (checkoutVoucher && user) await reserveCheckoutVoucherTx(tx, checkoutVoucher.id, user.id, order.id);
+      if (loyaltyType === "points" && loyaltyPointsApplied && user) await reserveLoyaltyPointsForOrderTx(tx, user.id, order.id, loyaltyPointsApplied);
 
       // ── 6. Create order items with full financial snapshot ──
       //

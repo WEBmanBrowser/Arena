@@ -4,7 +4,7 @@ import { useRouter } from "next/navigation";
 
 interface CartItem { productId: number; name: string; slug: string; price: number; quantity: number; }
 interface QuoteLine { productId: number; name: string; quantity: number; unitPriceGross: string; vatRate: string; vatAmount: string; lineTotal: string; inStock: boolean; availableStock: number; priceChanged: boolean; }
-interface Quote { lines: QuoteLine[]; subtotal: string; discount: string; shipping: string; vat: string; total: string; coupon: { code: string; type: string; value: string } | null; allInStock: boolean; anyPriceChanged: boolean; }
+interface Quote { lines: QuoteLine[]; subtotal: string; discount: string; couponDiscount?: string; loyaltyDiscount?: string; shipping: string; vat: string; total: string; coupon: { code: string; type: string; value: string } | null; couponError?: string | null; loyalty: { type: "voucher" | "points"; points: number; code?: string } | null; loyaltyError?: string | null; allInStock: boolean; anyPriceChanged: boolean; }
 
 export default function CheckoutPage() {
   const router = useRouter();
@@ -17,6 +17,10 @@ export default function CheckoutPage() {
   const [success, setSuccess] = useState<any>(null);
   const [quote, setQuote] = useState<Quote | null>(null);
   const [couponCode, setCouponCode] = useState("");
+  const [loyaltyMode, setLoyaltyMode] = useState<"none" | "voucher" | "points">("none");
+  const [loyaltyVoucherCode, setLoyaltyVoucherCode] = useState("");
+  const [loyaltyPoints, setLoyaltyPoints] = useState("");
+  const [loyaltyBalance, setLoyaltyBalance] = useState(0);
   const [accountAddresses, setAccountAddresses] = useState<any[]>([]);
   const [selectedBillingAddressId, setSelectedBillingAddressId] = useState<number | null>(null);
   const [selectedShippingAddressId, setSelectedShippingAddressId] = useState<number | null>(null);
@@ -43,6 +47,7 @@ export default function CheckoutPage() {
     fetch("/api/auth/me").then(r => r.json()).then(d => {
       if (d.user) {
         setUser(d.user);
+        fetch("/api/account/loyalty").then(r => r.ok ? r.json() : null).then(data => { if (data?.summary) setLoyaltyBalance(data.summary.balancePoints || 0); }).catch(() => {});
         fetch("/api/account/addresses")
           .then(r => r.json())
           .then(data => {
@@ -86,7 +91,7 @@ export default function CheckoutPage() {
   }, []);
 
   // Fetch server-side quote whenever cart, coupon, or delivery changes
-  const fetchQuote = useCallback(async (c: CartItem[], coupon: string, delivery: string) => {
+  const fetchQuote = useCallback(async (c: CartItem[], coupon: string, delivery: string, mode: "none" | "voucher" | "points", voucherCode: string, points: string) => {
     if (c.length === 0) { setQuote(null); return; }
     setQuoteLoading(true);
     try {
@@ -97,6 +102,8 @@ export default function CheckoutPage() {
           items: c.map(i => ({ productId: i.productId, quantity: i.quantity, price: i.price })),
           couponCode: coupon || undefined,
           deliveryType: delivery,
+          loyaltyVoucherCode: mode === "voucher" && voucherCode.trim() ? voucherCode.trim() : undefined,
+          loyaltyPoints: mode === "points" && points ? Number(points) : undefined,
         }),
       });
       const data = await res.json();
@@ -107,8 +114,8 @@ export default function CheckoutPage() {
   }, []);
 
   useEffect(() => {
-    queueMicrotask(() => { void fetchQuote(cart, couponCode, form.deliveryType); });
-  }, [cart, couponCode, form.deliveryType, fetchQuote]);
+    queueMicrotask(() => { void fetchQuote(cart, couponCode, form.deliveryType, loyaltyMode, loyaltyVoucherCode, loyaltyPoints); });
+  }, [cart, couponCode, form.deliveryType, loyaltyMode, loyaltyVoucherCode, loyaltyPoints, fetchQuote]);
 
   const saveProfileToAccount = async () => {
     if (!user) return;
@@ -257,6 +264,8 @@ export default function CheckoutPage() {
           shippingMethod: form.deliveryType === "shipping" ? "home_delivery" : "store_pickup",
           deliveryType: form.deliveryType,
           couponCode: couponCode || null,
+          loyaltyVoucherCode: loyaltyMode === "voucher" ? (loyaltyVoucherCode.trim() || null) : null,
+          loyaltyPoints: loyaltyMode === "points" && loyaltyPoints ? Number(loyaltyPoints) : null,
           nif: form.nif || null,
           companyName: form.companyName || null,
           guestEmail: !user ? form.email : null,
@@ -295,6 +304,7 @@ export default function CheckoutPage() {
         // cannot lead to an accidental duplicate order.
         localStorage.removeItem("mdtech_cart");
         localStorage.removeItem("mdtech_coupon");
+        setLoyaltyMode("none"); setLoyaltyVoucherCode(""); setLoyaltyPoints("");
         window.dispatchEvent(new Event("cart-updated"));
 
         const payment = data.payment ?? null;
@@ -963,7 +973,8 @@ export default function CheckoutPage() {
               <hr className="mb-3" />
               <div className="space-y-1 text-sm">
                 <div className="flex justify-between text-slate-600"><span>Subtotal</span><span>{quote.subtotal}€</span></div>
-                {parseFloat(quote.discount) > 0 && <div className="flex justify-between text-green-600"><span>Desconto {quote.coupon ? `(${quote.coupon.code})` : ""}</span><span>-{quote.discount}€</span></div>}
+                {parseFloat(quote.couponDiscount || "0") > 0 && <div className="flex justify-between text-green-600"><span>Cupão {quote.coupon ? `(${quote.coupon.code})` : ""}</span><span>-{quote.couponDiscount}€</span></div>}
+                {parseFloat(quote.loyaltyDiscount || "0") > 0 && <div className="flex justify-between text-lime-700"><span>{quote.loyalty?.type === "voucher" ? `Vale ${quote.loyalty.code || ""}` : `${quote.loyalty?.points || 0} pontos`}</span><span>-{quote.loyaltyDiscount}€</span></div>}
                 <div className="flex justify-between text-slate-600"><span>Portes</span><span>{quote.shipping === "0.00" ? <span className="text-green-600">Grátis</span> : `${quote.shipping}€`}</span></div>
                 <div className="flex justify-between text-slate-400 text-xs"><span>IVA incluído</span><span>{quote.vat}€</span></div>
               </div>
@@ -978,9 +989,23 @@ export default function CheckoutPage() {
               <input type="text" placeholder="Código de cupão" value={couponCode}
                 onChange={e => { setCouponCode(e.target.value); localStorage.setItem("mdtech_coupon", e.target.value); }}
                 className="flex-1 border rounded-lg px-3 py-2 text-sm" />
-              <button onClick={() => fetchQuote(cart, couponCode, form.deliveryType)} className="px-3 py-2 border rounded-lg text-sm text-slate-600 hover:bg-slate-50">Aplicar</button>
+              <button onClick={() => fetchQuote(cart, couponCode, form.deliveryType, loyaltyMode, loyaltyVoucherCode, loyaltyPoints)} className="px-3 py-2 border rounded-lg text-sm text-slate-600 hover:bg-slate-50">Aplicar</button>
             </div>
           </div>
+          {user && (
+            <div className="mt-4 pt-4 border-t">
+              <p className="text-sm font-medium text-slate-700 mb-2">Pontos e vales <span className="text-xs font-normal text-slate-400">({loyaltyBalance} pts disponíveis)</span></p>
+              <div className="flex gap-2 mb-2 text-xs">
+                <button type="button" onClick={() => setLoyaltyMode(loyaltyMode === "voucher" ? "none" : "voucher")} className={`px-3 py-2 rounded-lg border ${loyaltyMode === "voucher" ? "border-lime-600 bg-lime-50 text-lime-700" : "text-slate-600"}`}>Usar vale</button>
+                <button type="button" onClick={() => setLoyaltyMode(loyaltyMode === "points" ? "none" : "points")} className={`px-3 py-2 rounded-lg border ${loyaltyMode === "points" ? "border-lime-600 bg-lime-50 text-lime-700" : "text-slate-600"}`}>Usar pontos</button>
+              </div>
+              {loyaltyMode === "voucher" && <input value={loyaltyVoucherCode} onChange={e => setLoyaltyVoucherCode(e.target.value.toUpperCase())} placeholder="MDT-XXXX-XXXX-XXXX" className="w-full border rounded-lg px-3 py-2 text-sm" />}
+              {loyaltyMode === "points" && <input type="number" min="100" step="100" max={loyaltyBalance} value={loyaltyPoints} onChange={e => setLoyaltyPoints(e.target.value)} placeholder="Ex.: 500 pontos = 5€" className="w-full border rounded-lg px-3 py-2 text-sm" />}
+              {quote?.loyaltyError && <p className="text-xs text-red-500 mt-1">{quote.loyaltyError}</p>}
+              {quote?.couponError && <p className="text-xs text-amber-600 mt-1">{quote.couponError}</p>}
+            </div>
+          )}
+
         </div>
       </div>
     </div>

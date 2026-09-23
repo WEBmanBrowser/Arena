@@ -172,6 +172,10 @@ export const orders = pgTable("orders", {
   subtotal: decimal("subtotal", { precision: 10, scale: 2 }).notNull(),
   shipping: decimal("shipping", { precision: 10, scale: 2 }).notNull().default("0.00"),
   discount: decimal("discount", { precision: 10, scale: 2 }).notNull().default("0.00"),
+  couponDiscount: decimal("coupon_discount", { precision: 10, scale: 2 }).notNull().default("0.00"),
+  loyaltyDiscount: decimal("loyalty_discount", { precision: 10, scale: 2 }).notNull().default("0.00"),
+  loyaltyType: varchar("loyalty_type", { length: 20 }),
+  loyaltyPoints: integer("loyalty_points"),
   vat: decimal("vat", { precision: 10, scale: 2 }).notNull().default("0.00"),
   total: decimal("total", { precision: 10, scale: 2 }).notNull(),
   paymentMethod: varchar("payment_method", { length: 100 }),
@@ -188,7 +192,11 @@ export const orders = pgTable("orders", {
   reservationExpiresAt: timestamp("reservation_expires_at"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
-}, (t) => [index("orders_user_idx").on(t.userId), index("orders_status_idx").on(t.status)]);
+}, (t) => [
+  index("orders_user_idx").on(t.userId), index("orders_status_idx").on(t.status),
+  check("orders_loyalty_type_valid", sql`${t.loyaltyType} IS NULL OR ${t.loyaltyType} IN ('voucher','points')`),
+  check("orders_loyalty_points_valid", sql`(${t.loyaltyType} IS NULL AND ${t.loyaltyPoints} IS NULL) OR (${t.loyaltyType} IS NOT NULL AND ${t.loyaltyPoints} IS NOT NULL AND ${t.loyaltyPoints} > 0 AND ${t.loyaltyPoints} % 100 = 0)`),
+]);
 
 export const orderItems = pgTable("order_items", {
   id: serial("id").primaryKey(),
@@ -682,6 +690,36 @@ export const loyaltyVouchers = pgTable("loyalty_vouchers", {
     (${t.status} = 'reserved' AND ${t.reservedOrderId} IS NOT NULL AND ${t.usedOrderId} IS NULL) OR
     (${t.status} = 'used' AND ${t.reservedOrderId} IS NULL AND ${t.usedOrderId} IS NOT NULL) OR
     (${t.status} = 'cancelled' AND ${t.reservedOrderId} IS NULL AND ${t.usedOrderId} IS NULL)
+  `),
+]);
+
+// ─── S33.3: DIRECT-POINT CHECKOUT RESERVATIONS ─────────────
+export const LOYALTY_POINT_RESERVATION_STATUSES = ["reserved", "used", "released"] as const;
+export type LoyaltyPointReservationStatus = (typeof LOYALTY_POINT_RESERVATION_STATUSES)[number];
+
+export const loyaltyPointReservations = pgTable("loyalty_point_reservations", {
+  id: serial("id").primaryKey(),
+  userId: integer("user_id").notNull().references(() => users.id),
+  orderId: integer("order_id").notNull().references(() => orders.id),
+  points: integer("points").notNull(),
+  valueCents: integer("value_cents").notNull(),
+  status: varchar("status", { length: 20 }).notNull().default("reserved"),
+  reservedAt: timestamp("reserved_at").notNull().defaultNow(),
+  consumedAt: timestamp("consumed_at"),
+  releasedAt: timestamp("released_at"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex("loyalty_point_reservations_order_unique").on(t.orderId),
+  index("loyalty_point_reservations_user_status_idx").on(t.userId, t.status),
+  check("loyalty_point_reservations_points_positive", sql`${t.points} > 0`),
+  check("loyalty_point_reservations_points_whole_euro", sql`${t.points} % 100 = 0`),
+  check("loyalty_point_reservations_value_matches_points", sql`${t.valueCents} = ${t.points}`),
+  check("loyalty_point_reservations_status_valid", sql`${t.status} IN ('reserved','used','released')`),
+  check("loyalty_point_reservations_state_consistent", sql`
+    (${t.status} = 'reserved' AND ${t.consumedAt} IS NULL AND ${t.releasedAt} IS NULL) OR
+    (${t.status} = 'used' AND ${t.consumedAt} IS NOT NULL AND ${t.releasedAt} IS NULL) OR
+    (${t.status} = 'released' AND ${t.consumedAt} IS NULL AND ${t.releasedAt} IS NOT NULL)
   `),
 ]);
 

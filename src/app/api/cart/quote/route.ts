@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/db";
-import { products, coupons } from "@/db/schema";
+import { products, coupons, loyaltyVouchers } from "@/db/schema";
 import { eq, and } from "drizzle-orm";
+import { getCurrentUser } from "@/lib/auth";
+import { getAvailableLoyaltyPointsTx } from "@/lib/services/loyalty-point-reservation-service";
 import { toCents, toEuros, calcVatFromGross, lineTotal } from "@/lib/money";
 import { calculateShippingForCart, ShippingRateError } from "@/lib/shipping-rates";
 import { getSupplierAvailabilityByProductIds } from "@/lib/supplier-stock";
@@ -15,7 +17,7 @@ import { getSupplierAvailabilityByProductIds } from "@/lib/supplier-stock";
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { items, couponCode, deliveryType } = body;
+    const { items, couponCode, deliveryType, loyaltyVoucherCode, loyaltyPoints } = body;
 
     if (!items || !Array.isArray(items) || items.length === 0) {
       return NextResponse.json({ error: "Carrinho vazio" }, { status: 400 });
@@ -134,7 +136,31 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    const afterDiscountCents = subtotalCents - discountCents;
+    let loyaltyDiscountCents = 0;
+    let loyaltyInfo: { type: "voucher" | "points"; points: number; code?: string } | null = null;
+    let loyaltyError: string | null = null;
+    const user = await getCurrentUser();
+    const requestedPoints = Number(loyaltyPoints || 0);
+    const afterCouponCents = subtotalCents - discountCents;
+    if (loyaltyVoucherCode || requestedPoints) {
+      if (!user) loyaltyError = "Inicie sessão para utilizar pontos ou vales";
+      else if (loyaltyVoucherCode && requestedPoints) loyaltyError = "Escolha um vale ou pontos, não ambos";
+      else if (loyaltyVoucherCode) {
+        const code = String(loyaltyVoucherCode).trim().toUpperCase();
+        const [voucher] = await db.select().from(loyaltyVouchers).where(and(eq(loyaltyVouchers.code, code), eq(loyaltyVouchers.userId, user.id))).limit(1);
+        if (!voucher || voucher.status !== "active") loyaltyError = "Vale inválido, indisponível ou já utilizado";
+        else if (voucher.valueCents > afterCouponCents) loyaltyError = "O valor do vale é superior ao valor dos produtos após cupão";
+        else { loyaltyDiscountCents = voucher.valueCents; loyaltyInfo = { type: "voucher", points: voucher.points, code: voucher.code }; }
+      } else if (!Number.isInteger(requestedPoints) || requestedPoints < 100 || requestedPoints % 100 !== 0) loyaltyError = "Os pontos devem ser um múltiplo inteiro de 100";
+      else if (requestedPoints > afterCouponCents) loyaltyError = "Os pontos selecionados excedem o valor dos produtos após cupão";
+      else {
+        const available = await getAvailableLoyaltyPointsTx(db, user.id);
+        if (available < requestedPoints) loyaltyError = "Saldo de pontos insuficiente";
+        else { loyaltyDiscountCents = requestedPoints; loyaltyInfo = { type: "points", points: requestedPoints }; }
+      }
+    }
+    const totalDiscountCents = discountCents + loyaltyDiscountCents;
+    const afterDiscountCents = subtotalCents - totalDiscountCents;
     const shippingQuote = await calculateShippingForCart({
       items: quoteLines.map((line) => ({ productId: line.productId, quantity: line.quantity })),
       deliveryType: deliveryType === "pickup" ? "pickup" : "shipping",
@@ -155,12 +181,16 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({
       lines: quoteLines,
       subtotal: toEuros(subtotalCents),
-      discount: toEuros(discountCents),
+      discount: toEuros(totalDiscountCents),
+      couponDiscount: toEuros(discountCents),
+      loyaltyDiscount: toEuros(loyaltyDiscountCents),
       shipping: toEuros(shippingCents),
       vat: toEuros(adjustedVatCents),
       total: toEuros(totalCents),
       coupon: couponInfo,
       couponError,
+      loyalty: loyaltyInfo,
+      loyaltyError,
       allInStock,
       anyPriceChanged,
       freeShippingThreshold: shippingQuote.freeShippingThresholdEuros,

@@ -13,6 +13,7 @@ import { runPostPaymentEffects } from "@/lib/services/post-payment-coordinator";
 import { enqueueEmail, dispatchEmailNotification } from "@/lib/email-outbox";
 import { lockProductsAscending, lockActiveProductSuppliersAscending, type DbOrTx } from "@/lib/stock-locks";
 import { consumeLoyaltyVoucherForOrderTx, releaseLoyaltyVoucherReservationForOrderTx } from "@/lib/services/loyalty-voucher-service";
+import { consumeLoyaltyPointsForOrderTx, releaseLoyaltyPointsForOrderTx } from "@/lib/services/loyalty-point-reservation-service";
 
 // ─── CONFIRM PAYMENT ──────────────────────────────────────
 //
@@ -355,6 +356,7 @@ export async function confirmOrderPaymentInTx(
   // through this transaction, so the voucher can never remain reserved after a
   // successfully committed payment.
   await consumeLoyaltyVoucherForOrderTx(tx, orderId);
+  await consumeLoyaltyPointsForOrderTx(tx, orderId, actorId);
 
   // MANDATORY financial audit inside the transaction (item 21).
   await createAuditLogTx(tx, {
@@ -453,6 +455,7 @@ export async function cancelOrder(orderId: number, actorId: number | null, reaso
             .where(and(eq(coupons.code, order.couponCode), sql`${coupons.usedCount} > 0`));
         }
         await releaseLoyaltyVoucherReservationForOrderTx(tx, orderId);
+        await releaseLoyaltyPointsForOrderTx(tx, orderId);
       }
       else {
         // Paid/processing/ready-for-pickup cancellations do not restock local
@@ -500,6 +503,7 @@ export async function releaseExpiredReservations(): Promise<{ expired: number }>
             .where(and(eq(coupons.code, current.couponCode), sql`${coupons.usedCount} > 0`));
         }
         await releaseLoyaltyVoucherReservationForOrderTx(tx, order.id);
+        await releaseLoyaltyPointsForOrderTx(tx, order.id);
         await tx.update(payments).set({ status: "expired", updatedAt: new Date() }).where(and(eq(payments.orderId, order.id), eq(payments.status, "pending")));
         await tx.insert(orderStatusHistory).values({ orderId: order.id, fromStatus: "pending_payment", toStatus: "expired", changedBy: null, comment: "Reserva expirada" });
       });

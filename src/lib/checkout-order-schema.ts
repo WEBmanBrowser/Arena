@@ -61,12 +61,18 @@ export const checkoutOrderSchema = z.object({
   paymentMethod: checkoutPaymentMethodSchema,
   shippingMethod: optionalText(100),
   couponCode: optionalText(100),
+  loyaltyVoucherCode: optionalText(32),
+  loyaltyPoints: z.number().int().min(100).multipleOf(100).nullable().optional().transform((value) => value || null),
   nif: optionalNif,
   companyName: optionalText(255),
   guestEmail: optionalEmail,
   guestName: optionalText(255),
   guestPhone: optionalText(50),
   notes: optionalText(2000),
+}).superRefine((value, ctx) => {
+  if (value.loyaltyVoucherCode && value.loyaltyPoints) {
+    ctx.addIssue({ code: "custom", path: ["loyaltyPoints"], message: "Escolha um vale ou pontos, não ambos" });
+  }
 }).transform((value) => {
   if (value.paymentMethod !== "mbway" || !value.guestPhone) {
     return value;
