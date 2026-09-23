@@ -251,7 +251,9 @@ export default function AdminCustomersPage() {
             </section>
 
             <section>
-              <h4 className="font-semibold mb-2">RMA / Wishlist</h4>
+              <h4 className="font-semibold mb-2">Fidelização / RMA / Wishlist</h4>
+              <p><strong>Saldo:</strong> {detail.loyalty.balancePoints} pontos ({fmtCents(detail.loyalty.redemptionValueCents)})</p>
+              <p><strong>Ganhos:</strong> {detail.loyalty.earnedPoints} · <strong>Revertidos:</strong> {detail.loyalty.reversedPoints}</p>
               <p><strong>Pedidos RMA:</strong> {detail.rmaSummary.total} (abertos: {detail.rmaSummary.open})</p>
               <p><strong>Produtos na wishlist:</strong> {detail.wishlistCount}</p>
             </section>
@@ -288,7 +290,8 @@ export default function AdminCustomersPage() {
                     <tr>
                       <th className="text-left p-2">N.º</th><th className="text-left p-2">Data</th>
                       <th className="text-right p-2">Total</th><th className="text-center p-2">Estado</th>
-                      <th className="text-center p-2">Pagamento</th><th className="text-center p-2 hidden md:table-cell">Entrega</th>
+                      <th className="text-center p-2">Pagamento</th><th className="text-left p-2 hidden lg:table-cell">Fatura</th>
+                      <th className="text-left p-2 hidden xl:table-cell">Transporte</th><th className="text-center p-2 hidden md:table-cell">Entrega</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -298,8 +301,10 @@ export default function AdminCustomersPage() {
                         <td className="p-2">{fmtDate(o.createdAt)}</td>
                         <td className="p-2 text-right">{parseFloat(o.total).toFixed(2)}€</td>
                         <td className="p-2 text-center">{o.status}</td>
-                        <td className="p-2 text-center">{o.paymentStatus}</td>
-                        <td className="p-2 text-center hidden md:table-cell">{o.deliveryType === "pickup" ? "📍 Loja" : "🚚 Envio"}</td>
+                        <td className="p-2 text-center">{o.paymentStatus}{o.paymentMethod ? ` · ${o.paymentMethod}` : ""}</td>
+                        <td className="p-2 hidden lg:table-cell">{o.invoiceNumber || "—"}</td>
+                        <td className="p-2 hidden xl:table-cell">{o.carrier || o.shippingMethod || "—"}{o.trackingNumber ? ` · ${o.trackingNumber}` : ""}</td>
+                        <td className="p-2 text-center hidden md:table-cell">{o.deliveryType === "pickup" ? "📍 Loja" : "🚚 Envio"}{o.refundedCents > 0 ? ` · reemb. ${fmtCents(o.refundedCents)}` : ""}</td>
                       </tr>
                     ))}
                   </tbody>

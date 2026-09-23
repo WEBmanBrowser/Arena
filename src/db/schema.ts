@@ -620,6 +620,32 @@ export type PaymentStatus = (typeof PAYMENT_STATUSES)[number];
 export const DELIVERY_TYPES = ["shipping", "pickup"] as const;
 export type DeliveryType = (typeof DELIVERY_TYPES)[number];
 
+
+// ─── S32: CUSTOMER LOYALTY LEDGER ─────────────────────────
+// Signed, append-only point movements. Balance is always derived with SUM(points_delta).
+// 1 EUR of eligible net paid value = 1 point; 100 points = 1 EUR redemption value.
+export const LOYALTY_MOVEMENT_TYPES = ["earn", "redeem", "reverse", "adjustment"] as const;
+export type LoyaltyMovementType = (typeof LOYALTY_MOVEMENT_TYPES)[number];
+
+export const loyaltyPointMovements = pgTable("loyalty_point_movements", {
+  id: serial("id").primaryKey(),
+  userId: integer("user_id").notNull().references(() => users.id),
+  orderId: integer("order_id").references(() => orders.id, { onDelete: "cascade" }),
+  type: varchar("type", { length: 20 }).notNull(),
+  pointsDelta: integer("points_delta").notNull(),
+  eligibleAmountCents: integer("eligible_amount_cents"),
+  idempotencyKey: varchar("idempotency_key", { length: 160 }).notNull(),
+  reason: varchar("reason", { length: 500 }),
+  actorUserId: integer("actor_user_id").references(() => users.id),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+}, (t) => [
+  index("loyalty_points_user_idx").on(t.userId),
+  index("loyalty_points_order_idx").on(t.orderId),
+  uniqueIndex("loyalty_points_idempotency_unique").on(t.idempotencyKey),
+  check("loyalty_points_delta_nonzero", sql`${t.pointsDelta} <> 0`),
+  check("loyalty_points_eligible_non_negative", sql`${t.eligibleAmountCents} IS NULL OR ${t.eligibleAmountCents} >= 0`),
+]);
+
 // ─── B.2.2: CUSTOMER NOTES (staff internal notes, never customer-visible) ──
 export const customerNotes = pgTable("customer_notes", {
   id: serial("id").primaryKey(),

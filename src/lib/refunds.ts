@@ -54,6 +54,7 @@ import {
 } from "@/db/schema";
 import { and, desc, eq, inArray, lte } from "drizzle-orm";
 import { createAuditLog } from "@/lib/audit";
+import { reconcileLoyaltyForOrder } from "@/lib/services/loyalty-service";
 import { decimalToCents } from "@/lib/money";
 import { PAYMENT_PROVIDERS } from "@/lib/providers/registry";
 
@@ -387,6 +388,7 @@ export async function completeManualRefund(input: ManualCompletionInput) {
     entityId: refund.id,
     details: { orderId: refund.orderId, amountCents: refund.amountCents, currency: refund.currency },
   });
+  await reconcileLoyaltyForOrder(refund.orderId, input.actorId).catch(() => undefined);
   return refund;
 }
 

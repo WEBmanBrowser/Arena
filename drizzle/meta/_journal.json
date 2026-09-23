@@ -141,6 +141,13 @@
       "when": 1790110800000,
       "tag": "0019_legal_rgpd_p0",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1790200800000,
+      "tag": "0020_customer_loyalty_s32",
+      "breakpoints": true
     }
   ]
 }

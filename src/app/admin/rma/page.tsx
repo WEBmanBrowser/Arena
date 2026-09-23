@@ -1,8 +1,8 @@
 "use client";
 import { useState, useEffect } from "react";
 
-const statusOptions = ["open", "received", "analyzing", "repairing", "waiting_part", "waiting_client", "completed", "cancelled"];
-const statusLabels: Record<string, string> = { open: "Aberto", received: "Recebido", analyzing: "Em análise", repairing: "Em reparação", waiting_part: "A aguardar peça", waiting_client: "A aguardar cliente", completed: "Concluído", cancelled: "Cancelado" };
+const statusOptions = ["requested", "under_review", "approved", "rejected", "received", "analysis", "repair", "replacement", "refund", "completed", "cancelled"];
+const statusLabels: Record<string, string> = { requested: "Pedido", under_review: "Em análise inicial", approved: "Aprovado", rejected: "Rejeitado", received: "Recebido", analysis: "Em análise", repair: "Em reparação", replacement: "Substituição", refund: "Reembolso", completed: "Concluído", cancelled: "Cancelado" };
 
 export default function AdminRmaPage() {
   const [items, setItems] = useState<any[]>([]);
@@ -33,6 +33,9 @@ export default function AdminRmaPage() {
               </select>
             </div>
             <p className="text-sm text-slate-600 mb-2">{r.description}</p>
+            {r.orderId && <p className="text-xs text-slate-500 mb-1">Encomenda: #{r.orderId}</p>}
+            {r.reason && <p className="text-xs text-slate-500 mb-1">Motivo: {r.reason}</p>}
+            {r.resolution && <p className="text-xs text-green-700 mb-1">Resolução: {r.resolution}</p>}
             <div className="text-xs text-slate-400">
               {r.userName && <span>Cliente: {r.userName} ({r.userEmail})</span>}
               <span className="ml-3">{new Date(r.createdAt).toLocaleDateString("pt-PT")}</span>

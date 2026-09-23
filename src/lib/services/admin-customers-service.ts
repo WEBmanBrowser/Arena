@@ -24,9 +24,10 @@
  *   Monetary values are INTEGER CENTS in the service API.
  */
 import { db } from "@/db";
-import { addresses, customerNotes, invoiceDocuments, orders, orderItems, users, wishlists, rmaRequests, refundAttempts, RMA_STATUSES } from "@/db/schema";
+import { addresses, customerNotes, invoiceDocuments, orders, orderItems, users, wishlists, rmaRequests, refundAttempts, shipments, RMA_STATUSES } from "@/db/schema";
 import { and, asc, desc, eq, gte, ilike, inArray, lte, or, sql, type SQLWrapper, type SQL } from "drizzle-orm";
 import { createAuditLog } from "@/lib/audit";
+import { getLoyaltySummary, type LoyaltySummary } from "@/lib/services/loyalty-service";
 
 export const ADMIN_CUSTOMER_PAGE_SIZE_DEFAULT = 25;
 export const ADMIN_CUSTOMER_PAGE_SIZE_MAX = 100;
@@ -93,6 +94,9 @@ export type AdminCustomerAddressRow = typeof addresses.$inferSelect;
 export type AdminCustomerOrderRow = {
   id: number; orderNumber: string; createdAt: Date; total: string;
   status: string; paymentStatus: string; deliveryType: string;
+  paymentMethod: string | null; shippingMethod: string | null; trackingNumber: string | null; notes: string | null;
+  invoiceNumber: string | null; invoiceStatus: string | null; carrier: string | null; shipmentStatus: string | null;
+  refundedCents: number; itemCount: number;
 };
 export type AdminCustomerNoteRow = {
   id: number; userId: number; authorUserId: number;
@@ -112,6 +116,8 @@ export type AdminCustomerDetail = {
   notes: AdminCustomerNoteRow[];
   rmaSummary: { total: number; open: number; resolved: number };
   wishlistCount: number;
+  loyalty: LoyaltySummary;
+  rmaRequests: Array<{ id: number; orderId: number | null; type: string; status: string; reason: string | null; description: string; resolution: string | null; createdAt: Date; updatedAt: Date; }>;
 };
 
 // ─── Helpers ─────────────────────────────────────────────
@@ -308,17 +314,47 @@ export async function getAdminCustomerDetail(customerId: number, ordersPage = 1,
   const ps = Math.min(100, Math.max(1, ordersPageSize));
   const [oc] = await db.select({ count: sql<number>`count(*)::int` }).from(orders).where(eq(orders.userId, customerId));
   const orderTotal = Number(oc?.count ?? 0);
-  const orderRows = await db.select({
-    id: orders.id,
-    orderNumber: orders.orderNumber,
-    createdAt: orders.createdAt,
-    total: orders.total,
-    status: orders.status,
-    paymentStatus: orders.paymentStatus,
-    deliveryType: orders.deliveryType,
+  const baseOrderRows = await db.select({
+    id: orders.id, orderNumber: orders.orderNumber, createdAt: orders.createdAt, total: orders.total,
+    status: orders.status, paymentStatus: orders.paymentStatus, deliveryType: orders.deliveryType,
+    paymentMethod: orders.paymentMethod, shippingMethod: orders.shippingMethod, trackingNumber: orders.trackingNumber, notes: orders.notes,
   }).from(orders).where(eq(orders.userId, customerId))
     .orderBy(desc(orders.createdAt), desc(orders.id))
     .limit(ps).offset((p - 1) * ps);
+
+  const orderIds = baseOrderRows.map(o => o.id);
+  const [invoiceRows, shipmentRows, refundRows, itemRows] = orderIds.length ? await Promise.all([
+    db.select({ orderId: invoiceDocuments.orderId, documentNumber: invoiceDocuments.documentNumber, status: invoiceDocuments.status, createdAt: invoiceDocuments.createdAt })
+      .from(invoiceDocuments).where(and(inArray(invoiceDocuments.orderId, orderIds), eq(invoiceDocuments.documentType, "invoice"))).orderBy(desc(invoiceDocuments.createdAt)),
+    db.select({ orderId: shipments.orderId, provider: shipments.provider, status: shipments.status, trackingNumber: shipments.trackingNumber, createdAt: shipments.createdAt })
+      .from(shipments).where(inArray(shipments.orderId, orderIds)).orderBy(desc(shipments.createdAt)),
+    db.select({ orderId: refundAttempts.orderId, refundedCents: sql<number>`COALESCE(SUM(${refundAttempts.amountCents}), 0)::int` })
+      .from(refundAttempts).where(and(inArray(refundAttempts.orderId, orderIds), eq(refundAttempts.status, "succeeded"))).groupBy(refundAttempts.orderId),
+    db.select({ orderId: orderItems.orderId, itemCount: sql<number>`COALESCE(SUM(${orderItems.quantity}), 0)::int` })
+      .from(orderItems).where(inArray(orderItems.orderId, orderIds)).groupBy(orderItems.orderId),
+  ]) : [[], [], [], []];
+  const firstInvoice = new Map<number, typeof invoiceRows[number]>();
+  for (const row of invoiceRows) if (!firstInvoice.has(row.orderId)) firstInvoice.set(row.orderId, row);
+  const firstShipment = new Map<number, typeof shipmentRows[number]>();
+  for (const row of shipmentRows) if (!firstShipment.has(row.orderId)) firstShipment.set(row.orderId, row);
+  const refundsByOrder = new Map(refundRows.map(r => [r.orderId, Number(r.refundedCents ?? 0)]));
+  const itemsByOrder = new Map(itemRows.map(r => [r.orderId, Number(r.itemCount ?? 0)]));
+  const orderRows: AdminCustomerOrderRow[] = baseOrderRows.map(o => ({
+    ...o,
+    invoiceNumber: firstInvoice.get(o.id)?.documentNumber ?? null,
+    invoiceStatus: firstInvoice.get(o.id)?.status ?? null,
+    carrier: firstShipment.get(o.id)?.provider ?? null,
+    shipmentStatus: firstShipment.get(o.id)?.status ?? null,
+    trackingNumber: firstShipment.get(o.id)?.trackingNumber ?? o.trackingNumber,
+    refundedCents: refundsByOrder.get(o.id) ?? 0,
+    itemCount: itemsByOrder.get(o.id) ?? 0,
+  }));
+
+  const loyalty = await getLoyaltySummary(customerId);
+  const customerRmas = await db.select({
+    id: rmaRequests.id, orderId: rmaRequests.orderId, type: rmaRequests.type, status: rmaRequests.status, reason: rmaRequests.reason,
+    description: rmaRequests.description, resolution: rmaRequests.resolution, createdAt: rmaRequests.createdAt, updatedAt: rmaRequests.updatedAt,
+  }).from(rmaRequests).where(eq(rmaRequests.userId, customerId)).orderBy(desc(rmaRequests.createdAt)).limit(50);
 
   const noteRows = await db.select({
     id: customerNotes.id,
@@ -359,6 +395,8 @@ export async function getAdminCustomerDetail(customerId: number, ordersPage = 1,
       resolved: Number(rmaAgg?.resolved ?? 0),
     },
     wishlistCount: Number(wl?.count ?? 0),
+    loyalty,
+    rmaRequests: customerRmas,
   };
 }
 

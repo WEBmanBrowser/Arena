@@ -50,6 +50,7 @@
  */
 
 import { db } from "@/db";
+import { reconcileLoyaltyForOrder } from "@/lib/services/loyalty-service";
 import {
   paymentAttempts,
   providerWebhookEvents,
@@ -506,6 +507,7 @@ export async function recoverIgnoredEupagoRefund(input: {
         currency: settled.currency,
       },
     });
+    await reconcileLoyaltyForOrder(settled.orderId, input.actorId).catch(() => undefined);
     return {
       outcome: "settled",
       refund: settled,
