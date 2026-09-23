@@ -148,6 +148,13 @@
       "when": 1790200800000,
       "tag": "0020_customer_loyalty_s32",
       "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1790287200000,
+      "tag": "0021_loyalty_vouchers_s33_1",
+      "breakpoints": true
     }
   ]
 }

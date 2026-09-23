@@ -646,6 +646,45 @@ export const loyaltyPointMovements = pgTable("loyalty_point_movements", {
   check("loyalty_points_eligible_non_negative", sql`${t.eligibleAmountCents} IS NULL OR ${t.eligibleAmountCents} >= 0`),
 ]);
 
+// ─── S33.1: LOYALTY VOUCHERS ───────────────────────────────
+// Points are debited when a voucher is created. The voucher then carries that
+// value until it is consumed once by an order. Reservation is reversible while
+// an order is still pending payment.
+export const LOYALTY_VOUCHER_STATUSES = ["active", "reserved", "used", "cancelled"] as const;
+export type LoyaltyVoucherStatus = (typeof LOYALTY_VOUCHER_STATUSES)[number];
+
+export const loyaltyVouchers = pgTable("loyalty_vouchers", {
+  id: serial("id").primaryKey(),
+  userId: integer("user_id").notNull().references(() => users.id),
+  code: varchar("code", { length: 32 }).notNull(),
+  points: integer("points").notNull(),
+  valueCents: integer("value_cents").notNull(),
+  status: varchar("status", { length: 20 }).notNull().default("active"),
+  reservedOrderId: integer("reserved_order_id").references(() => orders.id),
+  usedOrderId: integer("used_order_id").references(() => orders.id),
+  reservedAt: timestamp("reserved_at"),
+  usedAt: timestamp("used_at"),
+  cancelledAt: timestamp("cancelled_at"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex("loyalty_vouchers_code_unique").on(t.code),
+  index("loyalty_vouchers_user_idx").on(t.userId),
+  uniqueIndex("loyalty_vouchers_reserved_order_unique").on(t.reservedOrderId).where(sql`reserved_order_id IS NOT NULL`),
+  uniqueIndex("loyalty_vouchers_used_order_unique").on(t.usedOrderId).where(sql`used_order_id IS NOT NULL`),
+  check("loyalty_vouchers_points_positive", sql`${t.points} > 0`),
+  check("loyalty_vouchers_points_whole_euro", sql`${t.points} % 100 = 0`),
+  check("loyalty_vouchers_value_positive", sql`${t.valueCents} > 0`),
+  check("loyalty_vouchers_value_matches_points", sql`${t.valueCents} = ${t.points}`),
+  check("loyalty_vouchers_status_valid", sql`${t.status} IN ('active','reserved','used','cancelled')`),
+  check("loyalty_vouchers_state_consistent", sql`
+    (${t.status} = 'active' AND ${t.reservedOrderId} IS NULL AND ${t.usedOrderId} IS NULL) OR
+    (${t.status} = 'reserved' AND ${t.reservedOrderId} IS NOT NULL AND ${t.usedOrderId} IS NULL) OR
+    (${t.status} = 'used' AND ${t.reservedOrderId} IS NULL AND ${t.usedOrderId} IS NOT NULL) OR
+    (${t.status} = 'cancelled' AND ${t.reservedOrderId} IS NULL AND ${t.usedOrderId} IS NULL)
+  `),
+]);
+
 // ─── B.2.2: CUSTOMER NOTES (staff internal notes, never customer-visible) ──
 export const customerNotes = pgTable("customer_notes", {
   id: serial("id").primaryKey(),
