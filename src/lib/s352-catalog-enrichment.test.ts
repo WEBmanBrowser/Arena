@@ -1,0 +1,9 @@
+import { describe, expect, it } from "vitest";
+import fs from "node:fs"; import path from "node:path";
+const read=(p:string)=>fs.readFileSync(path.join(process.cwd(),p),"utf8");
+describe("S35.2 catalog enrichment safety boundary",()=>{
+  it("keeps protected commercial fields outside snapshot/apply writes",()=>{ const s=read("src/lib/services/catalog-enrichment-service.ts"); const apply=s.slice(s.indexOf("export async function applyCatalogSnapshot")); for(const forbidden of ["costPrice","priceMode","supplierStock","stock:","ean:","manufacturerPartNumber","supplierCategoryPath","gpsrManufacturerName"]) expect(apply).not.toContain(forbidden); });
+  it("requires explicit per-area apply and stores snapshots separately",()=>{ const s=read("src/lib/services/catalog-enrichment-service.ts"); const ui=read("src/components/admin/ProductCatalogEnrichment.tsx"); expect(s).toContain("productCatalogEnrichments"); expect(s).toContain("applyDescription"); expect(s).toContain("applyShortDescription"); expect(s).toContain("applyAttributes"); expect(ui).toContain('apply("description")'); expect(ui).toContain('apply("shortDescription")'); expect(ui).toContain('apply("attributes")'); });
+  it("protects manual text and merges attributes per key",()=>{ const s=read("src/lib/services/catalog-enrichment-service.ts"); expect(s).toContain("canReplaceText"); expect(s).toContain("appliedShortDescriptionHash"); expect(s).toContain("appliedAttributesSnapshot"); expect(s).toContain("const merged = { ...currentAttributes }"); expect(s).toContain("protectedFields.attributeKeys.push(key)"); expect(s).not.toContain("update.attributes = snap.sourceAttributes"); });
+  it("does not add automatic catalog fetch or scraping",()=>{ const s=read("src/lib/services/catalog-enrichment-service.ts"); expect(s).not.toContain("fetch("); expect(s).not.toContain("also.com"); });
+});

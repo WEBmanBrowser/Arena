@@ -4,6 +4,7 @@ import BulkPriceModal from "@/components/admin/BulkPriceModal";
 import ProductImageManager from "@/components/admin/ProductImageManager";
 import ProductSupplierManager from "@/components/admin/ProductSupplierManager";
 import PriceCalculator from "@/components/admin/PriceCalculator";
+import ProductCatalogEnrichment from "@/components/admin/ProductCatalogEnrichment";
 
 const TABS = [
   { id: "geral" as const, label: "Geral", requiresSaved: false },
@@ -11,6 +12,7 @@ const TABS = [
   { id: "stock" as const, label: "Stock", requiresSaved: false },
   { id: "conteudo" as const, label: "Conteúdo", requiresSaved: false },
   { id: "gpsr" as const, label: "Segurança / GPSR", requiresSaved: false },
+  { id: "catalogo" as const, label: "Catálogo ALSO", requiresSaved: true },
   { id: "imagens" as const, label: "Imagens", requiresSaved: true },
   { id: "fornecedores" as const, label: "Fornecedores", requiresSaved: true },
 ];
@@ -52,7 +54,7 @@ export default function AdminProductsPage() {
   const [editingProduct, setEditingProduct] = useState<any>(null);
   const [showForm, setShowForm] = useState(false);
   const [showBulkPrice, setShowBulkPrice] = useState(false);
-  const [tab, setTab] = useState<"geral" | "precos" | "stock" | "conteudo" | "gpsr" | "imagens" | "fornecedores">("geral");
+  const [tab, setTab] = useState<"geral" | "precos" | "stock" | "conteudo" | "gpsr" | "catalogo" | "imagens" | "fornecedores">("geral");
   const [saving, setSaving] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [categories, setCategories] = useState<any[]>([]);
@@ -392,6 +394,9 @@ export default function AdminProductsPage() {
                 </div>
               )}
 
+              {/* ─── CATÁLOGO ALSO / 1WORLDSYNC ─── */}
+              {tab === "catalogo" && editingProduct && <ProductCatalogEnrichment productId={editingProduct.id} onChanged={refreshNow} />}
+
               {/* ─── IMAGENS ─── */}
               {tab === "imagens" && editingProduct && <ProductImageManager productId={editingProduct.id} onChanged={refreshNow} />}
 
@@ -402,7 +407,7 @@ export default function AdminProductsPage() {
             {/* Footer */}
             <div className="px-6 py-4 border-t flex items-center justify-between gap-3">
               <p className="text-xs text-slate-400">
-                {tab === "imagens" || tab === "fornecedores" ? "As alterações desta secção são guardadas automaticamente." : "Campos com * são obrigatórios."}
+                {tab === "catalogo" || tab === "imagens" || tab === "fornecedores" ? "As alterações desta secção são guardadas automaticamente." : "Campos com * são obrigatórios."}
               </p>
               <div className="flex gap-3">
                 <button type="button" onClick={() => setShowForm(false)} className="px-4 py-2 border rounded-lg text-sm text-slate-600 hover:bg-slate-50">Fechar</button>

@@ -224,6 +224,7 @@ export async function PUT(req: NextRequest) {
   if (d.categoryId !== undefined) updateData.categoryId = d.categoryId;
   if (d.shortDescription !== undefined) updateData.shortDescription = d.shortDescription;
   if (d.description !== undefined) updateData.description = d.description;
+  if (d.attributes !== undefined) updateData.attributes = d.attributes;
   if (d.comparePrice !== undefined) updateData.comparePrice = d.comparePrice;
   if (d.costPrice !== undefined) updateData.costPrice = d.costPrice;
   if (d.minStock !== undefined) updateData.minStock = d.minStock;

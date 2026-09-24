@@ -440,6 +440,36 @@ export const productSuppliers = pgTable("product_suppliers", {
   uniqueIndex("ps_preferred_unique").on(t.productId).where(sql`is_preferred = true`),
 ]);
 
+// ─── S35.2 CATALOG ENRICHMENT ─────────────────────────────
+// Snapshot separado dos feeds comerciais ALSO. Nunca é autoridade de preço,
+// custo, stock, EAN, nome, MPN, fabricante/categoria do fornecedor ou GPSR.
+export const productCatalogEnrichments = pgTable("product_catalog_enrichments", {
+  id: serial("id").primaryKey(),
+  productId: integer("product_id").notNull().references(() => products.id, { onDelete: "cascade" }),
+  supplierId: integer("supplier_id").notNull().references(() => suppliers.id, { onDelete: "cascade" }),
+  supplierSku: varchar("supplier_sku", { length: 100 }).notNull(),
+  provider: varchar("provider", { length: 50 }).notNull().default("also_1worldsync"),
+  sourceUrl: varchar("source_url", { length: 1000 }),
+  sourceShortDescription: text("source_short_description"),
+  sourceDescription: text("source_description"),
+  sourceAttributes: jsonb("source_attributes").$type<Record<string, string>>().notNull().default({}),
+  sourceImages: jsonb("source_images").$type<Array<{ url: string; alt?: string | null; sourceRef?: string | null }>>().notNull().default([]),
+  contentHash: varchar("content_hash", { length: 64 }).notNull(),
+  fetchedAt: timestamp("fetched_at", { withTimezone: true }).notNull().defaultNow(),
+  lastAppliedAt: timestamp("last_applied_at", { withTimezone: true }),
+  appliedDescriptionHash: varchar("applied_description_hash", { length: 64 }),
+  appliedShortDescriptionHash: varchar("applied_short_description_hash", { length: 64 }),
+  appliedAttributesHash: varchar("applied_attributes_hash", { length: 64 }),
+  appliedAttributesSnapshot: jsonb("applied_attributes_snapshot").$type<Record<string, string>>().notNull().default({}),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex("pce_product_supplier_provider_unique").on(t.productId, t.supplierId, t.provider),
+  index("pce_product_idx").on(t.productId),
+  index("pce_supplier_sku_idx").on(t.supplierId, t.supplierSku),
+  check("pce_provider_valid", sql`${t.provider} IN ('also_1worldsync')`),
+]);
+
 // ─── ORDER ITEM STOCK ALLOCATIONS ────────────────────────
 // Regista de onde é satisfeita cada quantidade de uma linha da encomenda.
 // Uma linha pode ser dividida entre stock físico MDTech e um ou mais
@@ -541,11 +571,19 @@ export const productImages = pgTable("product_images", {
   isPrimary: boolean("is_primary").notNull().default(false),
   mimeType: varchar("mime_type", { length: 100 }),
   fileSize: integer("file_size"),
+  // S35.2: NULL/manual nas imagens existentes; ALSO apenas nas imagens copiadas pelo enriquecedor.
+  source: varchar("source", { length: 30 }).notNull().default("manual"),
+  sourceRef: varchar("source_ref", { length: 500 }),
+  sourceUrl: varchar("source_url", { length: 1000 }),
+  sourceHash: varchar("source_hash", { length: 64 }),
+  importedAt: timestamp("imported_at", { withTimezone: true }),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
 }, (t) => [
   index("pi_product_idx").on(t.productId),
   uniqueIndex("pi_primary_unique").on(t.productId).where(sql`is_primary = true`),
+  uniqueIndex("pi_product_source_ref_unique").on(t.productId, t.source, t.sourceRef).where(sql`source_ref IS NOT NULL`),
+  check("pi_source_valid", sql`${t.source} IN ('manual','also_1worldsync')`),
 ]);
 
 // ─── REVIEWS ─────────────────────────────────────────────
