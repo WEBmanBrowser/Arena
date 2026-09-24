@@ -467,7 +467,28 @@ export const productCatalogEnrichments = pgTable("product_catalog_enrichments", 
   uniqueIndex("pce_product_supplier_provider_unique").on(t.productId, t.supplierId, t.provider),
   index("pce_product_idx").on(t.productId),
   index("pce_supplier_sku_idx").on(t.supplierId, t.supplierSku),
-  check("pce_provider_valid", sql`${t.provider} IN ('also_1worldsync')`),
+  check("pce_provider_valid", sql`${t.provider} IN ('also_1worldsync','upcitemdb')`),
+]);
+
+// ─── S35.3 CATALOG ENRICHMENT DISCOVERY ───────────────────
+// Registo operacional das tentativas automáticas. Identidade comercial é apenas
+// lida; esta tabela nunca é autoridade de preço, custo, stock ou catálogo mestre.
+export const catalogEnrichmentAttempts = pgTable("catalog_enrichment_attempts", {
+  id: serial("id").primaryKey(),
+  productId: integer("product_id").notNull().references(() => products.id, { onDelete: "cascade" }),
+  supplierId: integer("supplier_id").notNull().references(() => suppliers.id, { onDelete: "cascade" }),
+  provider: varchar("provider", { length: 50 }).notNull(),
+  lookupKey: varchar("lookup_key", { length: 255 }).notNull(),
+  status: varchar("status", { length: 30 }).notNull(),
+  detail: text("detail"),
+  attemptedAt: timestamp("attempted_at", { withTimezone: true }).notNull().defaultNow(),
+  retryAfter: timestamp("retry_after", { withTimezone: true }),
+}, (t) => [
+  index("cea_product_idx").on(t.productId),
+  index("cea_supplier_status_idx").on(t.supplierId, t.status),
+  index("cea_attempted_idx").on(t.attemptedAt),
+  check("cea_provider_valid", sql`${t.provider} IN ('upcitemdb')`),
+  check("cea_status_valid", sql`${t.status} IN ('found','not_found','error','rate_limited','skipped')`),
 ]);
 
 // ─── ORDER ITEM STOCK ALLOCATIONS ────────────────────────

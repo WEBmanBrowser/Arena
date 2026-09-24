@@ -8,7 +8,7 @@ export type CatalogSnapshotInput = {
   productId: number;
   supplierId: number;
   supplierSku: string;
-  provider?: "also_1worldsync";
+  provider?: "also_1worldsync" | "upcitemdb";
   sourceUrl?: string | null;
   shortDescription?: string | null;
   description?: string | null;
