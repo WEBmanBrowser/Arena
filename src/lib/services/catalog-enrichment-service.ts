@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { db } from "@/db";
 import { productCatalogEnrichments, productSuppliers, products } from "@/db/schema";
 import { and, eq } from "drizzle-orm";
+import { normalizeTechnicalAttributes } from "@/lib/catalog-enrichment/normalize-technical-attributes";
 
 export type CatalogImageCandidate = { url: string; alt?: string | null; sourceRef?: string | null };
 export type CatalogSnapshotInput = {
@@ -41,7 +42,7 @@ export async function stageCatalogSnapshot(input: CatalogSnapshotInput) {
     .limit(1);
   if (!link || !link.supplierSku || link.supplierSku !== input.supplierSku) throw new Error("SUPPLIER_PRODUCT_MISMATCH");
 
-  const attributes = cleanAttributes(input.attributes ?? {});
+  const attributes = normalizeTechnicalAttributes(cleanAttributes(input.attributes ?? {}));
   const images = (input.images ?? []).filter(i => /^https:\/\//i.test(i.url)).slice(0, 50);
   const snapshot = {
     shortDescription: cleanText(input.shortDescription), description: cleanText(input.description), attributes, images,
