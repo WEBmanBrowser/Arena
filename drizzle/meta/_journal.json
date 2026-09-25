@@ -183,6 +183,13 @@
       "when": 1790632800000,
       "tag": "0025_catalog_enrichment_discovery_s35_3",
       "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1790719200000,
+      "tag": "0026_storefront_content_s36_1",
+      "breakpoints": true
     }
   ]
 }

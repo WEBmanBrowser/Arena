@@ -4,6 +4,8 @@ import Logo from "@/components/Logo";
 
 const ANYDESK_DOWNLOAD_URL = "https://anydesk.com/pt/downloads/windows";
 const LIVRO_RECLAMACOES_URL = "https://www.livroreclamacoes.pt/inicio/";
+const FACEBOOK_URL = "https://www.facebook.com/MDtech.pt/";
+const INSTAGRAM_URL = "https://www.instagram.com/mdtech.pt/";
 
 export default function Footer() {
   return (
@@ -19,6 +21,11 @@ export default function Footer() {
             <p className="text-sm">NIPC: 519 445 902</p>
             <p className="text-sm">📞 +351 917 801 898</p>
             <p className="text-sm">✉️ geral@mdtech.pt</p>
+            <div className="mt-4 flex flex-wrap gap-3">
+              <a href={FACEBOOK_URL} target="_blank" rel="noopener noreferrer" className="text-sm font-medium text-slate-300 hover:text-white transition" aria-label="MDTech no Facebook">Facebook</a>
+              <span className="text-slate-700" aria-hidden="true">•</span>
+              <a href={INSTAGRAM_URL} target="_blank" rel="noopener noreferrer" className="text-sm font-medium text-slate-300 hover:text-white transition" aria-label="MDTech no Instagram">Instagram</a>
+            </div>
           </div>
 
           <div>
