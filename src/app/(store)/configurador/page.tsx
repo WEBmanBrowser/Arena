@@ -1,5 +1,6 @@
 "use client";
 import { useState, useEffect } from "react";
+import { candidateCompatibility, evaluatePcCompatibility } from "@/lib/pc-builder-compatibility";
 
 const componentTypes = [
   { key: "cpu", label: "Processador", icon: "🔲", category: "processadores" },
@@ -19,7 +20,7 @@ export default function ConfiguradorPage() {
 
   useEffect(() => {
     for (const ct of componentTypes) {
-      fetch(`/api/products?cat=${ct.category}&limit=50`).then(r => r.json()).then(d => {
+      fetch(`/api/products?cat=${ct.category}&limit=50&inStock=true`).then(r => r.json()).then(d => {
         setProducts(p => ({ ...p, [ct.key]: d.products || [] }));
       });
     }
@@ -28,28 +29,9 @@ export default function ConfiguradorPage() {
   const totalPrice = Object.values(config).reduce((acc: number, p: any) => acc + (p ? parseFloat(p.price) : 0), 0);
   const selectedCount = Object.values(config).filter(Boolean).length;
 
-  const checkCompatibility = () => {
-    const warnings: string[] = [];
-    const cpu = config.cpu;
-    const mb = config.motherboard;
-    if (cpu && mb) {
-      const cpuSocket = cpu.attributes?.socket;
-      const mbSocket = mb.attributes?.socket;
-      if (cpuSocket && mbSocket && cpuSocket !== mbSocket) {
-        warnings.push(`Socket incompatível: CPU ${cpuSocket} ≠ Motherboard ${mbSocket}`);
-      }
-    }
-    if (mb && config.ram) {
-      const mbMem = mb.attributes?.memoryType;
-      const ramType = config.ram.attributes?.type;
-      if (mbMem && ramType && mbMem !== ramType) {
-        warnings.push(`Memória incompatível: Motherboard suporta ${mbMem}, RAM selecionada é ${ramType}`);
-      }
-    }
-    return warnings;
-  };
+  const compatibility = evaluatePcCompatibility(config);
 
-  const warnings = checkCompatibility();
+  const visibleProducts = (type: string) => (products[type] || []).filter((p: any) => candidateCompatibility(type, p, config) !== "incompatible");
 
   const addAllToCart = () => {
     const stored = localStorage.getItem("mdtech_cart");
@@ -102,10 +84,10 @@ export default function ConfiguradorPage() {
 
                 {selecting === ct.key && (
                   <div className="mt-4 border-t pt-4 space-y-2 max-h-60 overflow-y-auto animate-fade-in">
-                    {(products[ct.key] || []).length === 0 ? (
-                      <p className="text-xs text-slate-400">Sem produtos disponíveis nesta categoria.</p>
+                    {visibleProducts(ct.key).length === 0 ? (
+                      <p className="text-xs text-slate-400">Sem componentes compatíveis disponíveis nesta categoria.</p>
                     ) : (
-                      (products[ct.key] || []).map((p: any) => (
+                      visibleProducts(ct.key).map((p: any) => (
                         <button key={p.id} onClick={() => { setConfig(c => ({ ...c, [ct.key]: p })); setSelecting(null); }}
                           className="w-full flex items-center justify-between p-3 rounded-lg border hover:border-sky-300 hover:bg-sky-50 transition text-left">
                           <div>
@@ -144,23 +126,34 @@ export default function ConfiguradorPage() {
             <p className="text-xs text-slate-400 mt-1">{selectedCount} componente{selectedCount !== 1 ? "s" : ""} selecionado{selectedCount !== 1 ? "s" : ""}</p>
           </div>
 
-          {warnings.length > 0 && (
+          {selectedCount > 0 && compatibility.level === "incompatible" && (
             <div className="bg-red-50 border border-red-200 rounded-xl p-4">
-              <p className="text-sm font-semibold text-red-700 mb-2">⚠️ Incompatibilidades</p>
-              {warnings.map((w, i) => (
-                <p key={i} className="text-xs text-red-600">{w}</p>
+              <p className="text-sm font-semibold text-red-700 mb-2">⚠️ Incompatibilidades confirmadas</p>
+              {compatibility.issues.filter(i => i.level === "incompatible").map((issue) => (
+                <p key={issue.code} className="text-xs text-red-600">{issue.message}</p>
               ))}
             </div>
           )}
 
-          {warnings.length === 0 && selectedCount > 0 && (
+          {selectedCount > 0 && compatibility.level === "unknown" && (
+            <div className="bg-amber-50 border border-amber-200 rounded-xl p-4">
+              <p className="text-sm font-semibold text-amber-800 mb-2">◷ Compatibilidade por confirmar</p>
+              <p className="text-xs text-amber-700 mb-2">Não existem dados técnicos suficientes para confirmar toda a montagem.</p>
+              {compatibility.issues.filter(i => i.level === "unknown").map((issue) => (
+                <p key={issue.code} className="text-xs text-amber-700">{issue.message}</p>
+              ))}
+            </div>
+          )}
+
+          {selectedCount > 0 && compatibility.level === "compatible" && compatibility.checked.length > 0 && (
             <div className="bg-green-50 border border-green-200 rounded-xl p-4">
-              <p className="text-sm text-green-700 font-medium">✅ Configuração compatível</p>
+              <p className="text-sm text-green-700 font-medium">✅ Compatibilidade verificada nos dados disponíveis</p>
+              <p className="text-xs text-green-700 mt-1">{compatibility.checked.join(" · ")}</p>
             </div>
           )}
 
           {selectedCount > 0 && (
-            <button onClick={addAllToCart} disabled={warnings.length > 0}
+            <button onClick={addAllToCart} disabled={compatibility.level === "incompatible"}
               className="w-full py-3 bg-lime-600 hover:bg-lime-700 disabled:bg-slate-300 text-white font-bold rounded-xl transition">
               Adicionar tudo ao Carrinho
             </button>
