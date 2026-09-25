@@ -1,6 +1,6 @@
 import { db } from "@/db";
 import { brands, catalogEnrichmentAttempts, productCatalogEnrichments, productSuppliers, products } from "@/db/schema";
-import { and, desc, eq, inArray, isNotNull, sql } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, or, sql } from "drizzle-orm";
 import { stageCatalogSnapshot } from "@/lib/services/catalog-enrichment-service";
 import { upcItemDbProvider } from "./providers/upcitemdb";
 
@@ -12,7 +12,7 @@ export async function getDiscoverySummary(supplierId: number) {
     .from(catalogEnrichmentAttempts).where(eq(catalogEnrichmentAttempts.supplierId, supplierId)).groupBy(catalogEnrichmentAttempts.status);
   const [eligible] = await db.select({ count: sql<number>`count(*)::int` }).from(productSuppliers)
     .innerJoin(products, eq(products.id, productSuppliers.productId))
-    .where(and(eq(productSuppliers.supplierId, supplierId), isNotNull(productSuppliers.supplierSku), isNotNull(products.ean)));
+    .where(and(eq(productSuppliers.supplierId, supplierId), isNotNull(productSuppliers.supplierSku), or(isNotNull(products.ean), isNotNull(productSuppliers.manufacturerPartNumber))));
   return { eligible: eligible?.count ?? 0, attempts: Object.fromEntries(rows.map(r => [r.status, r.count])) };
 }
 
@@ -26,7 +26,7 @@ export async function discoverCatalogBatch(params: { supplierId: number; provide
   }).from(productSuppliers)
     .innerJoin(products, eq(products.id, productSuppliers.productId))
     .leftJoin(brands, eq(brands.id, products.brandId))
-    .where(and(eq(productSuppliers.supplierId, params.supplierId), isNotNull(productSuppliers.supplierSku), isNotNull(products.ean), sql`${products.id} NOT IN (${attempted})`))
+    .where(and(eq(productSuppliers.supplierId, params.supplierId), isNotNull(productSuppliers.supplierSku), or(isNotNull(products.ean), isNotNull(productSuppliers.manufacturerPartNumber)), sql`${products.id} NOT IN (${attempted})`))
     .orderBy(products.id).limit(Math.max(1, Math.min(params.limit, 25)));
 
   const results: Array<{ productId: number; status: string; detail?: string | null; enrichmentId?: number }> = [];
@@ -43,7 +43,7 @@ export async function discoverCatalogBatch(params: { supplierId: number; provide
     }
     await db.insert(catalogEnrichmentAttempts).values({
       productId: c.productId, supplierId: params.supplierId, provider: params.provider,
-      lookupKey: `ean:${c.ean}`, status: result.status, detail: result.detail ?? null, retryAfter: result.retryAfter ?? null,
+      lookupKey: result.matchedBy === "manufacturer_mpn_exact" ? `manufacturer_mpn:${c.brand ?? ""}:${c.manufacturerPartNumber ?? ""}` : c.ean ? `ean:${c.ean}` : `manufacturer_mpn:${c.brand ?? ""}:${c.manufacturerPartNumber ?? ""}`, status: result.status, detail: result.detail ?? null, retryAfter: result.retryAfter ?? null,
     });
     results.push({ productId: c.productId, status: result.status, detail: result.detail, enrichmentId });
     if (result.status === "rate_limited") break;
