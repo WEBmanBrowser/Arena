@@ -1,56 +1,55 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
+
+  // Default Worker: production.
+  // Staging must always be deployed explicitly with:
+  //   npx wrangler deploy --env staging
   "name": "mdtech-loja",
 
   // Main entry point — custom worker that wraps OpenNext and adds scheduled handler
-  // The custom-worker.ts is compiled alongside .open-next/worker.js
   "main": "custom-worker.ts",
 
-  // Required for Node.js API compatibility (pg, crypto, buffer, etc.)
   "compatibility_flags": ["nodejs_compat"],
-
-  // Use a recent compatibility date for best process.env support
   "compatibility_date": "2025-04-01",
 
-  // Static assets binding
+  // Static assets shared by both environments.
   "assets": {
     "directory": ".open-next/assets",
     "binding": "ASSETS"
   },
 
-  // Hyperdrive binding for Neon PostgreSQL (staging configuration: mdtech-staging).
-  // The binding name HYPERDRIVE is required by src/db/index.ts.
-  // No localConnectionString and no credentials are stored here: for local
-  // development set DATABASE_URL in .env instead (see src/db/index.ts).
+  // Observability shared by both environments.
+  "observability": {
+    "enabled": true
+  },
+
+  // Cron deliberately disabled for S38.2.
+  // S38.3 will configure the actual reservation-expiry schedule.
+  "triggers": {
+    "crons": []
+  },
+
+  // ---------------------------------------------------------------------------
+  // PRODUCTION — mdtech-loja
+  // ---------------------------------------------------------------------------
   "hyperdrive": [
     {
       "binding": "HYPERDRIVE",
-      "id": "04d318e1eafa44d7becfabe756c11d20"
+      "id": "9c4d0587f9b840fe9bed8b4beba8a167"
     }
   ],
 
-  // Environment variables (non-secret)
   "vars": {
     "NODE_ENV": "production"
   },
 
-  // R2 bucket for product images (staging bucket: mdtech-staging).
-  // The binding name PRODUCT_IMAGES is required by src/lib/storage/r2.ts.
-  // Public access is NOT enabled; R2_PUBLIC_URL stays unset until a public
-  // domain is deliberately configured (getPublicUrl() then returns null).
   "r2_buckets": [
     {
       "binding": "PRODUCT_IMAGES",
-      "bucket_name": "mdtech-staging"
+      "bucket_name": "mdtech-production"
     }
   ],
 
-  // C.3.4.4 — Service Binding para o worker read-only `also-sftp-fetcher`
-  // (transporte SSH/SFTP isolado; a app NUNCA fala SSH diretamente).
-  // The binding name ALSO_SFTP_FETCHER is required by
-  // src/lib/supplier-import/sftp.ts. No local dev (sem contexto
-  // Cloudflare) o binding é null e o sync SFTP falha fechado com
-  // SFTP_BINDING_UNAVAILABLE (os testes injetam `fetcherImpl`).
   "services": [
     {
       "binding": "ALSO_SFTP_FETCHER",
@@ -58,29 +57,42 @@
     }
   ],
 
-  // Observability
-  "observability": {
-    "enabled": true
-  },
+  // ---------------------------------------------------------------------------
+  // STAGING — mdtech-staging
+  // ---------------------------------------------------------------------------
+  "env": {
+    "staging": {
+      "name": "mdtech-staging",
 
-  // Cron Trigger — expire pending order reservations every 10 minutes
-  "triggers": {
-    "crons": []
+      "vars": {
+        "NODE_ENV": "production"
+      },
+
+      "hyperdrive": [
+        {
+          "binding": "HYPERDRIVE",
+          "id": "04d318e1eafa44d7becfabe756c11d20"
+        }
+      ],
+
+      "r2_buckets": [
+        {
+          "binding": "PRODUCT_IMAGES",
+          "bucket_name": "mdtech-staging"
+        }
+      ],
+
+      "services": [
+        {
+          "binding": "ALSO_SFTP_FETCHER",
+          "service": "also-sftp-fetcher"
+        }
+      ]
+    }
   }
 
-  // SECRETS (set via `wrangler secret put` — NEVER stored in this file):
-  // Required before the first staging deploy:
-  // - JWT_SECRET             (sessions; auth throws without it)
-  // - CRON_SECRET            (REQUIRED for cron; there is no JWT_SECRET fallback)
-  // Required only for the features that use them:
-  // - BULK_PREVIEW_SECRET    (>=32 chars; admin bulk price preview)
-  // - EUPAGO_API_KEY / EUPAGO_OAUTH_CLIENT_ID / EUPAGO_OAUTH_CLIENT_SECRET /
-  //   EUPAGO_WEBHOOK_KEY     (Eupago payments + webhook verification)
-  // - SETTINGS_ENCRYPTION_KEY (64 hex chars / 32 bytes; encrypts Backoffice-managed
-  //   secrets at rest, e.g. Eupago credentials in the settings table. REQUIRED
-  //   before saving any Backoffice secret; rotation orphans existing rows,
-  //   which then fail closed until re-saved.)
-  // - EMAIL_API_KEY          (outbound email; without it emails are logged, not sent)
-  // Optional non-secret vars: EUPAGO_ENVIRONMENT (default sandbox), EMAIL_FROM,
-  // NEXT_PUBLIC_SITE_URL / SITE_URL, ORDER_RESERVATION_MINUTES, R2_PUBLIC_URL.
+  // Secrets remain outside this file and are managed with:
+  //   wrangler secret put ...
+  //
+  // Production and staging secrets must be managed independently.
 }

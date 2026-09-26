@@ -1,5 +1,5 @@
 "use client";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type {
   AdminOrderDetail,
   AdminOrderListPagination,
@@ -190,6 +190,7 @@ export default function AdminOrdersPage() {
   // B.3.5.2 — recovery action for an eligible ignored Eupago refund event.
   // Only the id of the event currently being recovered is tracked here; the
   // response payload sanitises the result and the table is reloaded.
+  const initialOrderOpened = useRef(false);
   const [recoveringEventId, setRecoveringEventId] = useState<number | null>(null);
   const [recoveryResult, setRecoveryResult] = useState<
     | null
@@ -244,6 +245,15 @@ export default function AdminOrdersPage() {
     } catch (e) { setError((e as Error).message); }
     setDetailLoading(false);
   };
+
+  useEffect(() => {
+    if (initialOrderOpened.current || typeof window === "undefined") return;
+    initialOrderOpened.current = true;
+    const raw = new URLSearchParams(window.location.search).get("orderId");
+    if (!raw || !/^\d+$/.test(raw)) return;
+    const id = Number(raw);
+    if (Number.isSafeInteger(id) && id > 0) void openDetail(id);
+  }, []);
 
   const changeStatus = async (status: string) => {
     if (!detail || saving) return;

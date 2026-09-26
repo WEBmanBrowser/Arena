@@ -232,14 +232,19 @@ export async function getDashboardData(): Promise<DashboardData> {
   const tz = "Europe/Lisbon";
 
   return db.transaction(async (tx) => {
-    // ── Time anchors: Europe/Lisbon day/month boundaries, all in SQL.
-    // created_at is timestamptz. date_trunc(... , now() AT TIME ZONE tz) yields
-    // a tz-local wall-clock timestamp; AT TIME ZONE tz on that converts it back
-    // to an absolute timestamptz instant, which compares directly against the
-    // column. No Date object is round-tripped through the driver.
-    const localStartOfDay = sql`date_trunc('day', now() AT TIME ZONE ${tz}) AT TIME ZONE ${tz}`;
-    const localStartOfMonth = sql`date_trunc('month', now() AT TIME ZONE ${tz}) AT TIME ZONE ${tz}`;
-    const localStartOfPrevMonth = sql`date_trunc('month', (now() AT TIME ZONE ${tz}) - interval '1 month') AT TIME ZONE ${tz}`;
+    // ── Time anchors: Europe/Lisbon calendar boundaries, expressed in the
+    // same representation as orders.created_at.
+    //
+    // IMPORTANT: created_at is PostgreSQL `timestamp without time zone`.
+    // Drizzle serializes JS Date values as UTC wall-clock timestamps. Therefore
+    // Lisbon calendar boundaries must be converted back to UTC wall-clock
+    // timestamps before comparing them with created_at. Comparing created_at
+    // directly with timestamptz makes PostgreSQL reinterpret the stored value
+    // using the session timezone and breaks the first hour after local midnight
+    // while WEST (UTC+1) is in effect.
+    const localStartOfDay = sql`(date_trunc('day', now() AT TIME ZONE ${tz}) AT TIME ZONE ${tz}) AT TIME ZONE 'UTC'`;
+    const localStartOfMonth = sql`(date_trunc('month', now() AT TIME ZONE ${tz}) AT TIME ZONE ${tz}) AT TIME ZONE 'UTC'`;
+    const localStartOfPrevMonth = sql`(date_trunc('month', (now() AT TIME ZONE ${tz}) - interval '1 month') AT TIME ZONE ${tz}) AT TIME ZONE 'UTC'`;
 
     // ── KPIs: revenue (paid orders only), integer cents in SQL ──
     const [todayAgg] = await tx
@@ -538,12 +543,12 @@ export async function getDashboardData(): Promise<DashboardData> {
       ),
       agg AS (
         SELECT
-          to_char(${orders.createdAt} AT TIME ZONE ${tz}, 'YYYY-MM-DD') AS day,
+          to_char(${orders.createdAt} AT TIME ZONE 'UTC' AT TIME ZONE ${tz}, 'YYYY-MM-DD') AS day,
           count(*)::int AS orders,
           COALESCE(SUM(ROUND(${orders.total}::numeric * 100)), 0) AS cents
         FROM ${orders}
         WHERE ${PAID}
-          AND ${orders.createdAt} >= (date_trunc('day', now() AT TIME ZONE ${tz}) - interval '29 days') AT TIME ZONE ${tz}
+          AND ${orders.createdAt} >= ((date_trunc('day', now() AT TIME ZONE ${tz}) - interval '29 days') AT TIME ZONE ${tz}) AT TIME ZONE 'UTC'
         GROUP BY 1
       )
       SELECT days.day,

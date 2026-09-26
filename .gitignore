@@ -22,3 +22,6 @@ Thumbs.db
 .wrangler/
 .vercel/
 coverage/
+
+# Neon CLI local context
+.neon

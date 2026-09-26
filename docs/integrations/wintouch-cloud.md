@@ -1,9 +1,13 @@
 # Wintouch Cloud — integração Arena (fase C.4: PROBE read-only)
 
-> Estado: **PROBE**. Existe cliente HTTP + diagnóstico read-only. **Não há
-> criação de documentos, não há escrita na BD, não há rotas HTTP novas e não
-> há qualquer chamada automática.** A faturação automática é uma fase futura
-> e depende da informação listada em “Informação ainda necessária”.
+> **Nota histórica:** este documento nasceu na fase C.4 PROBE e as secções abaixo
+> preservam o desenho/diagnóstico dessa fase. O código atual já avançou além do
+> PROBE: existe adapter de faturação, resolução de entidade, serviço de emissão,
+> rota admin `/api/admin/orders/[id]/wintouch-invoice` e integração pós-pagamento
+> opcional via `WINTOUCH_AUTO_INVOICE_PAID=true`. A emissão continua fail-closed,
+> idempotente e separada da confirmação do pagamento: uma falha Wintouch nunca
+> desfaz uma encomenda/pagamento confirmado. Antes de produção, validar todos os
+> IDs fiscais/configuração por GET e nunca executar POST fiscal apenas para teste.
 
 ## 1. Configuração
 
