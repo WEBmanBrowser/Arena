@@ -10,6 +10,7 @@
  *  - product CRUD is unaffected (regression guard).
  */
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { products, suppliers, productSuppliers } from "@/db/schema";
 import { eq, sql } from "drizzle-orm";
@@ -33,12 +34,12 @@ let productId = 0;
 let supplierA = 0;
 let supplierB = 0;
 
-function req(body: unknown) {
-  return new Request("http://localhost/api/admin/test", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
+function req(body: unknown, method = "POST") {
+  return new NextRequest("http://localhost/api/admin/test", {
+    method,
+    headers: { "Content-Type": "application/json", origin: "http://localhost" },
     body: JSON.stringify(body),
-  }) as never;
+  });
 }
 
 const ctx = () => ({ params: Promise.resolve({ id: String(productId) }) });
@@ -127,7 +128,7 @@ describe("B.6 — product supplier linking", () => {
     const rows = (await (await suppliersGET({} as never, ctx())).json()).suppliers;
     const linkB = rows.find((r: { supplierId: number }) => r.supplierId === supplierB);
 
-    const res = await suppliersPUT(req({ psId: linkB.id, isPreferred: true }), ctx());
+    const res = await suppliersPUT(req({ psId: linkB.id, isPreferred: true }, "PUT"), ctx());
     expect(res.status).toBe(200);
 
     const [p] = await db.select().from(products).where(eq(products.id, productId));
@@ -137,7 +138,7 @@ describe("B.6 — product supplier linking", () => {
   it("records the previous cost when the cost changes", async () => {
     await suppliersPOST(req({ supplierId: supplierA, costPrice: "10.00" }), ctx());
     const before = (await (await suppliersGET({} as never, ctx())).json()).suppliers[0];
-    await suppliersPUT(req({ psId: before.id, costPrice: "12.00" }), ctx());
+    await suppliersPUT(req({ psId: before.id, costPrice: "12.00" }, "PUT"), ctx());
     const after = (await (await suppliersGET({} as never, ctx())).json()).suppliers[0];
     expect(after.costPrice).toBe("12.00");
     expect(after.lastCostPrice).toBe("10.00");
@@ -146,13 +147,13 @@ describe("B.6 — product supplier linking", () => {
   it("unlinks a supplier", async () => {
     await suppliersPOST(req({ supplierId: supplierA }), ctx());
     const row = (await (await suppliersGET({} as never, ctx())).json()).suppliers[0];
-    const res = await suppliersDELETE(req({ psId: row.id }), ctx());
+    const res = await suppliersDELETE(req({ psId: row.id }, "DELETE"), ctx());
     expect(res.status).toBe(200);
     expect((await (await suppliersGET({} as never, ctx())).json()).suppliers).toHaveLength(0);
   });
 
   it("rejects a delete without psId", async () => {
-    expect((await suppliersDELETE(req({}), ctx())).status).toBe(400);
+    expect((await suppliersDELETE(req({}, "DELETE"), ctx())).status).toBe(400);
   });
 
   it("does not leak links across products", async () => {
@@ -182,7 +183,7 @@ describe("B.6 — regression: product row is untouched by supplier linking", () 
   it("clears the product cost when the preferred link is removed", async () => {
     await suppliersPOST(req({ supplierId: supplierA, costPrice: "77.00", isPreferred: true }), ctx());
     const row = (await (await suppliersGET({} as never, ctx())).json()).suppliers[0];
-    await suppliersDELETE(req({ psId: row.id }), ctx());
+    await suppliersDELETE(req({ psId: row.id }, "DELETE"), ctx());
     const [p] = await db.select().from(products).where(eq(products.id, productId));
     expect(p.costPrice).toBeNull();
   });

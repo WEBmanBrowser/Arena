@@ -36,7 +36,7 @@ function admin() {
 function putReq(body: unknown) {
   return new NextRequest("http://localhost/api/admin/settings", {
     method: "PUT",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", origin: "http://localhost" },
     body: JSON.stringify(body),
   });
 }

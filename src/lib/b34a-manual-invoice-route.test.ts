@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 import { db } from "@/db";
-import { auditLogs, invoiceDocuments, orders, payments, settings } from "@/db/schema";
+import { auditLogs, invoiceDocuments, orders, payments, settings, users } from "@/db/schema";
 import { and, eq, like } from "drizzle-orm";
 
 const getCurrentUserMock = vi.fn();
@@ -16,10 +16,26 @@ function makeUser(role: "customer" | "staff" | "manager" | "admin") {
   return { id: 1, email: `b34a-${role}@test.local`, name: `B34A ${role}`, role, phone: null, nif: null, company: null };
 }
 
+let userSeq = 0;
+
+async function createRealUser(role: "manager" | "admin") {
+  userSeq += 1;
+  const [user] = await db
+    .insert(users)
+    .values({
+      email: `b34a-route-${role}-${Date.now()}-${userSeq}@test.local`,
+      password: "x",
+      name: `B34A ${role}`,
+      role,
+    })
+    .returning();
+  return user;
+}
+
 function postReq(body: unknown) {
   return new NextRequest("http://localhost/api/admin/orders/1/manual-invoice", {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", origin: "http://localhost" },
     body: JSON.stringify(body),
   });
 }
@@ -64,7 +80,8 @@ describe("B.3.4A manual invoice route", () => {
 
   it("allows manager, ignores tampered amount/currency, and creates one non-PII audit", async () => {
     const order = await createOrder("44.44");
-    getCurrentUserMock.mockResolvedValue(makeUser("manager"));
+    const manager = await createRealUser("manager");
+    getCurrentUserMock.mockResolvedValue(manager);
     const res = await manualInvoicePOST(postReq({ officialReference: "FT ROUTE/OK", issuedAt: "2026-09-01", amountCents: 1, currency: "USD" }), { params: Promise.resolve({ id: String(order.id) }) });
     expect(res.status).toBe(201);
     const [doc] = await db.select().from(invoiceDocuments).where(eq(invoiceDocuments.orderId, order.id));
@@ -77,7 +94,8 @@ describe("B.3.4A manual invoice route", () => {
 
   it("rejects malformed issued date and duplicate invoice deterministically", async () => {
     const order = await createOrder("20.00");
-    getCurrentUserMock.mockResolvedValue(makeUser("admin"));
+    const admin = await createRealUser("admin");
+    getCurrentUserMock.mockResolvedValue(admin);
     expect((await manualInvoicePOST(postReq({ officialReference: "FT ROUTE/BADDATE", issuedAt: "not-a-date" }), { params: Promise.resolve({ id: String(order.id) }) })).status).toBe(400);
     expect((await manualInvoicePOST(postReq({ officialReference: "FT ROUTE/ONE" }), { params: Promise.resolve({ id: String(order.id) }) })).status).toBe(201);
     expect((await manualInvoicePOST(postReq({ officialReference: "FT ROUTE/TWO" }), { params: Promise.resolve({ id: String(order.id) }) })).status).toBe(409);

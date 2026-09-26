@@ -56,7 +56,7 @@ function listRequest(query = "") {
 function putRequest(body: unknown) {
   return new NextRequest(`http://localhost/api/admin/orders`, {
     method: "PUT",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", origin: "http://localhost" },
     body: typeof body === "string" ? body : JSON.stringify(body),
   });
 }

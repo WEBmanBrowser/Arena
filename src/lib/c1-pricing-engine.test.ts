@@ -115,7 +115,7 @@ describe("C.1 — cost change triggers an automatic recalculation", () => {
     const p = await makeProduct();
 
     const req = new NextRequest(`http://localhost/api/admin/products/${p.id}/suppliers`, {
-      method: "POST", headers: { "Content-Type": "application/json" },
+      method: "POST", headers: { "Content-Type": "application/json", origin: "http://localhost" },
       body: JSON.stringify({ supplierId, costPrice: 10, isPreferred: true }),
     });
     const res = await supplierPOST(req, { params: Promise.resolve({ id: String(p.id) }) });
@@ -130,13 +130,13 @@ describe("C.1 — cost change triggers an automatic recalculation", () => {
     await globalRule(20);
     const p = await makeProduct();
     await supplierPOST(
-      new NextRequest("http://localhost/x", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ supplierId, costPrice: 10, isPreferred: true }) }),
+      new NextRequest("http://localhost/x", { method: "POST", headers: { "Content-Type": "application/json", origin: "http://localhost" }, body: JSON.stringify({ supplierId, costPrice: 10, isPreferred: true }) }),
       { params: Promise.resolve({ id: String(p.id) }) }
     );
     const [ps] = await db.select().from(productSuppliers).where(eq(productSuppliers.productId, p.id));
 
     await supplierPUT(
-      new NextRequest("http://localhost/x", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ psId: ps.id, costPrice: 20 }) }),
+      new NextRequest("http://localhost/x", { method: "PUT", headers: { "Content-Type": "application/json", origin: "http://localhost" }, body: JSON.stringify({ psId: ps.id, costPrice: 20 }) }),
       { params: Promise.resolve({ id: String(p.id) }) }
     );
 
@@ -153,7 +153,7 @@ describe("C.1 — cost change triggers an automatic recalculation", () => {
     const [before] = await db.select().from(products).where(eq(products.id, p.id));
 
     await supplierPOST(
-      new NextRequest("http://localhost/x", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ supplierId, costPrice: 40, isPreferred: true }) }),
+      new NextRequest("http://localhost/x", { method: "POST", headers: { "Content-Type": "application/json", origin: "http://localhost" }, body: JSON.stringify({ supplierId, costPrice: 40, isPreferred: true }) }),
       { params: Promise.resolve({ id: String(p.id) }) }
     );
 
@@ -169,7 +169,7 @@ describe("C.1 — cost change triggers an automatic recalculation", () => {
     await recalculateProductPrice(p.id);
 
     const res = await productsPUT(new NextRequest("http://localhost/api/admin/products", {
-      method: "PUT", headers: { "Content-Type": "application/json" },
+      method: "PUT", headers: { "Content-Type": "application/json", origin: "http://localhost" },
       body: JSON.stringify({ id: p.id, costPrice: "50.00" }),
     }) as never);
     expect(res.status).toBe(200);
@@ -211,7 +211,7 @@ describe("C.1 — manual price protection is absolute", () => {
     const p = await makeProduct({ price: "99.99", priceMode: "manual" });
 
     await supplierPOST(
-      new NextRequest("http://localhost/x", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ supplierId, costPrice: 10, isPreferred: true }) }),
+      new NextRequest("http://localhost/x", { method: "POST", headers: { "Content-Type": "application/json", origin: "http://localhost" }, body: JSON.stringify({ supplierId, costPrice: 10, isPreferred: true }) }),
       { params: Promise.resolve({ id: String(p.id) }) }
     );
 
@@ -226,7 +226,7 @@ describe("C.1 — manual price protection is absolute", () => {
     await recalculateProductPrice(p.id);
 
     await productsPUT(new NextRequest("http://localhost/x", {
-      method: "PUT", headers: { "Content-Type": "application/json" },
+      method: "PUT", headers: { "Content-Type": "application/json", origin: "http://localhost" },
       body: JSON.stringify({ id: p.id, price: "42.00" }),
     }) as never);
 
@@ -298,7 +298,7 @@ describe("C.1 — safe refusals: the engine never invents a price", () => {
     await globalRule(20);
     const p = await makeProduct();
     await supplierPOST(
-      new NextRequest("http://localhost/x", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ supplierId, costPrice: 10, isPreferred: true }) }),
+      new NextRequest("http://localhost/x", { method: "POST", headers: { "Content-Type": "application/json", origin: "http://localhost" }, body: JSON.stringify({ supplierId, costPrice: 10, isPreferred: true }) }),
       { params: Promise.resolve({ id: String(p.id) }) }
     );
     const { deleteProductSupplier } = await import("@/lib/services/product-supplier-service");

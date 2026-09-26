@@ -8,6 +8,7 @@
  * The pricing engine itself (bulk-pricing.ts) is NOT modified — only consumed.
  */
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { products } from "@/db/schema";
 import { eq, sql } from "drizzle-orm";
@@ -26,11 +27,11 @@ let prevSecret: string | undefined;
 let productId = 0;
 
 function req(body: unknown) {
-  return new Request("http://localhost/api/admin/bulk", {
+  return new NextRequest("http://localhost/api/admin/bulk", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", origin: "http://localhost" },
     body: JSON.stringify(body),
-  }) as never;
+  });
 }
 
 async function cleanup() {

@@ -30,7 +30,7 @@ let supplierId = 0, brandId = 0, rootCatId = 0, childCatId = 0, productId = 0;
 
 function req(body: unknown) {
   return new NextRequest("http://localhost/api/admin/pricing/rules", {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    method: "POST", headers: { "Content-Type": "application/json", origin: "http://localhost" }, body: JSON.stringify(body),
   });
 }
 

@@ -17,6 +17,7 @@
  * that will produce.
  */
 import { NextRequest, NextResponse } from "next/server";
+import { csrfGuard } from "@/lib/csrf";
 import { db } from "@/db";
 import { products, brands, categories, stockMovements, suppliers, productSuppliers, shippingClasses } from "@/db/schema";
 import { eq, sql, and, inArray } from "drizzle-orm";
@@ -41,6 +42,8 @@ interface ImportResult {
 }
 
 export async function POST(req: NextRequest) {
+  const csrf = csrfGuard(req);
+  if (csrf) return csrf;
   const user = await getCurrentUser();
   if (!user || !isManager(user.role)) return NextResponse.json({ error: "Não autorizado" }, { status: 403 });
 

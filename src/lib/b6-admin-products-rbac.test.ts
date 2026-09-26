@@ -10,6 +10,7 @@
  * real against the real database.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { NextRequest } from "next/server";
 
 const getCurrentUserMock = vi.fn();
 vi.mock("@/lib/auth", async (importOriginal) => {
@@ -30,18 +31,18 @@ function user(role: Role | null) {
 
 const params = Promise.resolve({ id: "1" });
 
-function jsonReq(body: unknown) {
-  return new Request("http://localhost/api/admin/test", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
+function jsonReq(body: unknown, method = "POST") {
+  return new NextRequest("http://localhost/api/admin/test", {
+    method,
+    headers: { "Content-Type": "application/json", origin: "http://localhost" },
     body: JSON.stringify(body),
-  }) as never;
+  });
 }
 
 function formReq() {
   const fd = new FormData();
   fd.append("file", new File([new Uint8Array([1, 2, 3])], "x.png", { type: "image/png" }));
-  return new Request("http://localhost/api/admin/test", { method: "POST", body: fd }) as never;
+  return new NextRequest("http://localhost/api/admin/test", { method: "POST", headers: { origin: "http://localhost" }, body: fd });
 }
 
 beforeEach(() => getCurrentUserMock.mockReset());
@@ -58,15 +59,15 @@ describe("B.6 — product images RBAC", () => {
   it("refuses customer on upload, mutate and delete", async () => {
     getCurrentUserMock.mockResolvedValue(user("customer"));
     expect((await imagesPOST(formReq(), { params })).status).toBe(403);
-    expect((await imagesPUT(jsonReq({ action: "setPrimary", imageId: 1 }), { params })).status).toBe(403);
-    expect((await imagesDELETE(jsonReq({ imageId: 1 }), { params })).status).toBe(403);
+    expect((await imagesPUT(jsonReq({ action: "setPrimary", imageId: 1 }, "PUT"), { params })).status).toBe(403);
+    expect((await imagesDELETE(jsonReq({ imageId: 1 }, "DELETE"), { params })).status).toBe(403);
   });
 
   it("refuses staff on write operations (manager+ required)", async () => {
     getCurrentUserMock.mockResolvedValue(user("staff"));
     expect((await imagesPOST(formReq(), { params })).status).toBe(403);
-    expect((await imagesPUT(jsonReq({ action: "setPrimary", imageId: 1 }), { params })).status).toBe(403);
-    expect((await imagesDELETE(jsonReq({ imageId: 1 }), { params })).status).toBe(403);
+    expect((await imagesPUT(jsonReq({ action: "setPrimary", imageId: 1 }, "PUT"), { params })).status).toBe(403);
+    expect((await imagesDELETE(jsonReq({ imageId: 1 }, "DELETE"), { params })).status).toBe(403);
   });
 
   it("allows staff to read the gallery", async () => {
@@ -78,7 +79,7 @@ describe("B.6 — product images RBAC", () => {
 
   it("lets manager past the auth gate on writes (not a 403)", async () => {
     getCurrentUserMock.mockResolvedValue(user("manager"));
-    const res = await imagesPUT(jsonReq({ action: "setPrimary", imageId: 999999 }), { params });
+    const res = await imagesPUT(jsonReq({ action: "setPrimary", imageId: 999999 }, "PUT"), { params });
     expect(res.status).not.toBe(403);
   });
 });
@@ -95,8 +96,8 @@ describe("B.6 — product suppliers RBAC", () => {
     for (const role of ["customer", "staff"] as const) {
       getCurrentUserMock.mockResolvedValue(user(role));
       expect((await suppliersPOST(jsonReq({ supplierId: 1 }), { params })).status).toBe(403);
-      expect((await suppliersPUT(jsonReq({ psId: 1 }), { params })).status).toBe(403);
-      expect((await suppliersDELETE(jsonReq({ psId: 1 }), { params })).status).toBe(403);
+      expect((await suppliersPUT(jsonReq({ psId: 1 }, "PUT"), { params })).status).toBe(403);
+      expect((await suppliersDELETE(jsonReq({ psId: 1 }, "DELETE"), { params })).status).toBe(403);
     }
   });
 

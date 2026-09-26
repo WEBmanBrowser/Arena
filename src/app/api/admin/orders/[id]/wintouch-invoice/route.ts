@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { csrfGuard } from "@/lib/csrf";
 import { getCurrentUser, isManager } from "@/lib/auth";
 import { issueWintouchInvoiceForOrder } from "@/lib/services/wintouch-invoicing-service";
 
@@ -14,7 +15,9 @@ const SAFE_ERRORS: Record<string, { status: number; message: string }> = {
   WINTOUCH_INVALID_ORDER_TOTAL: { status: 409, message: "A encomenda contém um total inválido para faturação" },
 };
 
-export async function POST(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  const csrf = csrfGuard(req);
+  if (csrf) return csrf;
   const user = await getCurrentUser();
   if (!user) return NextResponse.json({ error: "Sessão requerida" }, { status: 401 });
   if (!isManager(user.role)) return NextResponse.json({ error: "Operação requer nível manager ou admin" }, { status: 403 });

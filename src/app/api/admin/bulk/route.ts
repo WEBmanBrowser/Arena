@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { csrfGuard } from "@/lib/csrf";
 import { db } from "@/db";
 import { products } from "@/db/schema";
 import { inArray } from "drizzle-orm";
@@ -10,6 +11,8 @@ import { previewSchema, applySchema, simpleActionSchema } from "@/lib/bulk-schem
 import type { BulkPriceOp } from "@/lib/bulk-pricing";
 
 export async function POST(req: NextRequest) {
+  const csrf = csrfGuard(req);
+  if (csrf) return csrf;
   const user = await getCurrentUser();
   if (!user || !isManager(user.role)) return NextResponse.json({ error: "Não autorizado" }, { status: 403 });
 

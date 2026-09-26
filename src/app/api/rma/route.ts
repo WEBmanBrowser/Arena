@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { csrfGuard } from "@/lib/csrf";
 import { db } from "@/db";
 import { orders, rmaRequests } from "@/db/schema";
 import { and, desc, eq } from "drizzle-orm";
@@ -21,6 +22,8 @@ export async function GET() {
 }
 
 export async function POST(req: NextRequest) {
+  const csrf = csrfGuard(req);
+  if (csrf) return csrf;
   const user = await getCurrentUser();
   if (!user) return NextResponse.json({ error: "Não autenticado" }, { status: 401 });
   const parsed = createRmaSchema.safeParse(await req.json().catch(() => null));

@@ -68,6 +68,8 @@ export async function GET(req: NextRequest) {
 }
 
 export async function PUT(req: NextRequest) {
+  const csrf = csrfGuard(req);
+  if (csrf) return csrf;
   const user = await getCurrentUser();
   if (!user) return NextResponse.json({ error: "Sessão requerida" }, { status: 401 });
   if (!isStaff(user.role)) return NextResponse.json({ error: "Não autorizado" }, { status: 403 });

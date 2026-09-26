@@ -30,7 +30,7 @@ let originalSecret: string | undefined;
 
 function post(body: unknown) {
   return new NextRequest("http://localhost/api/admin/pricing/recalculate", {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    method: "POST", headers: { "Content-Type": "application/json", origin: "http://localhost" }, body: JSON.stringify(body),
   });
 }
 

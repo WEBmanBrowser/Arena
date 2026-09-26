@@ -9,6 +9,7 @@
  * can push prices that were never previewed.
  */
 import { NextRequest, NextResponse } from "next/server";
+import { csrfGuard } from "@/lib/csrf";
 import { getCurrentUser, isStaff, isManager } from "@/lib/auth";
 import { validate } from "@/lib/validation";
 import { recalcRequestSchema } from "@/lib/pricing-rules-schemas";
@@ -40,6 +41,8 @@ function mapError(e: unknown): NextResponse {
 }
 
 export async function POST(req: NextRequest) {
+  const csrf = csrfGuard(req);
+  if (csrf) return csrf;
   const user = await getCurrentUser();
   if (!user || !isStaff(user.role)) return NextResponse.json({ error: "Não autorizado" }, { status: 403 });
 

@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { csrfGuard } from "@/lib/csrf";
 import { db } from "@/db";
 import { settings } from "@/db/schema";
 import { eq } from "drizzle-orm";
@@ -29,6 +30,8 @@ export async function GET() {
 }
 
 export async function PUT(req: NextRequest) {
+  const csrf = csrfGuard(req);
+  if (csrf) return csrf;
   const user = await getCurrentUser();
   if (!user || !isAdmin(user.role)) return NextResponse.json({ error: "Não autorizado" }, { status: 403 });
 

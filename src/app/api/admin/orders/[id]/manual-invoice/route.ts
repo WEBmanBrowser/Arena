@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { csrfGuard } from "@/lib/csrf";
 import { getCurrentUser, isManager } from "@/lib/auth";
 import { ManualInvoicingError, recordManualInvoice } from "@/lib/manual-invoicing";
 import { z } from "zod";
@@ -9,6 +10,8 @@ const schema = z.object({
 });
 
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  const csrf = csrfGuard(req);
+  if (csrf) return csrf;
   const user = await getCurrentUser();
   if (!user) return NextResponse.json({ error: "Sessão requerida" }, { status: 401 });
   if (!isManager(user.role)) return NextResponse.json({ error: "Operação requer nível manager ou admin" }, { status: 403 });

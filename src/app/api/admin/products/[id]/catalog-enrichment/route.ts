@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { csrfGuard } from "@/lib/csrf";
 import { getCurrentUser, isStaff, isManager } from "@/lib/auth";
 import { createAuditLog } from "@/lib/audit";
 import { applyCatalogSnapshot, getCatalogEnrichment, stageCatalogSnapshot } from "@/lib/services/catalog-enrichment-service";
@@ -23,6 +24,8 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
 }
 
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  const csrf = csrfGuard(req);
+  if (csrf) return csrf;
   const user = await getCurrentUser();
   if (!user || !isManager(user.role)) return NextResponse.json({ error: "Não autorizado" }, { status: 403 });
   const productId = Number((await params).id);

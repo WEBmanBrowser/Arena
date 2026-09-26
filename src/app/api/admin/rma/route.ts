@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { csrfGuard } from "@/lib/csrf";
 import { db } from "@/db";
 import { rmaRequests, users, RMA_STATUSES } from "@/db/schema";
 import { eq, desc } from "drizzle-orm";
@@ -27,6 +28,8 @@ export async function GET() {
 }
 
 export async function PUT(req: NextRequest) {
+  const csrf = csrfGuard(req);
+  if (csrf) return csrf;
   const user = await getCurrentUser();
   if (!user || !isStaff(user.role)) return NextResponse.json({ error: "Não autorizado" }, { status: 403 });
   const parsed = updateRmaSchema.safeParse(await req.json().catch(() => null));

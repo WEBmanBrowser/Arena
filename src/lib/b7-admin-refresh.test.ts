@@ -33,7 +33,7 @@ function getReq(qs: string) {
 function jsonReq(body: unknown) {
   return new NextRequest("http://localhost/api/admin/products", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", origin: "http://localhost" },
     body: JSON.stringify(body),
   }) as never;
 }
@@ -104,7 +104,7 @@ describe("B.7 — a write is immediately visible to the next read", () => {
     const created = await (await productsPOST(jsonReq(newProduct(marker)))).json();
 
     const adj = new NextRequest("http://localhost/api/admin/inventory", {
-      method: "POST", headers: { "Content-Type": "application/json" },
+      method: "POST", headers: { "Content-Type": "application/json", origin: "http://localhost" },
       body: JSON.stringify({ productId: created.product.id, quantity: 37, type: "adjustment", reason: "B7 test" }),
     }) as never;
     expect((await inventoryPOST(adj)).status).toBe(200);

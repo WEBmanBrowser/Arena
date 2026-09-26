@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { csrfGuard } from "@/lib/csrf";
 import { createAuditLog } from "@/lib/audit";
 import { getCurrentUser, isManager, isStaff } from "@/lib/auth";
 import { discoverCatalogBatch, getDiscoverySummary, resetDiscoveryAttempts } from "@/lib/catalog-enrichment/discovery-service";
@@ -13,6 +14,8 @@ export async function GET(req: NextRequest) {
   return NextResponse.json(await getDiscoverySummary(supplierId));
 }
 export async function POST(req: NextRequest) {
+  const csrf = csrfGuard(req);
+  if (csrf) return csrf;
   const user = await getCurrentUser(); if (!user || !isManager(user.role)) return NextResponse.json({ error: "Não autorizado" }, { status: 403 });
   const raw = await req.json(); const run = runSchema.safeParse(raw);
   if (run.success) { const result = await discoverCatalogBatch(run.data); await createAuditLog({ userId:user.id, action:"catalog_enrichment.discovery_batch", entity:"supplier", entityId:run.data.supplierId, details:{provider:run.data.provider,processed:result.processed} }); return NextResponse.json(result); }
