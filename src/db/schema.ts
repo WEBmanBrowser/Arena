@@ -1,6 +1,6 @@
 import {
   pgTable, serial, varchar, text, integer, boolean, timestamp, date, decimal,
-  jsonb, index, uniqueIndex, check, pgSequence, foreignKey
+  jsonb, index, unique, uniqueIndex, check, pgSequence, foreignKey
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 
@@ -645,7 +645,7 @@ export const payments = pgTable("payments", {
   // PAYMENT P0 (item 4/5/6) — FK target for the composite
   // (payment_id, order_id) references that make cross-order linkage
   // impossible at the PostgreSQL level for attempts and refunds.
-  uniqueIndex("payments_id_order_unique").on(t.id, t.orderId),
+  unique("payments_id_order_unique").on(t.id, t.orderId),
 ]);
 
 // ─── EMAIL NOTIFICATIONS ──────────────────────────────────
